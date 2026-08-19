@@ -12,8 +12,13 @@ if ($FakeRemote -and $BrowserOnly) {
     exit $LASTEXITCODE
 }
 
-if ($FakeRemote -or $BrowserOnly) {
-    throw "-FakeRemote and -BrowserOnly must be used together."
+if ($FakeRemote) {
+    throw "-FakeRemote requires -BrowserOnly."
+}
+
+if ($BrowserOnly) {
+    & .\.venv\Scripts\python.exe -m broccoli_desktop.browser_only --port $Port
+    exit $LASTEXITCODE
 }
 
 & .\.venv\Scripts\python.exe -m broccoli_desktop

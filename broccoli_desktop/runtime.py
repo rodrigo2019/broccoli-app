@@ -132,8 +132,10 @@ class PyWebViewWindow:
 class UvicornLoopbackServer:
     """Run the local FastAPI app on one selected loopback port in a worker thread."""
 
-    def __init__(self, services_factory: Callable[[int], Services]) -> None:
-        self._port = _available_loopback_port()
+    def __init__(
+        self, services_factory: Callable[[int], Services], *, port: int | None = None
+    ) -> None:
+        self._port = _available_loopback_port() if port is None else _validated_loopback_port(port)
         self._services = services_factory(self._port)
         self._server = uvicorn.Server(
             create_uvicorn_config(create_app(self._services), port=self._port)
@@ -365,7 +367,57 @@ def start(config: RuntimeConfig) -> None:
     start_runtime(config)
 
 
-def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
+def start_browser_only(
+    config: RuntimeConfig,
+    *,
+    port: int,
+    server_factory: Callable[[RuntimeConfig, int], LoopbackServerProtocol] | None = None,
+    wait_for_interrupt: Callable[[], None] | None = None,
+) -> LoopbackServerProtocol:
+    """Serve the production loopback UI without constructing a native window or tray."""
+    loopback_port = _validated_loopback_port(port)
+    server = (server_factory or _create_browser_only_server)(config, loopback_port)
+    try:
+        if not server.start():
+            raise RuntimeError("Broccoli Desktop could not start its local service.")
+        try:
+            (wait_for_interrupt or _wait_for_interrupt)()
+        except KeyboardInterrupt:
+            pass
+        return server
+    finally:
+        _stop_browser_only_server(server)
+
+
+def _create_browser_only_server(config: RuntimeConfig, port: int) -> UvicornLoopbackServer:
+    return _create_production_server(config, port=port)
+
+
+def _wait_for_interrupt() -> None:
+    threading.Event().wait()
+
+
+def _stop_browser_only_server(server: LoopbackServerProtocol) -> None:
+    """Stop capture before the loopback server, even when one cleanup step fails."""
+    failures: list[Exception] = []
+    session = server.controller
+    if session is not None:
+        for action in (session.stop_local_capture, lambda: server.run_coroutine(session.stop())):
+            try:
+                action()
+            except Exception as error:
+                failures.append(error)
+    try:
+        server.shutdown()
+    except Exception as error:
+        failures.append(error)
+    if failures:
+        raise failures[0]
+
+
+def _create_production_server(
+    config: RuntimeConfig, *, port: int | None = None
+) -> UvicornLoopbackServer:
     websocket_path = _configured_websocket_path(config.websocket_path)
 
     def create_services(port: int) -> Services:
@@ -380,7 +432,7 @@ def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
             device_settings=LocalDeviceSettings(),
         )
 
-    return UvicornLoopbackServer(create_services)
+    return UvicornLoopbackServer(create_services, port=port)
 
 
 def _configured_websocket_path(path: str | None) -> str:
@@ -411,6 +463,13 @@ def _available_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
         reservation.bind((LOOPBACK_HOST, 0))
         return int(reservation.getsockname()[1])
+
+
+def _validated_loopback_port(port: int) -> int:
+    """Accept one concrete TCP port for a server that always binds loopback only."""
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("The loopback port must be an integer between 1 and 65535.")
+    return port
 
 
 def _create_pywebview_window(title: str, url: str) -> PyWebViewWindow:

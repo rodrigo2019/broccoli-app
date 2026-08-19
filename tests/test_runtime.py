@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -16,6 +17,7 @@ from broccoli_desktop.runtime import (
     UvicornLoopbackServer,
     _configured_websocket_path,
     _create_production_server,
+    start_browser_only,
     start_runtime,
 )
 from tests.fakes import (
@@ -158,6 +160,26 @@ class FakeServer:
 
 
 @dataclass
+class FakeBrowserOnlyServerFactory:
+    """Compose a loopback fake while making GUI construction impossible to hide."""
+
+    server: FakeServer = field(default_factory=lambda: FakeServer(controller=FakeSession()))
+    received_config: RuntimeConfig | None = None
+    received_port: int | None = None
+    window_created: bool = False
+
+    @property
+    def started(self) -> bool:
+        return self.server.started
+
+    def __call__(self, config: RuntimeConfig, port: int) -> FakeServer:
+        self.received_config = config
+        self.received_port = port
+        self.server.url = f"http://127.0.0.1:{port}"
+        return self.server
+
+
+@dataclass
 class FailingStopServer(FakeServer):
     """Fail exactly one controller-stop scheduling attempt without leaking a coroutine."""
 
@@ -261,6 +283,109 @@ def runtime(
         tray=fake_tray,
         dialog=fake_dialog,
     )
+
+
+@fixture
+def fake_browser_only_server_factory() -> FakeBrowserOnlyServerFactory:
+    return FakeBrowserOnlyServerFactory()
+
+
+def test_browser_only_starts_the_real_loopback_server_at_the_requested_port(
+    fake_browser_only_server_factory: FakeBrowserOnlyServerFactory,
+) -> None:
+    """A caller-selected loopback port must start without any native GUI surface."""
+    config = RuntimeConfig(
+        environment="local",
+        server_url="http://127.0.0.1:8000",
+        websocket_path="/ws/listening/",
+    )
+
+    server = start_browser_only(
+        config,
+        port=8765,
+        server_factory=fake_browser_only_server_factory,
+        wait_for_interrupt=lambda: None,
+    )
+
+    assert server.url == "http://127.0.0.1:8765"
+    assert fake_browser_only_server_factory.received_config == config
+    assert fake_browser_only_server_factory.received_port == 8765
+    assert fake_browser_only_server_factory.started is True
+    assert fake_browser_only_server_factory.window_created is False
+
+
+def test_browser_only_stops_capture_before_shutting_down_the_server(
+    fake_browser_only_server_factory: FakeBrowserOnlyServerFactory,
+) -> None:
+    """Interrupt cleanup must stop the active capture even when there is no tray runtime."""
+    session = fake_browser_only_server_factory.server.controller
+    assert session is not None
+    session.state = ConnectionState.STREAMING
+
+    start_browser_only(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        port=8765,
+        server_factory=fake_browser_only_server_factory,
+        wait_for_interrupt=lambda: None,
+    )
+
+    assert session.local_capture_stop_calls == 1
+    assert session.stop_calls == 1
+    assert fake_browser_only_server_factory.server.shutdown_calls == 1
+
+
+def test_browser_only_rejects_a_port_outside_the_tcp_range() -> None:
+    """An invalid requested port must fail before production services can bind it."""
+    factory_called = False
+
+    def create_server(_config: RuntimeConfig, _port: int) -> FakeServer:
+        nonlocal factory_called
+        factory_called = True
+        return FakeServer()
+
+    with raises(ValueError, match="between 1 and 65535"):
+        start_browser_only(
+            RuntimeConfig(
+                environment="local",
+                server_url="http://127.0.0.1:8000",
+                websocket_path="/ws/listening/",
+            ),
+            port=0,
+            server_factory=create_server,
+            wait_for_interrupt=lambda: None,
+        )
+
+    assert factory_called is False
+
+
+def test_browser_only_command_reuses_runtime_config_and_forwards_the_port(
+    monkeypatch: Any,
+) -> None:
+    """The browser-only command must select the same local backend as the desktop launcher."""
+    browser_only = import_module("broccoli_desktop.browser_only")
+    received: list[tuple[RuntimeConfig, int]] = []
+
+    def start(config: RuntimeConfig, *, port: int) -> None:
+        received.append((config, port))
+
+    monkeypatch.setattr(browser_only, "start_browser_only", start)
+
+    browser_only.main(["--local", "--port", "8765"])
+
+    assert received == [
+        (
+            RuntimeConfig(
+                environment="local",
+                server_url="http://127.0.0.1:8000",
+                websocket_path=None,
+            ),
+            8765,
+        )
+    ]
 
 
 def test_window_close_hides_instead_of_stopping_capture(
