@@ -9,4 +9,5 @@ dist/
 !installer/BroccoliDesktop.spec
 node_modules/
 artifacts/visual/
+artifacts/integration/
 broccoli_desktop/static/output.css
