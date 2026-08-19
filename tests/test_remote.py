@@ -56,6 +56,23 @@ class FakeSocket:
 
 
 @dataclass
+class FailingSocket(FakeSocket):
+    secret_text: str = "server payload that must not escape"
+    fail_send: bool = False
+    fail_close: bool = False
+
+    async def send(self, message: bytes | str) -> None:
+        if self.fail_send:
+            raise RuntimeError(self.secret_text)
+        await super().send(message)
+
+    async def close(self) -> None:
+        if self.fail_close:
+            raise RuntimeError(self.secret_text)
+        await super().close()
+
+
+@dataclass
 class FakeSocketFactory:
     socket: FakeSocket
     urls: list[str] = field(default_factory=list)
@@ -123,7 +140,12 @@ def fake_socket_factory() -> FakeSocketFactory:
 async def test_list_sessions_sends_token_header_and_maps_cursor_page(
     fake_transport: FakeTransport,
 ) -> None:
-    remote = HttpListeningRemote("https://broccoli.example", "secret", fake_transport)
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        fake_transport,
+        websocket_path="/ws/listening/",
+    )
 
     page = await remote.list_sessions(cursor="next", query="daily")
 
@@ -176,7 +198,12 @@ async def test_rest_resources_map_sessions_segments_and_title_without_network() 
             },
         ]
     )
-    remote = HttpListeningRemote("http://broccoli.example", "secret", transport)
+    remote = HttpListeningRemote(
+        "http://broccoli.example",
+        "secret",
+        transport,
+        websocket_path="/ws/listening/",
+    )
 
     verified = await remote.verify_token()
     session = await remote.get_session("session-1")
@@ -203,7 +230,10 @@ async def test_remote_delta_and_segment_share_the_utterance_identifier(
     fake_socket_factory: FakeSocketFactory,
 ) -> None:
     remote = HttpListeningRemote(
-        "https://broccoli.example", "secret", socket_factory=fake_socket_factory
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/backend-owner-confirmed/",
+        socket_factory=fake_socket_factory,
     )
 
     stream = await remote.connect_stream(resume_code="session-1", device_label="Laptop")
@@ -212,7 +242,7 @@ async def test_remote_delta_and_segment_share_the_utterance_identifier(
     assert isinstance(events[0], TranscriptDeltaEvent)
     assert isinstance(events[1], TranscriptSegmentEvent)
     assert events[0].utterance_id == events[1].utterance_id
-    assert fake_socket_factory.urls == ["wss://broccoli.example/ws/listening/"]
+    assert fake_socket_factory.urls == ["wss://broccoli.example/backend-owner-confirmed/"]
     assert fake_socket_factory.headers == [{"Authorization": "Token secret"}]
     assert json.loads(fake_socket_factory.socket.sent_text[0]) == {
         "type": "session.start",
@@ -238,7 +268,12 @@ async def test_stream_parses_a_started_event_with_resume_offset() -> None:
             ]
         )
     )
-    remote = HttpListeningRemote("http://broccoli.example", "secret", socket_factory=socket_factory)
+    remote = HttpListeningRemote(
+        "http://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=socket_factory,
+    )
 
     stream = await remote.connect_stream(resume_code="session-1", device_label="Laptop")
     events = [event async for event in stream.events()]
@@ -261,7 +296,10 @@ async def test_unknown_event_reports_only_its_type_not_remote_payload() -> None:
         FakeSocket(messages=[json.dumps({"type": "unknown.event", "text": secret_text})])
     )
     remote = HttpListeningRemote(
-        "https://broccoli.example", "secret", socket_factory=socket_factory
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=socket_factory,
     )
     stream = await remote.connect_stream(resume_code=None, device_label="Laptop")
 
@@ -277,7 +315,10 @@ async def test_stream_sends_binary_frames_control_messages_and_closes(
     fake_socket_factory: FakeSocketFactory,
 ) -> None:
     remote = HttpListeningRemote(
-        "https://broccoli.example", "secret", socket_factory=fake_socket_factory
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=fake_socket_factory,
     )
     stream = await remote.connect_stream(resume_code=None, device_label="Laptop")
 
@@ -288,6 +329,47 @@ async def test_stream_sends_binary_frames_control_messages_and_closes(
     assert fake_socket_factory.socket.sent_bytes == [b"frame"]
     assert json.loads(fake_socket_factory.socket.sent_text[-1]) == {"type": "session.end"}
     assert fake_socket_factory.socket.closed is True
+
+
+@pytest.mark.asyncio
+async def test_socket_send_and_close_failures_are_sanitized() -> None:
+    secret_text = "server payload that must not escape"
+    initial_factory = FakeSocketFactory(FailingSocket(messages=[], fail_send=True))
+    initial_remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=initial_factory,
+    )
+
+    with pytest.raises(Exception) as initial_error:
+        await initial_remote.connect_stream(resume_code=None, device_label="Laptop")
+
+    assert str(initial_error.value) == "Remote request failed."
+    assert secret_text not in str(initial_error.value)
+
+    socket = FailingSocket(messages=[])
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=FakeSocketFactory(socket),
+    )
+    stream = await remote.connect_stream(resume_code=None, device_label="Laptop")
+    socket.fail_send = True
+
+    with pytest.raises(Exception) as send_error:
+        await stream.send_bytes(b"frame")
+    with pytest.raises(Exception) as control_error:
+        await stream.send_control({"type": "session.end"})
+    socket.fail_send = False
+    socket.fail_close = True
+    with pytest.raises(Exception) as close_error:
+        await stream.close()
+
+    for error in (send_error.value, control_error.value, close_error.value):
+        assert str(error) == "Remote request failed."
+        assert secret_text not in str(error)
 
 
 @pytest.mark.asyncio

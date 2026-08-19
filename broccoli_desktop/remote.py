@@ -14,7 +14,6 @@ import websockets
 from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, TranscriptSegment
 
 SESSION_LIST_PATH = "/api/listening/desktop/sessions/"
-STREAM_PATH = "/ws/listening/"
 
 
 class RemoteError(Exception):
@@ -141,11 +140,13 @@ class HttpListeningRemote:
         token: str,
         transport: httpx.AsyncBaseTransport | None = None,
         *,
+        websocket_path: str,
         socket_factory: SocketFactory | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._transport = transport
+        self._websocket_path = websocket_path
         self._socket_factory = socket_factory or websockets.connect
 
     async def verify_token(self) -> SessionPage:
@@ -176,7 +177,7 @@ class HttpListeningRemote:
     async def connect_stream(self, *, resume_code: str | None, device_label: str) -> RemoteStream:
         try:
             socket = await self._socket_factory(
-                _stream_url(self._base_url),
+                _stream_url(self._base_url, self._websocket_path),
                 additional_headers={"Authorization": _authorization_header(self._token)},
             )
         except Exception:
@@ -226,10 +227,16 @@ class _WebSocketRemoteStream:
         self._socket = socket
 
     async def send_bytes(self, frame: bytes) -> None:
-        await self._socket.send(frame)
+        try:
+            await self._socket.send(frame)
+        except Exception:
+            raise RemoteRequestError from None
 
     async def send_control(self, message: dict[str, str]) -> None:
-        await self._socket.send(json.dumps(message))
+        try:
+            await self._socket.send(json.dumps(message))
+        except Exception:
+            raise RemoteRequestError from None
 
     async def events(self) -> AsyncIterator[RemoteEvent]:
         while True:
@@ -242,19 +249,22 @@ class _WebSocketRemoteStream:
             yield _remote_event(message)
 
     async def close(self) -> None:
-        await self._socket.close()
+        try:
+            await self._socket.close()
+        except Exception:
+            raise RemoteRequestError from None
 
 
 def _authorization_header(token: str) -> str:
     return f"Token {token}"
 
 
-def _stream_url(base_url: str) -> str:
+def _stream_url(base_url: str, websocket_path: str) -> str:
     parts = urlsplit(base_url)
     scheme = {"https": "wss", "http": "ws"}.get(parts.scheme)
     if scheme is None:
         raise ValueError("Listening server URL must use HTTP or HTTPS.")
-    return urlunsplit((scheme, parts.netloc, STREAM_PATH, "", ""))
+    return urlunsplit((scheme, parts.netloc, websocket_path, "", ""))
 
 
 def _session_page(payload: Mapping[str, object]) -> SessionPage:
