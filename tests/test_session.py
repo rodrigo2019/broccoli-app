@@ -46,6 +46,18 @@ class BlockingClock:
         await asyncio.Event().wait()
 
 
+class SecondDelayClock:
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+        self.second_delay_entered = asyncio.Event()
+
+    async def sleep(self, delay: float) -> None:
+        self.delays.append(delay)
+        if delay == 2:
+            self.second_delay_entered.set()
+            await asyncio.Event().wait()
+
+
 def test_event_hub_notifies_subscribers_and_retains_immutable_events() -> None:
     hub = EventHub()
     received: list[UiEvent] = []
@@ -181,6 +193,46 @@ async def test_failed_replay_attempt_closes_its_stream_before_the_next_retry(
     assert controller.state is ConnectionState.STREAMING
 
     await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_after_a_failed_replay_reopens_only_to_end_the_remote_session(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    clock = SecondDelayClock()
+    fake_remote.fail_send_stream_indexes = {1}
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames([AudioFrame("system", 100, b"\x00\x00")])
+
+    await fake_remote.emit_failure()
+    await clock.second_delay_entered.wait()
+    await controller.stop()
+    await settle()
+
+    assert clock.delays == [1, 2]
+    assert fake_remote.streams[1].closed is True
+    assert fake_remote.streams[2].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[2].closed is True
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_device_loss_during_reconnect_closes_the_retained_stream(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    clock = BlockingClock()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=clock)
+    await controller.resume("session-1", CaptureChoices("mic-1", "system-1"))
+
+    await fake_remote.emit_failure()
+    await clock.entered.wait()
+    fake_capture.handles["system-1"].lose_device()
+    await settle()
+
+    assert fake_remote.streams[0].closed is True
+    assert controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED
+    assert fake_remote.stream_requests == [("session-1", "Speakers")]
 
 
 @pytest.mark.asyncio

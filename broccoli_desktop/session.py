@@ -107,6 +107,8 @@ class DesktopSessionController:
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
+        if stream is None and self.state is ConnectionState.RECONNECTING:
+            stream = await self._connect_terminal_stream()
         if stream is not None:
             try:
                 await stream.send_control({"type": "session.end"})
@@ -359,7 +361,7 @@ class DesktopSessionController:
             ConnectionState.RECONNECTING,
         }:
             return
-        stream = self._stream
+        stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
         if stream is not None:
@@ -420,6 +422,17 @@ class DesktopSessionController:
         if self._recovery_stream is stream:
             self._recovery_stream = None
         await self._close_stream(stream)
+
+    async def _connect_terminal_stream(self) -> RemoteStream | None:
+        if self._session_uuid is None:
+            return None
+        try:
+            return await self._remote.connect_stream(
+                resume_code=self._session_uuid,
+                device_label=self._device_label or "",
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def _channel(channel: str) -> Literal["mic", "system"]:
