@@ -110,7 +110,7 @@ class DesktopSessionController:
         """Stop capture before ending the remote session and publishing stopped."""
         if self.state is ConnectionState.STOPPED:
             return
-        self._stop_capture()
+        self.stop_local_capture()
         reader = self._reader_task
         if reader is not None and reader is not asyncio.current_task():
             reader.cancel()
@@ -129,6 +129,10 @@ class DesktopSessionController:
             except Exception:
                 pass
         self._set_state(ConnectionState.STOPPED)
+
+    def stop_local_capture(self) -> None:
+        """Stop capture synchronously while controller finalization remains pending."""
+        self._stop_capture()
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
         """Persist a user-selected title through the typed remote boundary."""

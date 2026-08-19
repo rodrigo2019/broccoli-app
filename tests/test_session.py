@@ -250,6 +250,26 @@ async def test_stop_closes_capture_before_ending_the_remote_session(
 
 
 @pytest.mark.asyncio
+async def test_sync_local_capture_stop_keeps_controller_stop_for_remote_finalization(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Shutdown can synchronously silence local capture without bypassing controller stop."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    try:
+        controller.stop_local_capture()
+
+        assert fake_capture.closed_sources == {"mic-1", "system-1"}
+        assert controller.state is ConnectionState.STREAMING
+    finally:
+        await controller.stop()
+
+    assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
 async def test_session_end_stops_recovery_attempts(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

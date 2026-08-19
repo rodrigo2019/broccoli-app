@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 import pyaudiowpatch
@@ -64,6 +65,8 @@ class SessionProtocol(Protocol):
 
     state: ConnectionState
 
+    def stop_local_capture(self) -> None: ...
+
     async def stop(self) -> None: ...
 
 
@@ -75,7 +78,7 @@ class LoopbackServerProtocol(Protocol):
 
     def start(self) -> bool: ...
 
-    def run_coroutine(self, coroutine: Awaitable[None]) -> None: ...
+    def run_coroutine(self, coroutine: Awaitable[None]) -> bool | None: ...
 
     def shutdown(self) -> None: ...
 
@@ -153,13 +156,14 @@ class UvicornLoopbackServer:
         self._thread.start()
         return self._wait_until_healthy()
 
-    def run_coroutine(self, coroutine: Awaitable[None]) -> None:
+    def run_coroutine(self, coroutine: Awaitable[None]) -> bool:
         loop = self._loop
         if loop is None or loop.is_closed():
             coroutine.close()
-            return
+            return False
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         future.result(timeout=STARTUP_TIMEOUT_SECONDS)
+        return True
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -209,6 +213,7 @@ class DesktopRuntime:
         self.window = window
         self._tray = tray
         self._dialog = dialog
+        self._local_capture_stopped = False
         self._capture_stopped = False
         self._server_stopped = False
         self._tray_stopped = False
@@ -246,7 +251,8 @@ class DesktopRuntime:
         """Schedule the same controller stop coroutine used by the local API."""
         session = self.session
         if session is not None:
-            self._server.run_coroutine(session.stop())
+            session.stop_local_capture()
+            self._stop_controller(session)
 
     def request_quit(self) -> None:
         session = self.session
@@ -261,15 +267,28 @@ class DesktopRuntime:
         session = self.session
         if not self._capture_stopped:
             if session is None or session.state not in _ACTIVE_CAPTURE_STATES:
+                self._local_capture_stopped = True
                 self._capture_stopped = True
             else:
-                self._complete_teardown_step("_capture_stopped", self.stop_capture, failures)
+                self._complete_teardown_step(
+                    "_local_capture_stopped", session.stop_local_capture, failures
+                )
+                self._complete_teardown_step(
+                    "_capture_stopped", lambda: self._stop_controller(session), failures
+                )
         self._complete_teardown_step("_server_stopped", self._server.shutdown, failures)
         self._complete_teardown_step("_tray_stopped", self._tray.stop, failures)
         self._destroying_window = True
         self._complete_teardown_step("_window_destroyed", self.window.destroy, failures)
         if failures:
             raise failures[0]
+
+    def _stop_controller(self, session: SessionProtocol) -> None:
+        """Run the normal controller shutdown path or retain it for a later retry."""
+        if self._server.run_coroutine(session.stop()) is False:
+            raise RuntimeError(
+                "The local capture stop could not run because the loopback service is closed."
+            )
 
     def _complete_teardown_step(
         self, attribute: str, action: Callable[[], None], failures: list[Exception]
@@ -364,10 +383,24 @@ def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
 
 def _configured_websocket_path(path: str | None) -> str:
     """Accept the caller-supplied external path only, never a guessed route."""
-    if path is None or not path.startswith("/") or path.startswith("//"):
+    if path is None:
         raise RuntimeError(
             f"{BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE} must contain the backend-provided "
-            "WebSocket path as an absolute path."
+            "WebSocket path as a normalized absolute URI path."
+        )
+    parts = urlsplit(path)
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or parts.scheme
+        or parts.netloc
+        or parts.query
+        or parts.fragment
+        or parts.path != path
+    ):
+        raise RuntimeError(
+            f"{BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE} must contain the backend-provided "
+            "WebSocket path as a normalized absolute URI path."
         )
     return path
 

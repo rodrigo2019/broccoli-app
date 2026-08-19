@@ -13,6 +13,8 @@ from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
     DesktopRuntime,
     PyWebViewWindow,
+    UvicornLoopbackServer,
+    _configured_websocket_path,
     _create_production_server,
     start_runtime,
 )
@@ -122,8 +124,16 @@ class FakeNativeWindow:
 class FakeSession:
     state: ConnectionState = ConnectionState.IDLE
     stop_calls: int = 0
+    local_capture_stop_calls: int = 0
+    local_capture_stopped: bool = False
+
+    def stop_local_capture(self) -> None:
+        if not self.local_capture_stopped:
+            self.local_capture_stop_calls += 1
+            self.local_capture_stopped = True
 
     async def stop(self) -> None:
+        self.stop_local_capture()
         self.stop_calls += 1
         self.state = ConnectionState.STOPPED
 
@@ -159,6 +169,31 @@ class FailingStopServer(FakeServer):
             coroutine.close()
             raise RuntimeError("The controller stop failed.")
         super().run_coroutine(coroutine)
+
+
+@dataclass
+class LoopClosingStopServer(FakeServer):
+    """Model the production server's unavailable loop after its first shutdown."""
+
+    fail_stop_once: bool = True
+    loop_closed: bool = False
+    stop_schedule_attempts: int = 0
+
+    def run_coroutine(self, coroutine: Any) -> bool:
+        self.stop_schedule_attempts += 1
+        if self.fail_stop_once:
+            self.fail_stop_once = False
+            coroutine.close()
+            raise RuntimeError("The controller stop failed.")
+        if self.loop_closed:
+            coroutine.close()
+            return False
+        super().run_coroutine(coroutine)
+        return True
+
+    def shutdown(self) -> None:
+        self.loop_closed = True
+        super().shutdown()
 
 
 @dataclass
@@ -331,6 +366,55 @@ def test_shutdown_continues_after_stop_failure_and_retries_only_that_step() -> N
     assert window.destroyed is True
 
 
+def test_shutdown_stops_local_capture_before_the_server_loop_closes() -> None:
+    """A closed loop must not turn an unrun controller stop into a successful retry."""
+    session = FakeSession(state=ConnectionState.STREAMING)
+    server = LoopClosingStopServer(controller=session)
+    tray = FakeTray(running=True)
+    window = FakeWindow()
+    runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=FakeDialog())
+
+    with raises(RuntimeError, match="controller stop failed"):
+        runtime.shutdown()
+
+    assert session.local_capture_stop_calls == 1
+    assert session.stop_calls == 0
+    assert server.loop_closed is True
+    assert server.shutdown_calls == 1
+    assert tray.stop_calls == 1
+    assert window.destroyed is True
+
+    with raises(RuntimeError, match="local capture stop could not run"):
+        runtime.shutdown()
+
+    assert session.local_capture_stop_calls == 1
+    assert session.stop_calls == 0
+    assert server.stop_schedule_attempts == 2
+    assert server.shutdown_calls == 1
+    assert tray.stop_calls == 1
+    assert window.destroyed is True
+
+
+def test_loopback_server_reports_when_a_coroutine_cannot_run_on_its_event_loop() -> None:
+    """Runtime shutdown must distinguish an unavailable server loop from a completed stop."""
+    server = UvicornLoopbackServer(
+        lambda port: Services(
+            credentials=FakeCredentials(),
+            remote_factory=visual_test_remote_factory(),
+            capture_backend=FakeCaptureBackend(),
+            loopback_port=port,
+        )
+    )
+    ran = False
+
+    async def stop() -> None:
+        nonlocal ran
+        ran = True
+
+    assert server.run_coroutine(stop()) is False
+    assert ran is False
+
+
 def test_server_start_failure_never_creates_a_window() -> None:
     """A failed health check must report locally and avoid opening the desktop UI."""
     server = FakeServer(healthy=False)
@@ -389,6 +473,24 @@ def test_production_server_rejects_a_missing_configured_websocket_path() -> None
 
     with raises(RuntimeError, match="backend-provided WebSocket path"):
         _create_production_server(config)
+
+
+def test_production_server_rejects_a_websocket_path_with_a_query_or_fragment() -> None:
+    """The external route is a path component, never a full URL suffix."""
+    for websocket_path in ("/backend/listening?debug=true", "/backend/listening#fragment"):
+        config = RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path=websocket_path,
+        )
+
+        with raises(RuntimeError, match="backend-provided WebSocket path"):
+            _create_production_server(config)
+
+
+def test_production_server_accepts_a_normalized_absolute_websocket_path() -> None:
+    """The backend-provided path is preserved when it has no URL components."""
+    assert _configured_websocket_path("/backend/listening/") == "/backend/listening/"
 
 
 def test_health_endpoint_is_local_and_dependency_free() -> None:
