@@ -1,19 +1,18 @@
-"""Typed adapter for the external Listening HTTP and WebSocket contract."""
+"""Typed adapter for the declared Listening HTTP and WebSocket contract."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 import websockets
 
-from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, TranscriptSegment
-
-SESSION_LIST_PATH = "/api/listening/desktop/sessions/"
+AUTH_ME_PATH = "/api/auth/me/"
 
 
 class RemoteError(Exception):
@@ -25,6 +24,20 @@ class RemoteUnauthorizedError(RemoteError):
 
     def __init__(self) -> None:
         super().__init__("Remote authentication failed.")
+
+
+class RemoteCreditError(RemoteError):
+    """The remote closed because the account has no Listening credit."""
+
+    def __init__(self) -> None:
+        super().__init__("Remote session credits are unavailable.")
+
+
+class RemoteDurationError(RemoteError):
+    """The remote closed because the Listening session reached its limit."""
+
+    def __init__(self) -> None:
+        super().__init__("Remote session reached its maximum duration.")
 
 
 class RemoteRequestError(RemoteError):
@@ -41,13 +54,14 @@ class RemoteProtocolError(RemoteError):
 @dataclass(frozen=True)
 class SessionStarted:
     uuid_code: str
-    next_seq: int
-    next_offset_ms: int
+    next_sequence_by_channel: Mapping[str, int]
     max_duration_s: int
 
 
 @dataclass(frozen=True)
 class TranscriptDeltaEvent:
+    """Legacy fake event retained while the local UI transition is completed."""
+
     channel: str
     utterance_id: str
     text: str
@@ -105,18 +119,10 @@ class RemoteStream(Protocol):
 
 
 class ListeningRemote(Protocol):
-    async def verify_token(self) -> SessionPage: ...
-
-    async def list_sessions(self, cursor: str | None, query: str) -> SessionPage: ...
-
-    async def get_session(self, uuid_code: str) -> SessionSummary: ...
-
-    async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage: ...
-
-    async def update_title(self, uuid_code: str, title: str) -> SessionSummary: ...
+    async def verify_token(self) -> None: ...
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str
+        self, *, resume_code: str | None, device_label: str, language: str
     ) -> RemoteStream: ...
 
 
@@ -132,7 +138,7 @@ type SocketFactory = Callable[..., Awaitable[WebSocketConnection]]
 
 
 class HttpListeningRemote:
-    """Map the external Listening contract into immutable desktop models."""
+    """Map the declared Listening contract into safe desktop events."""
 
     def __init__(
         self,
@@ -149,66 +155,37 @@ class HttpListeningRemote:
         self._websocket_path = websocket_path
         self._socket_factory = socket_factory or websockets.connect
 
-    async def verify_token(self) -> SessionPage:
-        return await self.list_sessions(cursor=None, query="")
+    async def verify_token(self) -> None:
+        await self._request_json("GET", AUTH_ME_PATH)
 
-    async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
-        payload = await self._request(
-            "GET", SESSION_LIST_PATH, params={"cursor": cursor, "q": query}
-        )
-        return _session_page(payload)
-
-    async def get_session(self, uuid_code: str) -> SessionSummary:
-        payload = await self._request("GET", f"{SESSION_LIST_PATH}{uuid_code}/")
-        return _session_summary(payload)
-
-    async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
-        payload = await self._request(
-            "GET", f"{SESSION_LIST_PATH}{uuid_code}/segments/", params={"cursor": cursor}
-        )
-        return _segment_page(payload)
-
-    async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
-        payload = await self._request(
-            "PATCH", f"{SESSION_LIST_PATH}{uuid_code}/", json={"title": title}
-        )
-        return _session_summary(payload)
-
-    async def connect_stream(self, *, resume_code: str | None, device_label: str) -> RemoteStream:
+    async def connect_stream(
+        self, *, resume_code: str | None, device_label: str, language: str
+    ) -> RemoteStream:
         try:
             socket = await self._socket_factory(
-                _stream_url(self._base_url, self._websocket_path),
+                _stream_url(
+                    self._base_url,
+                    self._websocket_path,
+                    resume_code=resume_code,
+                    device_label=device_label,
+                    language=language,
+                ),
                 additional_headers={"Authorization": _authorization_header(self._token)},
             )
         except Exception as error:
             if _handshake_status_code(error) in {401, 403}:
                 raise RemoteUnauthorizedError from None
             raise RemoteRequestError from None
-        stream = _WebSocketRemoteStream(socket)
-        await stream.send_control(
-            {
-                "type": "session.start",
-                "resume_code": resume_code or "",
-                "device_label": device_label,
-            }
-        )
-        return stream
+        return _WebSocketRemoteStream(socket)
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Mapping[str, str | None] | None = None,
-        json: dict[str, str] | None = None,
-    ) -> dict[str, object]:
+    async def _request_json(self, method: str, path: str) -> object:
         try:
             async with httpx.AsyncClient(
                 base_url=self._base_url,
                 headers={"Authorization": _authorization_header(self._token)},
                 transport=self._transport,
             ) as client:
-                response = await client.request(method, path, params=params, json=json)
+                response = await client.request(method, path)
         except httpx.HTTPError:
             raise RemoteRequestError from None
         if response.status_code in {401, 403}:
@@ -216,29 +193,27 @@ class HttpListeningRemote:
         if response.is_error:
             raise RemoteRequestError
         try:
-            payload = response.json()
+            return response.json()
         except (json.JSONDecodeError, ValueError):
             raise RemoteProtocolError("Remote response was invalid.") from None
-        if not isinstance(payload, dict):
-            raise RemoteProtocolError("Remote response was invalid.")
-        return payload
 
 
 class _WebSocketRemoteStream:
     def __init__(self, socket: WebSocketConnection) -> None:
         self._socket = socket
+        self._next_sequence_by_channel: dict[str, int] | None = None
 
     async def send_bytes(self, frame: bytes) -> None:
         try:
             await self._socket.send(frame)
-        except Exception:
-            raise RemoteRequestError from None
+        except Exception as error:
+            _raise_safe_remote_error(error)
 
     async def send_control(self, message: dict[str, str]) -> None:
         try:
             await self._socket.send(json.dumps(message))
-        except Exception:
-            raise RemoteRequestError from None
+        except Exception as error:
+            _raise_safe_remote_error(error)
 
     async def events(self) -> AsyncIterator[RemoteEvent]:
         while True:
@@ -246,27 +221,84 @@ class _WebSocketRemoteStream:
                 message = await self._socket.recv()
             except StopAsyncIteration:
                 return
-            except Exception:
-                raise RemoteRequestError from None
-            yield _remote_event(message)
+            except Exception as error:
+                _raise_safe_remote_error(error)
+            yield self._event(message)
 
     async def close(self) -> None:
         try:
             await self._socket.close()
-        except Exception:
-            raise RemoteRequestError from None
+        except Exception as error:
+            _raise_safe_remote_error(error)
+
+    def _event(self, message: str | bytes) -> RemoteEvent:
+        values = _event_values(message)
+        event_type = _required_string(values, "type")
+        if event_type == "session.started":
+            sequences = _next_sequences(values)
+            self._next_sequence_by_channel = dict(sequences)
+            return SessionStarted(
+                uuid_code=_required_string(values, "uuid_code"),
+                next_sequence_by_channel=MappingProxyType(sequences),
+                max_duration_s=_required_integer(values, "max_duration_s"),
+            )
+        if event_type == "transcript.segment":
+            channel = _channel(values)
+            sequence = self._sequence_for(channel)
+            return TranscriptSegmentEvent(
+                channel=channel,
+                utterance_id=f"{channel}:{sequence}",
+                text=_required_string(values, "text"),
+                started_offset_ms=_required_integer(values, "started_offset_ms"),
+                ended_offset_ms=_required_integer(values, "ended_offset_ms"),
+            )
+        if event_type == "credit.warning":
+            return CreditWarning()
+        if event_type == "session.ended":
+            return SessionEnded()
+        if event_type == "error":
+            return RemoteFailure()
+        if event_type == "pong":
+            return Pong()
+        raise RemoteProtocolError(f"Unexpected remote event type: {event_type}")
+
+    def _sequence_for(self, channel: str) -> int:
+        sequences = self._next_sequence_by_channel
+        if sequences is None or channel not in sequences:
+            raise RemoteProtocolError("Remote segment arrived before a session started.")
+        sequence = sequences[channel]
+        sequences[channel] = sequence + 1
+        return sequence
 
 
 def _authorization_header(token: str) -> str:
     return f"Token {token}"
 
 
-def _stream_url(base_url: str, websocket_path: str) -> str:
+def _stream_url(
+    base_url: str,
+    websocket_path: str,
+    *,
+    resume_code: str | None,
+    device_label: str,
+    language: str,
+) -> str:
     parts = urlsplit(base_url)
     scheme = {"https": "wss", "http": "ws"}.get(parts.scheme)
     if scheme is None:
         raise ValueError("Listening server URL must use HTTP or HTTPS.")
-    return urlunsplit((scheme, parts.netloc, websocket_path, "", ""))
+    query = urlencode(
+        {
+            key: value
+            for key, value in {
+                "resume": resume_code,
+                "device": device_label,
+                "language": language,
+            }.items()
+            if value
+        }
+    )
+    return urlunsplit((scheme, parts.netloc, websocket_path, query, ""))
 
 
 def _handshake_status_code(error: Exception) -> int | None:
@@ -279,100 +311,46 @@ def _handshake_status_code(error: Exception) -> int | None:
     return None
 
 
-def _session_page(payload: Mapping[str, object]) -> SessionPage:
-    sessions = _required_list(payload, "sessions")
-    return SessionPage(
-        sessions=tuple(_session_summary(item) for item in sessions),
-        next_cursor=_optional_string(payload, "next_cursor"),
-    )
+def _raise_safe_remote_error(error: Exception) -> None:
+    code = _close_code(error)
+    if code == 4401:
+        raise RemoteUnauthorizedError from None
+    if code == 4402:
+        raise RemoteCreditError from None
+    if code == 4403:
+        raise RemoteDurationError from None
+    raise RemoteRequestError from None
 
 
-def _segment_page(payload: Mapping[str, object]) -> SegmentPage:
-    segments = _required_list(payload, "segments")
-    return SegmentPage(
-        segments=tuple(_transcript_segment(item) for item in segments),
-        next_cursor=_optional_string(payload, "next_cursor"),
-    )
+def _close_code(error: Exception) -> int | None:
+    direct = getattr(error, "code", None)
+    if isinstance(direct, int):
+        return direct
+    for close in (getattr(error, "rcvd", None), getattr(error, "sent", None)):
+        code = getattr(close, "code", None)
+        if isinstance(code, int):
+            return code
+    return None
 
 
-def _session_summary(payload: object) -> SessionSummary:
-    values = _mapping(payload)
-    return SessionSummary(
-        uuid_code=_required_string(values, "uuid_code"),
-        title=_required_string(values, "title"),
-        status=_required_string(values, "status"),
-        started_at=_optional_string(values, "started_at"),
-        ended_at=_optional_string(values, "ended_at"),
-        device_label=_required_string(values, "device_label"),
-        segment_count=_required_integer(values, "segment_count"),
-        is_live=_required_boolean(values, "is_live"),
-    )
-
-
-def _transcript_segment(payload: object) -> TranscriptSegment:
-    values = _mapping(payload)
-    return TranscriptSegment(
-        utterance_id=_required_string(values, "utterance_id"),
-        channel=_channel(values),
-        text=_required_string(values, "text"),
-        started_offset_ms=_required_integer(values, "started_offset_ms"),
-        ended_offset_ms=_required_integer(values, "ended_offset_ms"),
-    )
-
-
-def _remote_event(message: str | bytes) -> RemoteEvent:
+def _event_values(message: str | bytes) -> Mapping[str, object]:
     if not isinstance(message, str):
         raise RemoteProtocolError("Remote event was invalid.")
     try:
         payload = json.loads(message)
     except json.JSONDecodeError:
         raise RemoteProtocolError("Remote event was invalid.") from None
-    values = _mapping(payload)
-    event_type = _required_string(values, "type")
-    if event_type == "session.started":
-        return SessionStarted(
-            uuid_code=_required_string(values, "uuid_code"),
-            next_seq=_required_integer(values, "next_seq"),
-            next_offset_ms=_required_integer(values, "next_offset_ms"),
-            max_duration_s=_required_integer(values, "max_duration_s"),
-        )
-    if event_type == "transcript.delta":
-        return TranscriptDeltaEvent(
-            channel=_channel(values),
-            utterance_id=_required_string(values, "utterance_id"),
-            text=_required_string(values, "text"),
-            started_offset_ms=_required_integer(values, "started_offset_ms"),
-        )
-    if event_type == "transcript.segment":
-        return TranscriptSegmentEvent(
-            channel=_channel(values),
-            utterance_id=_required_string(values, "utterance_id"),
-            text=_required_string(values, "text"),
-            started_offset_ms=_required_integer(values, "started_offset_ms"),
-            ended_offset_ms=_required_integer(values, "ended_offset_ms"),
-        )
-    if event_type == "credit.warning":
-        return CreditWarning()
-    if event_type == "session.ended":
-        return SessionEnded()
-    if event_type == "error":
-        return RemoteFailure()
-    if event_type == "pong":
-        return Pong()
-    raise RemoteProtocolError(f"Unexpected remote event type: {event_type}")
+    if not isinstance(payload, dict):
+        raise RemoteProtocolError("Remote payload was invalid.")
+    return payload
 
 
-def _mapping(value: object) -> Mapping[str, object]:
+def _next_sequences(payload: Mapping[str, object]) -> dict[str, int]:
+    value = payload.get("next_seq")
     if not isinstance(value, dict):
         raise RemoteProtocolError("Remote payload was invalid.")
-    return value
-
-
-def _required_list(payload: Mapping[str, object], key: str) -> list[object]:
-    value = payload.get(key)
-    if not isinstance(value, list):
-        raise RemoteProtocolError("Remote payload was invalid.")
-    return value
+    sequences = {channel: _required_integer(value, channel) for channel in ("mic", "system")}
+    return sequences
 
 
 def _required_string(payload: Mapping[str, object], key: str) -> str:
@@ -382,23 +360,9 @@ def _required_string(payload: Mapping[str, object], key: str) -> str:
     return value
 
 
-def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
-    value = payload.get(key)
-    if value is not None and not isinstance(value, str):
-        raise RemoteProtocolError("Remote payload was invalid.")
-    return value
-
-
 def _required_integer(payload: Mapping[str, object], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise RemoteProtocolError("Remote payload was invalid.")
-    return value
-
-
-def _required_boolean(payload: Mapping[str, object], key: str) -> bool:
-    value = payload.get(key)
-    if not isinstance(value, bool):
         raise RemoteProtocolError("Remote payload was invalid.")
     return value
 

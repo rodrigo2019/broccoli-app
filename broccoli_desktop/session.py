@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from broccoli_desktop.audio import AudioPipeline
@@ -23,6 +23,8 @@ from broccoli_desktop.protocol import encode_audio_frame
 from broccoli_desktop.remote import (
     CreditWarning,
     ListeningRemote,
+    RemoteCreditError,
+    RemoteDurationError,
     RemoteEvent,
     RemoteFailure,
     RemoteProtocolError,
@@ -101,7 +103,7 @@ class DesktopSessionController:
         return self._pipeline_base_offset_ms
 
     async def start_new(self, choices: CaptureChoices, title: str) -> SessionSummary:
-        """Open a new remote session and update its title after session.started."""
+        """Open a new remote session with a local capture title."""
         return await self._open(choices, resume_code=None, title=title)
 
     async def resume(self, uuid_code: str, choices: CaptureChoices) -> SessionSummary:
@@ -172,7 +174,7 @@ class DesktopSessionController:
         remote_period_started = False
         try:
             stream = await self._remote.connect_stream(
-                resume_code=resume_code, device_label=self._device_label
+                resume_code=resume_code, device_label=self._device_label, language="en"
             )
             iterator = stream.events()
             started = await anext(iterator)
@@ -181,10 +183,17 @@ class DesktopSessionController:
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
-            self._set_pipeline(started.next_offset_ms)
-            summary = await self._remote.get_session(started.uuid_code)
-            if title is not None:
-                summary = await self._remote.update_title(started.uuid_code, title)
+            self._set_pipeline(0)
+            summary = SessionSummary(
+                uuid_code=started.uuid_code,
+                title=title or "",
+                status="live",
+                started_at=None,
+                ended_at=None,
+                device_label=self._device_label,
+                segment_count=0,
+                is_live=True,
+            )
             self._session = summary
             self._session_uuid = started.uuid_code
             self._stream = stream
@@ -230,6 +239,13 @@ class DesktopSessionController:
                     return
         except asyncio.CancelledError:
             return
+        except RemoteUnauthorizedError:
+            await self._fail_from_remote("Authentication failed.")
+            self._notify_authentication_failure()
+        except RemoteCreditError:
+            await self._fail_from_remote("Session credits are unavailable.")
+        except RemoteDurationError:
+            await self._fail_from_remote("Session reached its maximum duration.")
         except Exception:
             if self.state is ConnectionState.STREAMING:
                 await self._recover()
@@ -254,6 +270,10 @@ class DesktopSessionController:
                 ended_offset_ms=event.ended_offset_ms,
             )
             self.pending_deltas.pop(segment.utterance_id, None)
+            if self._session is not None:
+                self._session = replace(
+                    self._session, segment_count=self._session.segment_count + 1
+                )
             self.events.publish(UiEvent(type="segment", segment=segment))
             return
         if isinstance(event, CreditWarning):
@@ -285,6 +305,7 @@ class DesktopSessionController:
                     stream = await self._remote.connect_stream(
                         resume_code=self._session_uuid,
                         device_label=self._device_label or "",
+                        language="en",
                     )
                     previous_stream = self._recovery_stream
                     self._recovery_stream = stream
@@ -296,7 +317,6 @@ class DesktopSessionController:
                         raise RemoteProtocolError("Remote stream did not start a session.")
                     if started.uuid_code != self._session_uuid:
                         raise RemoteProtocolError("Remote resumed an unexpected session.")
-                    self._set_pipeline(started.next_offset_ms)
                     self._stream = stream
                     self._recovery_stream = None
                     for frame in self._buffered_frames:
@@ -315,6 +335,14 @@ class DesktopSessionController:
                     self._clear_buffered_frames()
                     self._notify_authentication_failure()
                     self._set_state(ConnectionState.FAILED, message="Authentication failed.")
+                    return
+                except RemoteCreditError:
+                    await self._discard_recovery_stream(stream or self._recovery_stream)
+                    await self._fail_from_remote("Session credits are unavailable.")
+                    return
+                except RemoteDurationError:
+                    await self._discard_recovery_stream(stream or self._recovery_stream)
+                    await self._fail_from_remote("Session reached its maximum duration.")
                     return
                 except Exception:
                     await self._discard_recovery_stream(stream)
@@ -338,7 +366,9 @@ class DesktopSessionController:
             await self._close_stream(stream)
         self._set_state(ConnectionState.STOPPED)
 
-    async def _fail_from_remote(self) -> None:
+    async def _fail_from_remote(
+        self, message: str = "The remote session could not continue."
+    ) -> None:
         self._stop_capture()
         self._clear_buffered_frames()
         stream = self._stream or self._recovery_stream
@@ -346,7 +376,7 @@ class DesktopSessionController:
         self._recovery_stream = None
         if stream is not None:
             await self._close_stream(stream)
-        self._set_state(ConnectionState.FAILED, message="The remote session could not continue.")
+        self._set_state(ConnectionState.FAILED, message=message)
 
     def _on_pcm(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
         pipeline = self._pipeline
@@ -490,6 +520,7 @@ class DesktopSessionController:
             return await self._remote.connect_stream(
                 resume_code=self._session_uuid,
                 device_label=self._device_label or "",
+                language="en",
             )
         except Exception:
             return None

@@ -105,7 +105,7 @@ class FakeSessionRemote:
             )
         }
     )
-    next_offsets: list[int] = field(default_factory=lambda: [0])
+    next_sequences: list[dict[str, int]] = field(default_factory=lambda: [{"mic": 1, "system": 1}])
     session_pages: dict[tuple[str | None, str], SessionPage] = field(default_factory=dict)
     segment_pages: dict[tuple[str, str | None], SegmentPage] = field(default_factory=dict)
     stream_event_scripts: list[list[RemoteEvent | Exception | None]] = field(default_factory=list)
@@ -116,9 +116,8 @@ class FakeSessionRemote:
     fail_close_stream_indexes: set[int] = field(default_factory=set)
     unauthorized: bool = False
 
-    async def verify_token(self) -> SessionPage:
+    async def verify_token(self) -> None:
         self._assert_authorized()
-        return SessionPage(tuple(self.sessions.values()), None)
 
     async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
         self._assert_authorized()
@@ -146,8 +145,9 @@ class FakeSessionRemote:
         return updated
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str
+        self, *, resume_code: str | None, device_label: str, language: str
     ) -> FakeLiveRemoteStream:
+        del language
         self._assert_authorized()
         uuid_code = resume_code or "session-1"
         if uuid_code not in self.sessions:
@@ -162,7 +162,7 @@ class FakeSessionRemote:
                 is_live=True,
             )
         stream_index = len(self.streams)
-        offset = self.next_offsets[min(stream_index, len(self.next_offsets) - 1)]
+        next_sequences = self.next_sequences[min(stream_index, len(self.next_sequences) - 1)]
         stream = FakeLiveRemoteStream(
             fail_send=len(self.streams) in self.fail_send_stream_indexes,
             fail_control=len(self.streams) in self.fail_control_stream_indexes,
@@ -170,7 +170,7 @@ class FakeSessionRemote:
         )
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
-        await stream.emit(SessionStarted(uuid_code, 1, offset, 14_400))
+        await stream.emit(SessionStarted(uuid_code, next_sequences, 14_400))
         if stream_index < len(self.stream_event_scripts):
             for event in self.stream_event_scripts[stream_index]:
                 await stream.emit(event)
@@ -247,9 +247,8 @@ class FakeListeningRemote:
     unauthorized: bool = False
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
 
-    async def verify_token(self) -> SessionPage:
+    async def verify_token(self) -> None:
         self._assert_authorized()
-        return await self.list_sessions(cursor=None, query="")
 
     async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
         self._assert_authorized()
@@ -273,8 +272,9 @@ class FakeListeningRemote:
         return updated
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str
+        self, *, resume_code: str | None, device_label: str, language: str
     ) -> FakeRemoteStream:
+        del language
         self._assert_authorized()
         self.stream_requests.append((resume_code, device_label))
         return self.stream
@@ -300,11 +300,10 @@ def revoked_remote() -> FakeListeningRemote:
 
 
 def resumed_session_started() -> SessionStarted:
-    """Return the required nonzero resume offset event."""
+    """Return a resumed handshake with separate channel sequences."""
     return SessionStarted(
         uuid_code="session-1",
-        next_seq=12,
-        next_offset_ms=45_000,
+        next_sequence_by_channel={"mic": 12, "system": 8},
         max_duration_s=14_400,
     )
 
@@ -370,7 +369,7 @@ def visual_test_remote() -> FakeSessionRemote:
     delta, segment = delta_final_pair()
     return FakeSessionRemote(
         sessions={daily.uuid_code: daily, planning.uuid_code: planning},
-        next_offsets=[0, 1_000],
+        next_sequences=[{"mic": 1, "system": 1}, {"mic": 1, "system": 1}],
         session_pages={
             (None, ""): SessionPage((daily,), "history-2"),
             ("history-2", ""): SessionPage((planning,), None),

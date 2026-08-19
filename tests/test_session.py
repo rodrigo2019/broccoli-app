@@ -85,22 +85,18 @@ def test_event_hub_notifies_subscribers_and_retains_immutable_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_remote_offset_and_replaces_the_pending_delta(
+async def test_start_new_builds_a_local_summary_without_fetching_or_patching_a_remote_title(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
-    fake_remote.next_offsets = [45_000]
     controller = DesktopSessionController(fake_remote, fake_capture)
 
-    await controller.resume("session-1", CaptureChoices("mic-1", "system-1"))
-    await fake_remote.emit_delta("system", "utterance-1", "we should")
-    await settle()
-    await fake_remote.emit_segment("system", "utterance-1", "we should ship", 500, 1_000)
-    await settle()
+    summary = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
 
-    events = controller.events.snapshot()
-    assert controller.pipeline_base_offset_ms == 45_000
-    assert events[-1].type == "segment"
-    assert "utterance-1" not in controller.pending_deltas
+    assert summary.uuid_code == "session-1"
+    assert summary.title == "Daily"
+    assert summary.started_at is None
+    assert summary.segment_count == 0
+    assert controller.pipeline_base_offset_ms == 0
 
     await controller.stop()
 
@@ -116,6 +112,22 @@ async def test_start_new_opens_without_resume_code_and_updates_the_requested_tit
     assert fake_remote.stream_requests == [(None, "Speakers")]
     assert summary.title == "Daily"
     assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_final_segment_increments_the_local_active_session_count(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+
+    await fake_remote.emit_segment("mic", "mic:1", "hello", 100, 900)
+    await settle()
+
+    assert controller.session is not None
+    assert controller.session.segment_count == 1
 
     await controller.stop()
 
@@ -138,7 +150,6 @@ async def test_reconnect_discards_audio_beyond_ten_seconds(
 async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_frames_in_order(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
-    fake_remote.next_offsets = [0, 4_000]
     controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
     controller.enqueue_audio_frames(
@@ -154,12 +165,28 @@ async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_f
     assert fake_clock.delays == [1]
     assert fake_remote.stream_requests == [(None, "Speakers"), ("session-1", "Speakers")]
     assert fake_remote.streams[0].closed is True
-    assert controller.pipeline_base_offset_ms == 4_000
+    assert controller.pipeline_base_offset_ms == 0
     assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
         100,
         300,
     ]
     assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_local_offsets_when_backend_omits_next_offset_ms(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+    controller.enqueue_audio_frames([AudioFrame("system", 600, b"\x00\x00")])
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert decode_audio_frame(fake_remote.streams[-1].frames[0]).offset_ms == 600
 
     await controller.stop()
 
@@ -460,10 +487,12 @@ async def test_recovery_exhaustion_discards_buffered_frames_before_a_later_recon
     choices = CaptureChoices("mic-1", "system-1")
     original_connect = fake_remote.connect_stream
 
-    async def fail_reconnects(*, resume_code: str | None, device_label: str):
+    async def fail_reconnects(*, resume_code: str | None, device_label: str, language: str):
         if resume_code is not None:
             raise RemoteRequestError()
-        return await original_connect(resume_code=resume_code, device_label=device_label)
+        return await original_connect(
+            resume_code=resume_code, device_label=device_label, language=language
+        )
 
     fake_remote.connect_stream = fail_reconnects  # type: ignore[method-assign]
     await controller.start_new(choices, title="")
