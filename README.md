@@ -33,6 +33,26 @@ Run validation:
 .\scripts\check.ps1
 ```
 
+## Windows installer
+
+Build the installer on Windows 11 x64 with Python 3.12, Node.js/npm, uv, and
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) available locally. The build
+regenerates the ignored CSS and Windows package outputs from the committed locks:
+
+```powershell
+.\scripts\installer.ps1
+```
+
+The installer is written to
+`dist\installer\BroccoliDesktop-0.1.0-setup.exe`. It installs per user, creates
+Start Menu and desktop shortcuts named **Broccoli Desktop**, and includes an
+uninstaller. Microsoft Edge WebView2 Runtime must already be installed; the
+installer stops before installation when it is unavailable.
+
+The packaged application uses the exact backend WebSocket path provided by the
+backend owner. Do not include a token, remote endpoint, or production transcript
+in build inputs, CI configuration, or release artifacts.
+
 ## Backend WebSocket configuration
 
 Before launching the desktop client, obtain the exact WebSocket path from the

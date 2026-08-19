@@ -11,4 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial desktop client scaffold.
+- Windows desktop capture with separate microphone and system-loopback channels.
+- Session library, title editing, transcript history, and historical-session resume.
+- System tray controls for showing the window, stopping capture, and quitting safely.
+- Reproducible PyInstaller onedir packaging, Inno Setup installation, and Windows CI artifacts.

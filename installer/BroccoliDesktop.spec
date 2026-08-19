@@ -1,0 +1,83 @@
+# ruff: noqa: F821
+"""PyInstaller definition for the Windows-only Broccoli Desktop bundle."""
+
+from pathlib import Path
+
+import PyInstaller
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+
+PROJECT_ROOT = Path(SPECPATH).resolve().parent
+HOOKS_DIRECTORY = PROJECT_ROOT / "installer" / "hooks"
+APPLICATION_ICON = (
+    Path(PyInstaller.__file__).resolve().parent / "bootloader" / "images" / "icon-windowed.ico"
+)
+RUNTIME_PACKAGES = (
+    "webview",
+    "pyaudiowpatch",
+    "soxr",
+    "keyring",
+    "pystray",
+    "PIL",
+)
+WINDOWS_RUNTIME_IMPORTS = (
+    "webview",
+    "webview.guilib",
+    "webview.platforms.winforms",
+    "webview.platforms.win32",
+    "webview.platforms.edgechromium",
+    "clr",
+    "clr_loader",
+    "pyaudiowpatch",
+    "_portaudiowpatch",
+    "soxr",
+    "keyring.backends.Windows",
+    "pystray._win32",
+    "PIL.Image",
+    "webrtcvad",
+    "_webrtcvad",
+)
+
+datas = [(str(PROJECT_ROOT / "broccoli_desktop" / "static"), "broccoli_desktop/static")]
+datas.extend(copy_metadata("keyring"))
+binaries = []
+hiddenimports = list(WINDOWS_RUNTIME_IMPORTS)
+for package in RUNTIME_PACKAGES:
+    datas.extend(collect_data_files(package))
+    binaries.extend(collect_dynamic_libs(package))
+
+a = Analysis(
+    [str(PROJECT_ROOT / "broccoli_desktop" / "__main__.py")],
+    pathex=[str(PROJECT_ROOT)],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[str(HOOKS_DIRECTORY)],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="BroccoliDesktop",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    icon=str(APPLICATION_ICON),
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="BroccoliDesktop",
+)

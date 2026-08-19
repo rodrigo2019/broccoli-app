@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!installer/BroccoliDesktop.spec
 node_modules/
 artifacts/visual/
 broccoli_desktop/static/output.css

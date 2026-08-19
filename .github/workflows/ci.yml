@@ -1,0 +1,72 @@
+name: Broccoli Desktop CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Synchronize Python dependencies
+        run: uv sync --frozen
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Build CSS
+        working-directory: ui
+        run: npm run build:css
+      - name: Check Python code
+        run: .\scripts\check.ps1
+      - name: Build onedir package
+        run: .\scripts\package.ps1
+      - name: Build Windows installer
+        run: .\scripts\installer.ps1
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: BroccoliDesktop-installer
+          path: dist/installer/BroccoliDesktop-0.1.0-setup.exe
+          if-no-files-found: error
+
+  visual:
+    needs: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Synchronize Python dependencies
+        run: uv sync --frozen
+      - name: Build visual CSS
+        working-directory: ui
+        run: npm ci && npm run build:css
+      - name: Install fixed browser tooling
+        run: |
+          npm install --global agent-browser@0.34.0
+          agent-browser install
+      - name: Run fake visual browser checks
+        run: .\scripts\visual-check.ps1
+      - name: Upload failed visual artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BroccoliDesktop-visual-failure
+          path: artifacts/visual/
+          if-no-files-found: ignore
