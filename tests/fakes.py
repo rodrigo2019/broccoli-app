@@ -153,8 +153,10 @@ class FakeCaptureHandle:
 
     device_id: str
     closed_sources: set[str]
+    on_pcm: Callable[[bytes], None] | None = None
     drained: bool = False
     closed: bool = False
+    pending_error: Exception | None = None
     _on_error: Callable[[Exception], None] | None = None
 
     def close(self) -> None:
@@ -166,11 +168,18 @@ class FakeCaptureHandle:
 
     def set_error_handler(self, on_error: Callable[[Exception], None]) -> None:
         self._on_error = on_error
+        if self.pending_error is not None:
+            on_error(self.pending_error)
 
     def lose_device(self) -> None:
         if self._on_error is None:
             raise RuntimeError("No device-loss handler was installed.")
         self._on_error(DeviceUnavailableError(self.device_id))
+
+    def emit(self, pcm: bytes) -> None:
+        if self.on_pcm is None:
+            raise RuntimeError("No PCM callback was installed.")
+        self.on_pcm(pcm)
 
 
 @dataclass
@@ -186,6 +195,8 @@ class FakeCaptureBackend:
     fail_opening: str | None = None
     callback_pcm: bytes | None = None
     callback_device_id: str | None = None
+    error_before_handler_id: str | None = None
+    require_listed_devices: bool = False
     closed_sources: set[str] = field(default_factory=set)
     handles: dict[str, FakeCaptureHandle] = field(default_factory=dict)
 
@@ -201,7 +212,19 @@ class FakeCaptureBackend:
     def _open(self, device_id: str, on_pcm: Callable[[bytes], None]) -> FakeCaptureHandle:
         if self.fail_opening == device_id:
             raise OSError("The selected device is unavailable.")
-        handle = FakeCaptureHandle(device_id, self.closed_sources)
+        if self.require_listed_devices and device_id not in {
+            device.device_id for device in self.devices
+        }:
+            raise DeviceUnavailableError(device_id)
+        pending_error = (
+            DeviceUnavailableError(device_id) if self.error_before_handler_id == device_id else None
+        )
+        handle = FakeCaptureHandle(
+            device_id,
+            self.closed_sources,
+            on_pcm=on_pcm,
+            pending_error=pending_error,
+        )
         self.handles[device_id] = handle
         if self.callback_pcm is not None and self.callback_device_id == device_id:
             try:

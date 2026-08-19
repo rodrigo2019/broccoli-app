@@ -52,6 +52,27 @@ def test_enumeration_uses_repeatable_ids_instead_of_display_names(
     assert [device.device_id for device in first] == [device.device_id for device in second]
 
 
+def test_enumeration_assigns_distinct_ids_to_same_named_devices(
+    fake_pyaudio: FakePyAudio,
+) -> None:
+    fake_pyaudio.device_infos.insert(
+        1,
+        {
+            "index": 4,
+            "name": "Microphone One",
+            "maxInputChannels": 1,
+            "maxOutputChannels": 0,
+            "hostApi": 0,
+            "isLoopbackDevice": False,
+        },
+    )
+    backend = PyAudioCaptureBackend(fake_pyaudio)
+
+    microphones = [device for device in backend.list_devices() if device.kind == "mic"]
+
+    assert len({device.device_id for device in microphones}) == 2
+
+
 def test_pyaudio_sources_use_48khz_mono_pcm16_20ms_blocks_and_dispatch_off_callback_thread(
     fake_pyaudio: FakePyAudio,
 ) -> None:
@@ -83,7 +104,7 @@ def test_capture_session_stops_both_sources_when_one_callback_fails(
     fake_capture_backend.callback_pcm = b"\x00" * BLOCK_BYTES
     fake_capture_backend.callback_device_id = "system-1"
 
-    def failing_callback(_: bytes) -> None:
+    def failing_callback(_: str, _pcm: bytes) -> None:
         raise RuntimeError("send failed")
 
     session = CaptureSession(fake_capture_backend, "mic-1", "system-1", failing_callback)
@@ -98,7 +119,7 @@ def test_capture_session_closes_first_source_when_second_device_is_unavailable(
     fake_capture_backend: FakeCaptureBackend,
 ) -> None:
     fake_capture_backend.fail_opening = "system-1"
-    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _: None)
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
 
     with pytest.raises(DeviceUnavailableError, match="Speakers"):
         session.start()
@@ -110,16 +131,46 @@ def test_capture_session_reports_the_microphone_label_when_it_cannot_open(
     fake_capture_backend: FakeCaptureBackend,
 ) -> None:
     fake_capture_backend.fail_opening = "mic-1"
-    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _: None)
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
 
     with pytest.raises(DeviceUnavailableError, match="Microphone One"):
         session.start()
 
 
+def test_start_aborts_when_a_source_fails_before_its_error_handler_is_installed(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    fake_capture_backend.error_before_handler_id = "system-1"
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
+
+    with pytest.raises(DeviceUnavailableError):
+        session.start()
+
+    assert fake_capture_backend.closed_sources == {"mic-1", "system-1"}
+
+
+def test_capture_session_attributes_pcm_to_its_source_channel(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    captured: list[tuple[str, bytes]] = []
+    session = CaptureSession(
+        fake_capture_backend,
+        "mic-1",
+        "system-1",
+        lambda channel, pcm: captured.append((channel, pcm)),
+    )
+    session.start()
+
+    fake_capture_backend.handles["mic-1"].emit(b"mic")
+    fake_capture_backend.handles["system-1"].emit(b"system")
+
+    assert captured == [("mic", b"mic"), ("system", b"system")]
+
+
 def test_stop_is_idempotent_and_drains_both_sources(
     fake_capture_backend: FakeCaptureBackend,
 ) -> None:
-    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _: None)
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
 
     session.start()
     session.stop()
@@ -137,7 +188,7 @@ def test_device_loss_publishes_local_event_and_stops_capture(
         fake_capture_backend,
         "mic-1",
         "system-1",
-        lambda _: None,
+        lambda _, __: None,
         on_event=events.append,
     )
     session.start()
@@ -147,6 +198,42 @@ def test_device_loss_publishes_local_event_and_stops_capture(
     assert [event.type for event in events] == ["device_lost"]
     assert events[0].device_id == "system-1"
     assert fake_capture_backend.closed_sources == {"mic-1", "system-1"}
+
+
+def test_device_loss_requires_a_new_capture_session_before_restart(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
+    session.start()
+    fake_capture_backend.handles["system-1"].lose_device()
+
+    with pytest.raises(DeviceUnavailableError, match="replacement"):
+        session.start()
+
+
+def test_start_uses_the_cached_label_when_selected_device_is_already_unavailable(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
+    fake_capture_backend.devices = [fake_capture_backend.devices[1]]
+    fake_capture_backend.require_listed_devices = True
+
+    with pytest.raises(DeviceUnavailableError, match="Microphone One"):
+        session.start()
+
+
+def test_startup_device_unavailability_requires_rebuilding_the_capture_session(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    fake_capture_backend.fail_opening = "mic-1"
+    session = CaptureSession(fake_capture_backend, "mic-1", "system-1", lambda _, __: None)
+
+    with pytest.raises(DeviceUnavailableError):
+        session.start()
+    fake_capture_backend.fail_opening = None
+
+    with pytest.raises(DeviceUnavailableError, match="replacement"):
+        session.start()
 
 
 def test_device_loss_is_not_dropped_when_the_pcm_queue_is_full(fake_pyaudio: FakePyAudio) -> None:
@@ -159,7 +246,7 @@ def test_device_loss_is_not_dropped_when_the_pcm_queue_is_full(fake_pyaudio: Fak
         backend,
         devices[0].device_id,
         devices[1].device_id,
-        lambda _: (processing.set(), release_processing.wait(timeout=1)),
+        lambda _, __: (processing.set(), release_processing.wait(timeout=1)),
         on_event=lambda _: device_lost.set(),
     )
     session.start()
@@ -183,7 +270,7 @@ def test_consumer_failure_stops_capture_without_misreporting_device_loss(
     backend = PyAudioCaptureBackend(fake_pyaudio)
     devices = backend.list_devices()
 
-    def failing_consumer(_: bytes) -> None:
+    def failing_consumer(_: str, _pcm: bytes) -> None:
         processed.set()
         raise RuntimeError("send failed")
 

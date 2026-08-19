@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from hashlib import sha256
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread, current_thread
-from typing import Protocol
+from typing import Literal, Protocol
 
 import pyaudiowpatch
 
@@ -18,7 +18,8 @@ BLOCK_FRAMES = SAMPLE_RATE * BLOCK_MS // 1_000
 BLOCK_BYTES = BLOCK_FRAMES * 2
 QUEUE_BLOCKS = 50
 
-PcmCallback = Callable[[bytes], None]
+SourcePcmCallback = Callable[[bytes], None]
+PcmCallback = Callable[[Literal["mic", "system"], bytes], None]
 CaptureEventCallback = Callable[[CaptureEvent], None]
 CaptureErrorCallback = Callable[[Exception], None]
 
@@ -46,9 +47,9 @@ class CaptureBackend(Protocol):
 
     def list_devices(self) -> list[DeviceDescriptor]: ...
 
-    def open_microphone(self, device_id: str, on_pcm: PcmCallback) -> CaptureHandle: ...
+    def open_microphone(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle: ...
 
-    def open_loopback(self, device_id: str, on_pcm: PcmCallback) -> CaptureHandle: ...
+    def open_loopback(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle: ...
 
 
 class _QueuedCaptureHandle:
@@ -56,7 +57,7 @@ class _QueuedCaptureHandle:
 
     _STOP = object()
 
-    def __init__(self, on_pcm: PcmCallback) -> None:
+    def __init__(self, on_pcm: SourcePcmCallback) -> None:
         self._on_pcm = on_pcm
         self._queue: Queue[bytes | Exception | object] = Queue(maxsize=QUEUE_BLOCKS)
         self._stream: object | None = None
@@ -170,11 +171,11 @@ class PyAudioCaptureBackend:
         )
         return devices
 
-    def open_microphone(self, device_id: str, on_pcm: PcmCallback) -> CaptureHandle:
+    def open_microphone(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle:
         info = self._find_info("mic", device_id)
         return self._open_input(int(info["index"]), on_pcm)
 
-    def open_loopback(self, device_id: str, on_pcm: PcmCallback) -> CaptureHandle:
+    def open_loopback(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle:
         output = self._find_info("system", device_id)
         try:
             loopback = self._pyaudio.get_wasapi_loopback_analogue_by_index(int(output["index"]))
@@ -182,7 +183,7 @@ class PyAudioCaptureBackend:
             raise DeviceUnavailableError(str(output["name"])) from error
         return self._open_input(int(loopback["index"]), on_pcm)
 
-    def _open_input(self, device_index: int, on_pcm: PcmCallback) -> CaptureHandle:
+    def _open_input(self, device_index: int, on_pcm: SourcePcmCallback) -> CaptureHandle:
         handle = _QueuedCaptureHandle(on_pcm)
         try:
             stream = self._pyaudio.open(
@@ -226,8 +227,8 @@ class PyAudioCaptureBackend:
 
     @staticmethod
     def _device_id(kind: str, info: dict[str, object]) -> str:
-        """Use an opaque stable ID instead of a display name or transient index."""
-        identity = f"{kind}\0{info.get('hostApi', '')}\0{info['name']}"
+        """Use an opaque identity that distinguishes same-named endpoints."""
+        identity = f"{kind}\0{info.get('hostApi', '')}\0{info['name']}\0{info['index']}"
         return f"{kind}:{sha256(identity.encode()).hexdigest()[:24]}"
 
 
@@ -248,32 +249,59 @@ class CaptureSession:
         self._system_device_id = system_device_id
         self._on_pcm = on_pcm
         self._on_event = on_event
+        selected_ids = {microphone_id, system_device_id}
+        self._selected_labels = {
+            device.device_id: device.label
+            for device in backend.list_devices()
+            if device.device_id in selected_ids
+        }
         self._lock = RLock()
         self._handles: dict[str, CaptureHandle] = {}
+        self._starting = False
+        self._startup_error: Exception | None = None
+        self._selection_invalid = False
 
     def start(self) -> None:
         """Start both sources or leave no active source behind."""
         with self._lock:
+            if self._selection_invalid:
+                raise DeviceUnavailableError("Select a replacement device")
             if self._handles:
                 return
             labels = {device.device_id: device.label for device in self._backend.list_devices()}
+            for device_id, label in labels.items():
+                self._selected_labels.setdefault(device_id, label)
             opening_device_id = self._microphone_id
+            self._starting = True
+            self._startup_error = None
             try:
-                microphone = self._backend.open_microphone(self._microphone_id, self._on_pcm)
+                microphone = self._backend.open_microphone(
+                    self._microphone_id, lambda pcm: self._on_pcm("mic", pcm)
+                )
                 self._install_handle(self._microphone_id, microphone)
+                self._raise_startup_error()
                 opening_device_id = self._system_device_id
-                loopback = self._backend.open_loopback(self._system_device_id, self._on_pcm)
+                loopback = self._backend.open_loopback(
+                    self._system_device_id, lambda pcm: self._on_pcm("system", pcm)
+                )
                 self._install_handle(self._system_device_id, loopback)
-            except DeviceUnavailableError:
+                self._raise_startup_error()
+            except DeviceUnavailableError as error:
+                self._selection_invalid = True
                 self.stop()
-                raise
+                raise DeviceUnavailableError(
+                    self._selected_labels.get(opening_device_id, error.display_name)
+                ) from error
             except OSError as error:
-                failed_label = labels.get(opening_device_id, opening_device_id)
+                self._selection_invalid = True
+                failed_label = self._selected_labels.get(opening_device_id, opening_device_id)
                 self.stop()
                 raise DeviceUnavailableError(failed_label) from error
             except Exception:
                 self.stop()
                 raise
+            finally:
+                self._starting = False
 
     def stop(self) -> None:
         """Drain and close every source; repeated calls are harmless."""
@@ -288,10 +316,21 @@ class CaptureSession:
         self._handles[device_id] = handle
         handle.set_error_handler(lambda error: self._handle_source_error(device_id, error))
 
+    def _raise_startup_error(self) -> None:
+        if self._startup_error is not None:
+            raise self._startup_error
+
     def _handle_source_error(self, device_id: str, _error: Exception) -> None:
         with self._lock:
+            if self._starting:
+                if isinstance(_error, DeviceUnavailableError):
+                    self._selection_invalid = True
+                self._startup_error = _error
+                return
             if device_id not in self._handles:
                 return
+            if isinstance(_error, DeviceUnavailableError):
+                self._selection_invalid = True
         self.stop()
         if isinstance(_error, DeviceUnavailableError) and self._on_event is not None:
             self._on_event(
