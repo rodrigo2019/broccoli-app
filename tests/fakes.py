@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -9,6 +10,7 @@ from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.models import DeviceDescriptor, SegmentPage, SessionPage, SessionSummary
 from broccoli_desktop.remote import (
     RemoteEvent,
+    RemoteFailure,
     RemoteProtocolError,
     RemoteUnauthorizedError,
     SessionStarted,
@@ -22,6 +24,153 @@ class FakeRemoteClosedError(Exception):
 
     def __init__(self) -> None:
         super().__init__("Remote stream closed.")
+
+
+@dataclass
+class FakeClock:
+    """Record retry delays without waiting for wall-clock time."""
+
+    delays: list[float] = field(default_factory=list)
+
+    async def sleep(self, delay: float) -> None:
+        self.delays.append(delay)
+
+
+@dataclass
+class FakeLiveRemoteStream:
+    """In-process stream whose events are supplied by lifecycle tests."""
+
+    events_queue: asyncio.Queue[RemoteEvent | Exception | None] = field(
+        default_factory=asyncio.Queue
+    )
+    frames: list[bytes] = field(default_factory=list)
+    controls: list[dict[str, str]] = field(default_factory=list)
+    closed: bool = False
+
+    async def send_bytes(self, frame: bytes) -> None:
+        self.frames.append(frame)
+
+    async def send_control(self, message: dict[str, str]) -> None:
+        self.controls.append(message.copy())
+
+    async def events(self) -> AsyncIterator[RemoteEvent]:
+        while True:
+            event = await self.events_queue.get()
+            if event is None:
+                return
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+    async def emit(self, event: RemoteEvent | Exception | None) -> None:
+        await self.events_queue.put(event)
+
+    async def close(self) -> None:
+        self.closed = True
+        await self.events_queue.put(None)
+
+
+@dataclass
+class FakeSessionRemote:
+    """Offline remote that emits a fresh session.started event per connection."""
+
+    sessions: dict[str, SessionSummary] = field(
+        default_factory=lambda: {
+            "session-1": SessionSummary(
+                uuid_code="session-1",
+                title="Existing session",
+                status="live",
+                started_at="2026-08-19T10:00:00Z",
+                ended_at=None,
+                device_label="Speakers",
+                segment_count=0,
+                is_live=True,
+            )
+        }
+    )
+    next_offsets: list[int] = field(default_factory=lambda: [0])
+    streams: list[FakeLiveRemoteStream] = field(default_factory=list)
+    stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
+    unauthorized: bool = False
+
+    async def verify_token(self) -> SessionPage:
+        self._assert_authorized()
+        return SessionPage(tuple(self.sessions.values()), None)
+
+    async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
+        self._assert_authorized()
+        return SessionPage(tuple(self.sessions.values()), None)
+
+    async def get_session(self, uuid_code: str) -> SessionSummary:
+        self._assert_authorized()
+        return self.sessions[uuid_code]
+
+    async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
+        self._assert_authorized()
+        return SegmentPage((), None)
+
+    async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
+        self._assert_authorized()
+        summary = self.sessions[uuid_code]
+        updated = replace(summary, title=title)
+        self.sessions[uuid_code] = updated
+        return updated
+
+    async def connect_stream(
+        self, *, resume_code: str | None, device_label: str
+    ) -> FakeLiveRemoteStream:
+        self._assert_authorized()
+        uuid_code = resume_code or "session-1"
+        if uuid_code not in self.sessions:
+            self.sessions[uuid_code] = SessionSummary(
+                uuid_code=uuid_code,
+                title="",
+                status="live",
+                started_at="2026-08-19T10:00:00Z",
+                ended_at=None,
+                device_label=device_label,
+                segment_count=0,
+                is_live=True,
+            )
+        offset = self.next_offsets[min(len(self.streams), len(self.next_offsets) - 1)]
+        stream = FakeLiveRemoteStream()
+        self.streams.append(stream)
+        self.stream_requests.append((resume_code, device_label))
+        await stream.emit(SessionStarted(uuid_code, 1, offset, 14_400))
+        return stream
+
+    async def emit_delta(self, channel: str, utterance_id: str, text: str) -> None:
+        await self.streams[-1].emit(TranscriptDeltaEvent(channel, utterance_id, text, 500))
+
+    async def emit_segment(
+        self,
+        channel: str,
+        utterance_id: str,
+        text: str,
+        started_offset_ms: int,
+        ended_offset_ms: int,
+    ) -> None:
+        await self.streams[-1].emit(
+            TranscriptSegmentEvent(channel, utterance_id, text, started_offset_ms, ended_offset_ms)
+        )
+
+    async def emit_failure(self) -> None:
+        await self.streams[-1].emit(FakeRemoteClosedError())
+
+    async def emit_credit_denied(self) -> None:
+        await self.streams[-1].emit(RemoteFailure())
+
+    async def emit_ended(self) -> None:
+        from broccoli_desktop.remote import SessionEnded
+
+        await self.streams[-1].emit(SessionEnded())
+
+    def revoke_token(self) -> None:
+        self.unauthorized = True
+
+    def _assert_authorized(self) -> None:
+        if self.unauthorized:
+            raise RemoteUnauthorizedError
 
 
 @dataclass
