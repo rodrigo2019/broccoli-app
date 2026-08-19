@@ -338,6 +338,32 @@ def test_browser_only_stops_capture_before_shutting_down_the_server(
     assert fake_browser_only_server_factory.server.shutdown_calls == 1
 
 
+def test_browser_only_reports_an_unavailable_server_loop_after_shutting_it_down() -> None:
+    """A closed loop must not let browser-only cleanup claim the capture stopped."""
+    session = FakeSession(state=ConnectionState.STREAMING)
+    server = LoopClosingStopServer(
+        controller=session,
+        fail_stop_once=False,
+        loop_closed=True,
+    )
+
+    with raises(RuntimeError, match="local capture stop could not run"):
+        start_browser_only(
+            RuntimeConfig(
+                environment="local",
+                server_url="http://127.0.0.1:8000",
+                websocket_path="/ws/listening/",
+            ),
+            port=8765,
+            server_factory=lambda _config, _port: server,
+            wait_for_interrupt=lambda: None,
+        )
+
+    assert session.local_capture_stop_calls == 1
+    assert session.stop_calls == 0
+    assert server.shutdown_calls == 1
+
+
 def test_browser_only_rejects_a_port_outside_the_tcp_range() -> None:
     """An invalid requested port must fail before production services can bind it."""
     factory_called = False

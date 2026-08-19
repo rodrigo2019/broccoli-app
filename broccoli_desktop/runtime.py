@@ -402,7 +402,14 @@ def _stop_browser_only_server(server: LoopbackServerProtocol) -> None:
     failures: list[Exception] = []
     session = server.controller
     if session is not None:
-        for action in (session.stop_local_capture, lambda: server.run_coroutine(session.stop())):
+
+        def stop_controller() -> None:
+            if server.run_coroutine(session.stop()) is False:
+                raise RuntimeError(
+                    "The local capture stop could not run because the loopback service is closed."
+                )
+
+        for action in (session.stop_local_capture, stop_controller):
             try:
                 action()
             except Exception as error:
