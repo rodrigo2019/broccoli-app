@@ -77,6 +77,24 @@ def test_pipeline_keeps_mic_and_system_accumulation_independent(
     assert [frame.channel for frame in mic_after] == ["mic"]
 
 
+def test_interleaved_sources_share_the_same_capture_period_offsets(
+    fake_vad: FakeVad, fake_resampler: FakeResampler
+) -> None:
+    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler, base_offset_ms=12_345)
+
+    frames = [
+        frame
+        for _ in range(5)
+        for channel in ("mic", "system")
+        for frame in pipeline.feed(channel, pcm_20ms())
+    ]
+
+    assert {frame.channel: frame.offset_ms for frame in frames} == {
+        "mic": 12_345,
+        "system": 12_345,
+    }
+
+
 def test_pipeline_preserves_resampled_carry_over_between_frames(fake_vad: FakeVad) -> None:
     pipeline = AudioPipeline(vad=fake_vad, resampler=FakeResampler(output_bytes=1_000))
 

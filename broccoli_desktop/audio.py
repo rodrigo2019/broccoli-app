@@ -51,7 +51,10 @@ class AudioPipeline:
         self._vad = vad or webrtcvad.Vad(2)
         self._resampler = resampler or SoxrResampler()
         self._base_offset_ms = base_offset_ms
-        self._capture_offset_ms = 0
+        self._capture_offsets_ms: dict[Literal["mic", "system"], int] = {
+            "mic": 0,
+            "system": 0,
+        }
         self._buffers = {"mic": bytearray(), "system": bytearray()}
         self._buffer_offsets_ms: dict[Literal["mic", "system"], int | None] = {
             "mic": None,
@@ -65,8 +68,8 @@ class AudioPipeline:
         if len(pcm_48k) != INPUT_BLOCK_BYTES:
             raise ValueError("PCM input must be exactly one 20 ms 48 kHz mono PCM16 block.")
 
-        capture_offset_ms = self._capture_offset_ms
-        self._capture_offset_ms += INPUT_BLOCK_MS
+        capture_offset_ms = self._capture_offsets_ms[channel]
+        self._capture_offsets_ms[channel] += INPUT_BLOCK_MS
         if not self._vad.is_speech(pcm_48k, INPUT_SAMPLE_RATE):
             return []
 
