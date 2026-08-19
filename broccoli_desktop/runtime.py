@@ -23,6 +23,7 @@ from broccoli_desktop.config import (
 from broccoli_desktop.credentials import CredentialStore
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
+from broccoli_desktop.settings import LocalDeviceSettings
 
 HEALTH_PATH = "/health"
 STARTUP_TIMEOUT_SECONDS = 10
@@ -376,6 +377,7 @@ def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
             capture_backend=PyAudioCaptureBackend(pyaudiowpatch.PyAudio()),
             loopback_port=port,
             official_broccoli_url=config.server_url,
+            device_settings=LocalDeviceSettings(),
         )
 
     return UvicornLoopbackServer(create_services)

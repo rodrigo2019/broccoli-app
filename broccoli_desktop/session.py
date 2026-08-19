@@ -58,10 +58,12 @@ class DesktopSessionController:
         capture_backend: CaptureBackend,
         *,
         clock: SleepClock | Callable[[float], Awaitable[None]] | None = None,
+        on_authentication_failure: Callable[[], None] | None = None,
     ) -> None:
         self._remote = remote
         self._capture_backend = capture_backend
         self._clock = clock
+        self._on_authentication_failure = on_authentication_failure
         self.events = EventHub()
         self.state = ConnectionState.IDLE
         self.pending_deltas: dict[str, TranscriptDelta] = {}
@@ -111,6 +113,7 @@ class DesktopSessionController:
         if self.state is ConnectionState.STOPPED:
             return
         self.stop_local_capture()
+        self._clear_buffered_frames()
         reader = self._reader_task
         if reader is not None and reader is not asyncio.current_task():
             reader.cancel()
@@ -120,19 +123,20 @@ class DesktopSessionController:
         if stream is None and self.state is ConnectionState.RECONNECTING:
             stream = await self._connect_terminal_stream()
         if stream is not None:
-            try:
-                await stream.send_control({"type": "session.end"})
-            except Exception:
-                pass
-            try:
-                await stream.close()
-            except Exception:
-                pass
+            await self._end_and_close_stream(stream)
         self._set_state(ConnectionState.STOPPED)
 
     def stop_local_capture(self) -> None:
         """Stop capture synchronously while controller finalization remains pending."""
         self._stop_capture()
+
+    def restore_selected_devices(self, choices: CaptureChoices) -> None:
+        """Restore a previously validated local selection without starting capture."""
+        self._choices = choices
+
+    def set_authentication_failure_handler(self, callback: Callable[[], None] | None) -> None:
+        """Set the narrow local notification used when background recovery loses auth."""
+        self._on_authentication_failure = callback
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
         """Persist a user-selected title through the typed remote boundary."""
@@ -159,11 +163,13 @@ class DesktopSessionController:
             ConnectionState.RECONNECTING,
         }:
             raise RuntimeError("A desktop session is already active.")
+        self._clear_buffered_frames()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
         self._device_label = self._selected_system_label(choices)
         self._set_state(ConnectionState.STARTING)
         stream = None
+        remote_period_started = False
         try:
             stream = await self._remote.connect_stream(
                 resume_code=resume_code, device_label=self._device_label
@@ -172,6 +178,7 @@ class DesktopSessionController:
             started = await anext(iterator)
             if not isinstance(started, SessionStarted):
                 raise RemoteProtocolError("Remote stream did not start a session.")
+            remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
             self._set_pipeline(started.next_offset_ms)
@@ -190,21 +197,21 @@ class DesktopSessionController:
             )
             self._capture.start()
         except DeviceUnavailableError:
-            if stream is not None:
-                await self._close_stream(stream)
+            await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
+            self._clear_buffered_frames()
             self._set_state(ConnectionState.DEVICE_SELECTION_REQUIRED)
             raise
         except RemoteUnauthorizedError:
-            if stream is not None:
-                await self._close_stream(stream)
+            await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
+            self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Authentication failed.")
             raise
         except Exception:
-            if stream is not None:
-                await self._close_stream(stream)
+            await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
+            self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Unable to start the session.")
             raise
         self.events.publish(UiEvent(type="session", session=summary))
@@ -305,6 +312,8 @@ class DesktopSessionController:
                 except RemoteUnauthorizedError:
                     await self._discard_recovery_stream(stream or self._recovery_stream)
                     self._stop_capture()
+                    self._clear_buffered_frames()
+                    self._notify_authentication_failure()
                     self._set_state(ConnectionState.FAILED, message="Authentication failed.")
                     return
                 except Exception:
@@ -314,12 +323,14 @@ class DesktopSessionController:
                     )
             await self._discard_recovery_stream(self._recovery_stream)
             self._stop_capture()
+            self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Connection could not be restored.")
         finally:
             self._recovery_active = False
 
     async def _end_from_remote(self) -> None:
         self._stop_capture()
+        self._clear_buffered_frames()
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
@@ -329,6 +340,7 @@ class DesktopSessionController:
 
     async def _fail_from_remote(self) -> None:
         self._stop_capture()
+        self._clear_buffered_frames()
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
@@ -351,8 +363,10 @@ class DesktopSessionController:
 
     async def _forward_frame(self, frame: AudioFrame) -> None:
         stream = self._stream or self._recovery_stream
-        if self.state is not ConnectionState.STREAMING or stream is None:
+        if self.state is ConnectionState.RECONNECTING:
             self.enqueue_audio_frames([frame])
+            return
+        if self.state is not ConnectionState.STREAMING or stream is None:
             return
         try:
             await stream.send_bytes(
@@ -378,8 +392,10 @@ class DesktopSessionController:
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
+        self._stop_capture()
+        self._clear_buffered_frames()
         if stream is not None:
-            await self._close_stream(stream)
+            await self._end_and_close_stream(stream)
         self._set_state(
             ConnectionState.DEVICE_SELECTION_REQUIRED,
             message="Select a replacement capture device.",
@@ -427,6 +443,36 @@ class DesktopSessionController:
                 await close()
             except Exception:
                 pass
+
+    async def _close_open_stream(
+        self, stream: RemoteStream | None, remote_period_started: bool
+    ) -> None:
+        if stream is None:
+            return
+        if remote_period_started:
+            await self._end_and_close_stream(stream)
+            return
+        await self._close_stream(stream)
+
+    async def _end_and_close_stream(self, stream: RemoteStream) -> None:
+        """Best-effort remote finalization whose failures cannot mask the local cause."""
+        try:
+            await stream.send_control({"type": "session.end"})
+        except Exception:
+            pass
+        await self._close_stream(stream)
+
+    def _clear_buffered_frames(self) -> None:
+        self._buffered_frames.clear()
+
+    def _notify_authentication_failure(self) -> None:
+        callback = self._on_authentication_failure
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            pass
 
     async def _discard_recovery_stream(self, stream: RemoteStream | None) -> None:
         if stream is None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,9 +15,11 @@ from broccoli_desktop.models import (
     UiEvent,
 )
 from broccoli_desktop.remote import RemoteRequestError, RemoteUnauthorizedError
+from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from tests.fakes import (
     VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
+    FakeClock,
     FakeSessionRemote,
     visual_test_remote_factory,
 )
@@ -44,6 +48,26 @@ class FakeCredentials:
             raise CredentialStorageError("Credential storage is unavailable.")
         self.token = None
         self.deleted_count += 1
+
+
+@dataclass
+class FakeDeviceSettings:
+    """In-memory selection storage that can never write to a user profile."""
+
+    selection: CaptureChoices | None = None
+    saved: list[CaptureChoices] = field(default_factory=list)
+    clear_count: int = 0
+
+    def load(self) -> CaptureChoices | None:
+        return self.selection
+
+    def save(self, selection: CaptureChoices) -> None:
+        self.selection = selection
+        self.saved.append(selection)
+
+    def clear(self) -> None:
+        self.selection = None
+        self.clear_count += 1
 
 
 @dataclass
@@ -344,6 +368,147 @@ def test_remote_auth_failure_deletes_the_credential_and_returns_401(
     assert response.status_code == 401
     assert fake_credentials.token is None
     assert response.json() == {"detail": "Authentication is required."}
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/sessions", {"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"}),
+        (
+            "/api/sessions/session-1/resume",
+            {"microphone_id": "mic-1", "system_device_id": "system-1"},
+        ),
+    ],
+)
+def test_stream_start_auth_failure_deletes_credentials_and_returns_401(
+    client: TestClient,
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    path: str,
+    body: dict[str, str],
+) -> None:
+    login(client)
+    fake_remote_factory.remote.revoke_token()
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 401
+    assert fake_credentials.token is None
+    assert response.json() == {"detail": "Authentication is required."}
+
+
+@pytest.mark.asyncio
+async def test_background_recovery_auth_failure_clears_the_service_credential(
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        controller_factory=lambda remote, capture: DesktopSessionController(
+            remote, capture, clock=FakeClock()
+        ),
+    )
+    fake_credentials.save_token("candidate")
+    controller, _remote = services.authenticated()  # type: ignore[misc]
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+    fake_remote_factory.remote.revoke_token()
+
+    await fake_remote_factory.remote.emit_failure()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert fake_credentials.token is None
+    assert fake_credentials.deleted_count == 1
+    assert services.controller is None
+
+
+def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    settings = FakeDeviceSettings()
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+    login(client)
+
+    started = client.post(
+        "/api/sessions",
+        json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    stopped = client.post("/api/sessions/stop")
+    resumed = client.post(
+        "/api/sessions/session-1/resume",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    fresh_services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    fresh_client = TestClient(create_app(fresh_services), headers={"host": "127.0.0.1"})
+    bootstrap = fresh_client.get("/api/bootstrap")
+
+    assert started.status_code == 201
+    assert stopped.status_code == 204
+    assert resumed.status_code == 201
+    assert settings.saved == [
+        CaptureChoices("mic-1", "system-1"),
+        CaptureChoices("mic-1", "system-1"),
+    ]
+    assert bootstrap.json()["selected_devices"] == {
+        "microphone_id": "mic-1",
+        "system_device_id": "system-1",
+    }
+
+
+def test_missing_persisted_device_selection_is_cleared_and_requires_replacement(
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    settings = FakeDeviceSettings(selection=CaptureChoices("mic-1", "system-1"))
+    fake_capture.devices = [
+        device for device in fake_capture.devices if device.device_id != "system-1"
+    ]
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    fake_credentials.save_token("candidate")
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+
+    bootstrap = client.get("/api/bootstrap")
+    start = client.post(
+        "/api/sessions",
+        json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert bootstrap.json()["selected_devices"] is None
+    assert settings.selection is None
+    assert settings.clear_count == 1
+    assert start.status_code == 422
+
+
+def test_static_client_renders_each_transcript_row_with_its_event_offset_timestamp() -> None:
+    source = (Path(__file__).parents[1] / "broccoli_desktop" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function formatTranscriptTimestamp(offsetMs)" in source
+    assert "timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);" in source
+    assert "row.append(timestamp, channel, text);" in source
 
 
 def test_remote_outage_is_a_recoverable_503(

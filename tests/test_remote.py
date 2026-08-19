@@ -10,6 +10,8 @@ import pytest
 from broccoli_desktop.remote import (
     HttpListeningRemote,
     RemoteProtocolError,
+    RemoteRequestError,
+    RemoteUnauthorizedError,
     SessionStarted,
     TranscriptDeltaEvent,
     TranscriptSegmentEvent,
@@ -82,6 +84,29 @@ class FakeSocketFactory:
         self.urls.append(url)
         self.headers.append(additional_headers)
         return self.socket
+
+
+class HandshakeError(Exception):
+    """Fake handshake failure whose payload-like message must not escape."""
+
+    def __init__(self, *, status_code: int | None = None, response: object | None = None) -> None:
+        super().__init__("remote handshake payload that must not escape")
+        self.status_code = status_code
+        self.response = response
+
+
+@dataclass(frozen=True)
+class HandshakeResponse:
+    status_code: int
+
+
+@dataclass
+class FailingSocketFactory:
+    error: Exception
+
+    async def __call__(self, _url: str, *, additional_headers: dict[str, str]) -> FakeSocket:
+        del additional_headers
+        raise self.error
 
 
 @pytest.fixture
@@ -287,6 +312,45 @@ async def test_stream_parses_a_started_event_with_resume_offset() -> None:
         )
     ]
     assert socket_factory.urls == ["ws://broccoli.example/ws/listening/"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        HandshakeError(status_code=401),
+        HandshakeError(response=HandshakeResponse(status_code=403)),
+    ],
+)
+async def test_authenticated_websocket_handshake_failure_is_mapped_without_payload(
+    error: HandshakeError,
+) -> None:
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/backend-owner-confirmed/",
+        socket_factory=FailingSocketFactory(error),
+    )
+
+    with pytest.raises(RemoteUnauthorizedError) as raised:
+        await remote.connect_stream(resume_code=None, device_label="Laptop")
+
+    assert "remote handshake payload" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_non_authentication_websocket_handshake_failure_remains_a_request_error() -> None:
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/backend-owner-confirmed/",
+        socket_factory=FailingSocketFactory(HandshakeError(status_code=502)),
+    )
+
+    with pytest.raises(RemoteRequestError) as raised:
+        await remote.connect_stream(resume_code=None, device_label="Laptop")
+
+    assert "remote handshake payload" not in str(raised.value)
 
 
 @pytest.mark.asyncio

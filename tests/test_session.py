@@ -4,11 +4,19 @@ import asyncio
 
 import pytest
 
+from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.events import EventHub
 from broccoli_desktop.models import AudioFrame, ConnectionState, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
+from broccoli_desktop.remote import RemoteFailure, RemoteProtocolError, RemoteRequestError
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
-from tests.fakes import FakeCaptureBackend, FakeClock, FakeSessionRemote
+from tests.fakes import (
+    FakeCaptureBackend,
+    FakeClock,
+    FakeListeningRemote,
+    FakeRemoteStream,
+    FakeSessionRemote,
+)
 
 
 @pytest.fixture
@@ -312,3 +320,167 @@ async def test_device_loss_requires_device_selection_without_retrying(
     assert fake_clock.delays == []
     assert controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED
     assert fake_remote.stream_requests == [("session-1", "Speakers")]
+
+
+@pytest.mark.asyncio
+async def test_capture_startup_failure_ends_the_started_remote_period_before_closing(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    fake_capture.fail_opening = "mic-1"
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    controller.enqueue_audio_frames([AudioFrame("mic", 100, bytes(2))])
+
+    with pytest.raises(DeviceUnavailableError):
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+
+    assert fake_remote.streams[0].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[0].lifecycle == ["control", "close"]
+    assert controller.buffered_audio_ms == 0
+    assert controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_startup_finalization_errors_do_not_mask_the_local_capture_failure(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    fake_capture.fail_opening = "mic-1"
+    fake_remote.fail_control_stream_indexes = {0}
+    fake_remote.fail_close_stream_indexes = {0}
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    with pytest.raises(DeviceUnavailableError):
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+
+    assert fake_remote.streams[0].lifecycle == ["control", "close"]
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_before_session_started_does_not_send_session_end(
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    stream = FakeRemoteStream(scripted_events=[RemoteFailure()])
+    remote = FakeListeningRemote(stream=stream)
+    controller = DesktopSessionController(remote, fake_capture)
+
+    with pytest.raises(RemoteProtocolError):
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+
+    assert stream.controls == []
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_device_loss_ends_the_started_remote_period_before_closing(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
+
+    fake_capture.handles["system-1"].lose_device()
+    await settle()
+
+    assert fake_remote.streams[0].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[0].lifecycle == ["control", "close"]
+    assert controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["stop", "remote_end", "remote_failure", "device_loss"])
+async def test_terminal_paths_discard_buffered_frames_before_a_fresh_reconnect(
+    terminal: str,
+    fake_clock: FakeClock,
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    choices = CaptureChoices("mic-1", "system-1")
+    await controller.start_new(choices, title="")
+    controller.enqueue_audio_frames([AudioFrame("mic", 100, bytes(2))])
+
+    if terminal == "stop":
+        await controller.stop()
+    elif terminal == "remote_end":
+        await fake_remote.emit_ended()
+        await settle()
+    elif terminal == "remote_failure":
+        await fake_remote.emit_credit_denied()
+        await settle()
+    else:
+        fake_capture.handles["system-1"].lose_device()
+        await settle()
+
+    assert controller.buffered_audio_ms == 0
+
+    await controller.resume("session-1", choices)
+    controller.enqueue_audio_frames([AudioFrame("system", 900, bytes(2))])
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
+        900
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recovery_auth_failure_discards_buffered_frames_before_a_later_reconnect(
+    fake_clock: FakeClock,
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    choices = CaptureChoices("mic-1", "system-1")
+    await controller.start_new(choices, title="")
+    controller.enqueue_audio_frames([AudioFrame("mic", 100, bytes(2))])
+    fake_remote.revoke_token()
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert controller.state is ConnectionState.FAILED
+    assert controller.buffered_audio_ms == 0
+
+    fake_remote.unauthorized = False
+    await controller.resume("session-1", choices)
+    controller.enqueue_audio_frames([AudioFrame("system", 900, bytes(2))])
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
+        900
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recovery_exhaustion_discards_buffered_frames_before_a_later_reconnect(
+    fake_clock: FakeClock,
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    choices = CaptureChoices("mic-1", "system-1")
+    original_connect = fake_remote.connect_stream
+
+    async def fail_reconnects(*, resume_code: str | None, device_label: str):
+        if resume_code is not None:
+            raise RemoteRequestError()
+        return await original_connect(resume_code=resume_code, device_label=device_label)
+
+    fake_remote.connect_stream = fail_reconnects  # type: ignore[method-assign]
+    await controller.start_new(choices, title="")
+    controller.enqueue_audio_frames([AudioFrame("mic", 100, bytes(2))])
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert controller.state is ConnectionState.FAILED
+    assert controller.buffered_audio_ms == 0
+
+    fake_remote.connect_stream = original_connect  # type: ignore[method-assign]
+    await controller.resume("session-1", choices)
+    controller.enqueue_audio_frames([AudioFrame("system", 900, bytes(2))])
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
+        900
+    ]

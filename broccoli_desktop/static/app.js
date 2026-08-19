@@ -199,17 +199,29 @@
     }
   }
 
+  function formatTranscriptTimestamp(offsetMs) {
+    const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const clock = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    return hours ? `${String(hours).padStart(2, "0")}:${clock}` : clock;
+  }
+
   function transcriptRow(entry, isDelta) {
     const row = document.createElement("article");
     row.className = isDelta ? "transcript-row transcript-row-delta" : "transcript-row";
     row.dataset.utteranceId = entry.utterance_id;
+    const timestamp = document.createElement("time");
+    timestamp.className = "transcript-timestamp text-xs text-base-content/60";
+    timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
     const channel = document.createElement("span");
     channel.className = entry.channel === "mic" ? "channel-label channel-label-mic" : "channel-label channel-label-system";
     channel.textContent = entry.channel === "mic" ? "Você" : "Participantes";
     const text = document.createElement("p");
     text.className = isDelta ? "italic text-base-content/70" : "";
     text.textContent = entry.text;
-    row.append(channel, text);
+    row.append(timestamp, channel, text);
     return row;
   }
 

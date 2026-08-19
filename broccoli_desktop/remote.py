@@ -180,7 +180,9 @@ class HttpListeningRemote:
                 _stream_url(self._base_url, self._websocket_path),
                 additional_headers={"Authorization": _authorization_header(self._token)},
             )
-        except Exception:
+        except Exception as error:
+            if _handshake_status_code(error) in {401, 403}:
+                raise RemoteUnauthorizedError from None
             raise RemoteRequestError from None
         stream = _WebSocketRemoteStream(socket)
         await stream.send_control(
@@ -265,6 +267,16 @@ def _stream_url(base_url: str, websocket_path: str) -> str:
     if scheme is None:
         raise ValueError("Listening server URL must use HTTP or HTTPS.")
     return urlunsplit((scheme, parts.netloc, websocket_path, "", ""))
+
+
+def _handshake_status_code(error: Exception) -> int | None:
+    """Read only an exposed handshake status, never an error response payload."""
+    response = getattr(error, "response", None)
+    for source in (error, response):
+        status_code = getattr(source, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+    return None
 
 
 def _session_page(payload: Mapping[str, object]) -> SessionPage:

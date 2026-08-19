@@ -49,7 +49,10 @@ class FakeLiveRemoteStream:
     frames: list[bytes] = field(default_factory=list)
     controls: list[dict[str, str]] = field(default_factory=list)
     fail_send: bool = False
+    fail_control: bool = False
+    fail_close: bool = False
     closed: bool = False
+    lifecycle: list[str] = field(default_factory=list)
 
     async def send_bytes(self, frame: bytes) -> None:
         if self.fail_send:
@@ -57,6 +60,9 @@ class FakeLiveRemoteStream:
         self.frames.append(frame)
 
     async def send_control(self, message: dict[str, str]) -> None:
+        self.lifecycle.append("control")
+        if self.fail_control:
+            raise FakeRemoteClosedError()
         if self.closed:
             raise FakeRemoteClosedError()
         self.controls.append(message.copy())
@@ -74,6 +80,9 @@ class FakeLiveRemoteStream:
         await self.events_queue.put(event)
 
     async def close(self) -> None:
+        self.lifecycle.append("close")
+        if self.fail_close:
+            raise FakeRemoteClosedError()
         self.closed = True
         await self.events_queue.put(None)
 
@@ -103,6 +112,8 @@ class FakeSessionRemote:
     streams: list[FakeLiveRemoteStream] = field(default_factory=list)
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
     fail_send_stream_indexes: set[int] = field(default_factory=set)
+    fail_control_stream_indexes: set[int] = field(default_factory=set)
+    fail_close_stream_indexes: set[int] = field(default_factory=set)
     unauthorized: bool = False
 
     async def verify_token(self) -> SessionPage:
@@ -152,7 +163,11 @@ class FakeSessionRemote:
             )
         stream_index = len(self.streams)
         offset = self.next_offsets[min(stream_index, len(self.next_offsets) - 1)]
-        stream = FakeLiveRemoteStream(fail_send=len(self.streams) in self.fail_send_stream_indexes)
+        stream = FakeLiveRemoteStream(
+            fail_send=len(self.streams) in self.fail_send_stream_indexes,
+            fail_control=len(self.streams) in self.fail_control_stream_indexes,
+            fail_close=len(self.streams) in self.fail_close_stream_indexes,
+        )
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
         await stream.emit(SessionStarted(uuid_code, 1, offset, 14_400))

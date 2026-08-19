@@ -36,6 +36,7 @@ from broccoli_desktop.remote import (
     RemoteUnauthorizedError,
 )
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
+from broccoli_desktop.settings import DeviceSettings, InMemoryDeviceSettings
 
 LOOPBACK_HOST = "127.0.0.1"
 STATIC_DIRECTORY = Path(__file__).with_name("static")
@@ -65,6 +66,7 @@ class Services:
     loopback_port: int | None = None
     official_broccoli_url: str = PRODUCTION_SERVER_URL
     controller_factory: ControllerFactory = DesktopSessionController
+    device_settings: DeviceSettings = field(default_factory=InMemoryDeviceSettings)
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
@@ -77,14 +79,14 @@ class Services:
         if self._token != token or self._remote is None or self.controller is None:
             remote = self.remote_factory(token)
             self._remote = remote
-            self.controller = self.controller_factory(remote, self.capture_backend)
+            self.controller = self._create_controller(remote)
             self._token = token
         return self.controller, self._remote
 
     def set_authenticated(self, token: str, remote: ListeningRemote) -> None:
         """Install the already verified remote after credential persistence succeeds."""
         self._remote = remote
-        self.controller = self.controller_factory(remote, self.capture_backend)
+        self.controller = self._create_controller(remote)
         self._token = token
 
     def clear_authenticated(self) -> None:
@@ -92,6 +94,30 @@ class Services:
         self._remote = None
         self.controller = None
         self._token = None
+
+    def save_selected_devices(self, choices: CaptureChoices) -> None:
+        """Persist only opaque IDs after a capture period was successfully opened."""
+        self.device_settings.save(choices)
+
+    def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
+        controller = self.controller_factory(remote, self.capture_backend)
+        controller.set_authentication_failure_handler(self._on_background_authentication_failure)
+        selection = self.device_settings.load()
+        if selection is not None:
+            if _choices_are_available(self.capture_backend, selection):
+                controller.restore_selected_devices(selection)
+            else:
+                self.device_settings.clear()
+        return controller
+
+    def _on_background_authentication_failure(self) -> None:
+        """Forget the local credential without handing its value to the controller or UI."""
+        try:
+            self.credentials.delete_token()
+        except CredentialStorageError:
+            pass
+        finally:
+            self.clear_authenticated()
 
 
 class ApiError(Exception):
@@ -286,6 +312,7 @@ def create_app(services: Services) -> FastAPI:
             raise ApiError(401, "Authentication is required.") from None
         except (RemoteRequestError, RemoteProtocolError):
             raise ApiError(503, "The remote service is unavailable.") from None
+        services.save_selected_devices(choices)
         return _session_payload(session)
 
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
@@ -303,6 +330,7 @@ def create_app(services: Services) -> FastAPI:
             raise ApiError(401, "Authentication is required.") from None
         except (RemoteRequestError, RemoteProtocolError):
             raise ApiError(503, "The remote service is unavailable.") from None
+        services.save_selected_devices(choices)
         return _session_payload(session)
 
     @app.post("/api/sessions/stop", status_code=204)
@@ -406,6 +434,14 @@ def _validated_choices(backend: CaptureBackend, request: SessionRequest) -> Capt
     if microphone is None or microphone.kind != "mic" or system is None or system.kind != "system":
         raise ApiError(422, "Select an available microphone and system device.")
     return CaptureChoices(request.microphone_id, request.system_device_id)
+
+
+def _choices_are_available(backend: CaptureBackend, choices: CaptureChoices) -> bool:
+    devices = {device.device_id: device.kind for device in backend.list_devices()}
+    return (
+        devices.get(choices.microphone_id) == "mic"
+        and devices.get(choices.system_device_id) == "system"
+    )
 
 
 def _validate_title(title: str) -> str:
