@@ -78,11 +78,12 @@
                 <span class="label-text sr-only">Pesquisar sessões</span>
                 <input
                   id="sessionSearch"
-                  class="input input-bordered input-sm w-full"
+                  class="input input-bordered input-sm w-full disabled:cursor-not-allowed disabled:opacity-60"
                   type="search"
                   placeholder="Pesquisar sessões"
                   aria-label="Search meeting sessions"
                   data-testid="session-search"
+                  disabled
                 />
               </label>
               <nav
@@ -90,8 +91,8 @@
                 class="menu bg-base-100 min-h-0 flex-1 overflow-y-auto rounded-box p-0"
                 aria-label="Biblioteca de sessões"
                 data-testid="session-library"
-              ></nav>
-              <button id="loadMoreButton" class="btn btn-ghost btn-sm" type="button" data-testid="load-more">
+              ><p class="empty-history">Histórico não disponível neste backend.</p></nav>
+              <button id="loadMoreButton" class="btn btn-ghost btn-sm" type="button" data-testid="load-more" disabled>
                 Carregar mais
               </button>
             </div>
@@ -102,7 +103,7 @@
               <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
                 <div class="min-w-0 flex-1">
                   <label class="form-control" for="sessionTitle">
-                    <span class="label-text font-medium">Título da reunião</span>
+                    <span class="label-text font-medium">Título da reunião (somente local)</span>
                     <input
                       id="sessionTitle"
                       class="input input-ghost px-0 text-2xl font-bold"
@@ -112,7 +113,7 @@
                       aria-label="Título da reunião"
                     />
                   </label>
-                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/70">Escolha uma sessão para começar.</p>
+                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/70">Inicie uma captura para gerar um código local.</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <button id="copyCodeButton" class="btn btn-outline btn-sm" type="button" data-testid="copy-session-code">
@@ -151,7 +152,7 @@
 
               <div class="flex flex-wrap items-center gap-2">
                 <button id="startSessionButton" class="btn btn-primary" type="button">Iniciar captura</button>
-                <button id="resumeSessionButton" class="btn btn-secondary" type="button" data-testid="resume-session">
+                <button id="resumeSessionButton" class="btn btn-secondary" type="button" data-testid="resume-session" disabled title="Retomar sessões não está disponível neste backend">
                   Retomar sessão
                 </button>
                 <button id="stopSessionButton" class="btn btn-error btn-outline" type="button" data-testid="stop-session">

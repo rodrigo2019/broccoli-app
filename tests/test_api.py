@@ -11,17 +11,13 @@ from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
-    SessionPage,
     UiEvent,
 )
-from broccoli_desktop.remote import RemoteRequestError, RemoteUnauthorizedError
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from tests.fakes import (
-    VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
     FakeClock,
     FakeSessionRemote,
-    visual_test_remote_factory,
 )
 
 
@@ -143,11 +139,8 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="token-input"' in response.text
     assert 'data-testid="login-submit"' in response.text
     assert 'data-testid="login-error"' in response.text
-    assert 'data-testid="session-search"' in response.text
     assert 'data-testid="new-session"' in response.text
-    assert 'data-testid="load-more"' in response.text
     assert 'data-testid="session-library"' in response.text
-    assert 'data-testid="resume-session"' in response.text
     assert 'data-testid="stop-session"' in response.text
     assert 'data-testid="copy-session-code"' in response.text
     assert 'data-testid="open-broccoli"' in response.text
@@ -157,24 +150,6 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'aria-label="Search meeting sessions"' in response.text
     assert 'aria-label="Microphone"' in response.text
     assert 'aria-label="System audio"' in response.text
-
-
-@pytest.mark.asyncio
-async def test_visual_ui_fakes_provide_only_deterministic_local_data() -> None:
-    """Task 9 can drive the notebook without a remote service or audio hardware."""
-    factory = visual_test_remote_factory()
-    remote = factory(VISUAL_TEST_TOKEN)
-
-    first_page = await remote.list_sessions(cursor=None, query="")
-    second_page = await remote.list_sessions(cursor="history-2", query="")
-    search_page = await remote.list_sessions(cursor=None, query="Daily")
-
-    assert [session.title for session in first_page.sessions] == ["Daily"]
-    assert first_page.next_cursor == "history-2"
-    assert [session.title for session in second_page.sessions] == ["Planning"]
-    assert [session.title for session in search_page.sessions] == ["Daily"]
-    with pytest.raises(RemoteUnauthorizedError):
-        await factory("bad-token").verify_token()
 
 
 def test_login_verifies_before_storing_the_token(
@@ -209,7 +184,7 @@ def test_login_does_not_store_a_rejected_token(
     assert "bad" not in response.text
 
 
-def test_bootstrap_exposes_only_local_state_and_the_first_session_page(
+def test_bootstrap_marks_history_features_unavailable(
     client: TestClient,
     fake_credentials: FakeCredentials,
 ) -> None:
@@ -224,20 +199,12 @@ def test_bootstrap_exposes_only_local_state_and_the_first_session_page(
         "selected_devices": None,
         "state": "idle",
         "session": None,
-        "sessions": {
-            "sessions": [
-                {
-                    "uuid_code": "session-1",
-                    "title": "Existing session",
-                    "status": "live",
-                    "started_at": "2026-08-19T10:00:00Z",
-                    "ended_at": None,
-                    "device_label": "Speakers",
-                    "segment_count": 0,
-                    "is_live": True,
-                }
-            ],
-            "next_cursor": None,
+        "sessions": {"sessions": [], "next_cursor": None},
+        "capabilities": {
+            "history": False,
+            "remote_title": False,
+            "user_resume": False,
+            "segment_history": False,
         },
     }
     assert "candidate" not in response.text
@@ -255,47 +222,40 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
         "state": "idle",
         "session": None,
         "sessions": {"sessions": [], "next_cursor": None},
+        "capabilities": {
+            "history": False,
+            "remote_title": False,
+            "user_resume": False,
+            "segment_history": False,
+        },
     }
 
 
-def test_authenticated_routes_use_the_injected_remote_and_map_resources(
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("get", "/api/sessions", None),
+        ("get", "/api/sessions/session-1", None),
+        ("get", "/api/sessions/session-1/segments", None),
+        ("patch", "/api/sessions/session-1", {"title": "Renamed"}),
+        (
+            "post",
+            "/api/sessions/session-1/resume",
+            {"microphone_id": "mic-1", "system_device_id": "system-1"},
+        ),
+    ],
+)
+def test_history_routes_report_the_unavailable_capability(
     client: TestClient,
-    fake_remote_factory: FakeRemoteFactory,
+    method: str,
+    path: str,
+    payload: dict[str, str] | None,
 ) -> None:
     login(client)
+    response = client.request(method.upper(), path, json=payload)
 
-    sessions = client.get("/api/sessions", params={"cursor": "after", "q": "existing"})
-    session = client.get("/api/sessions/session-1")
-    segments = client.get("/api/sessions/session-1/segments", params={"cursor": "later"})
-
-    assert sessions.status_code == 200
-    assert session.status_code == 200
-    assert segments.status_code == 200
-    assert sessions.json()["sessions"][0]["uuid_code"] == "session-1"
-    assert session.json()["title"] == "Existing session"
-    assert segments.json() == {"segments": [], "next_cursor": None}
-
-
-def test_title_updates_an_active_session_locally_without_reaching_the_remote(
-    client: TestClient,
-    fake_remote_factory: FakeRemoteFactory,
-) -> None:
-    login(client)
-    started = client.post(
-        "/api/sessions",
-        json={"title": "Daily", "microphone_id": "mic-1", "system_device_id": "system-1"},
-    )
-
-    async def remote_title_update_must_not_be_called(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("remote title updates are outside the Listening contract")
-
-    fake_remote_factory.remote.update_title = remote_title_update_must_not_be_called  # type: ignore[method-assign]
-    response = client.patch("/api/sessions/session-1", json={"title": " Renamed "})
-
-    assert started.status_code == 201
-    assert response.status_code == 200
-    assert response.json()["title"] == "Renamed"
-    assert fake_remote_factory.remote.sessions["session-1"].title == "Existing session"
+    assert response.status_code == 409
+    assert response.json() == {"detail": "This backend does not provide session history."}
 
 
 def test_session_actions_validate_devices_titles_and_local_state(
@@ -312,23 +272,16 @@ def test_session_actions_validate_devices_titles_and_local_state(
         "/api/sessions",
         json={"title": "Daily", "microphone_id": "system-1", "system_device_id": "mic-1"},
     )
-    bad_title = client.patch("/api/sessions/session-1", json={"title": "x" * 121})
     started = client.post(
         "/api/sessions",
         json={"title": " Daily ", "microphone_id": "mic-1", "system_device_id": "system-1"},
-    )
-    duplicate = client.post(
-        "/api/sessions/session-1/resume",
-        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
     )
     stopped = client.post("/api/sessions/stop")
 
     assert unknown_device.status_code == 422
     assert wrong_kind.status_code == 422
-    assert bad_title.status_code == 422
     assert started.status_code == 201
     assert started.json()["title"] == "Daily"
-    assert duplicate.status_code == 409
     assert stopped.status_code == 204
     assert services.controller is not None
     assert services.controller.state is ConnectionState.STOPPED
@@ -354,29 +307,10 @@ def test_devices_and_logout_use_local_dependencies_only(
     assert fake_credentials.token is None
 
 
-def test_remote_auth_failure_deletes_the_credential_and_returns_401(
-    client: TestClient,
-    fake_credentials: FakeCredentials,
-    fake_remote_factory: FakeRemoteFactory,
-) -> None:
-    login(client)
-    fake_remote_factory.remote.revoke_token()
-
-    response = client.get("/api/sessions")
-
-    assert response.status_code == 401
-    assert fake_credentials.token is None
-    assert response.json() == {"detail": "Authentication is required."}
-
-
 @pytest.mark.parametrize(
     ("path", "body"),
     [
         ("/api/sessions", {"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"}),
-        (
-            "/api/sessions/session-1/resume",
-            {"microphone_id": "mic-1", "system_device_id": "system-1"},
-        ),
     ],
 )
 def test_stream_start_auth_failure_deletes_credentials_and_returns_401(
@@ -444,10 +378,6 @@ def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
         json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
     )
     stopped = client.post("/api/sessions/stop")
-    resumed = client.post(
-        "/api/sessions/session-1/resume",
-        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
-    )
     fresh_services = Services(
         credentials=fake_credentials,
         remote_factory=fake_remote_factory,
@@ -459,11 +389,7 @@ def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
 
     assert started.status_code == 201
     assert stopped.status_code == 204
-    assert resumed.status_code == 201
-    assert settings.saved == [
-        CaptureChoices("mic-1", "system-1"),
-        CaptureChoices("mic-1", "system-1"),
-    ]
+    assert settings.saved == [CaptureChoices("mic-1", "system-1")]
     assert bootstrap.json()["selected_devices"] == {
         "microphone_id": "mic-1",
         "system_device_id": "system-1",
@@ -510,22 +436,11 @@ def test_static_client_renders_each_transcript_row_with_its_event_offset_timesta
     assert "row.append(timestamp, channel, text);" in source
 
 
-def test_remote_outage_is_a_recoverable_503(
-    client: TestClient,
-    fake_remote_factory: FakeRemoteFactory,
-) -> None:
-    login(client)
+def test_notebook_explains_history_is_unavailable() -> None:
+    source = Path("broccoli_desktop/static/app.js").read_text(encoding="utf-8")
 
-    async def unavailable(*, cursor: str | None, query: str) -> SessionPage:
-        assert cursor is None
-        assert query == ""
-        raise RemoteRequestError()
-
-    fake_remote_factory.remote.list_sessions = unavailable  # type: ignore[method-assign]
-    response = client.get("/api/sessions")
-
-    assert response.status_code == 503
-    assert response.json() == {"detail": "The remote service is unavailable."}
+    assert "Histórico não disponível neste backend" in source
+    assert "capabilities.history" in source
 
 
 def test_keyring_outage_is_reported_without_exposing_credential_details(
@@ -571,18 +486,13 @@ def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
 
     assert bootstrap["type"] == "bootstrap"
     assert bootstrap["bootstrap"]["authenticated"] is True
-    assert bootstrap["bootstrap"]["sessions"]["sessions"] == [
-        {
-            "uuid_code": "session-1",
-            "title": "Existing session",
-            "status": "live",
-            "started_at": "2026-08-19T10:00:00Z",
-            "ended_at": None,
-            "device_label": "Speakers",
-            "segment_count": 0,
-            "is_live": True,
-        }
-    ]
+    assert bootstrap["bootstrap"]["sessions"] == {"sessions": [], "next_cursor": None}
+    assert bootstrap["bootstrap"]["capabilities"] == {
+        "history": False,
+        "remote_title": False,
+        "user_resume": False,
+        "segment_history": False,
+    }
     assert event == {"type": "warning", "message": "Session credits are running low."}
     assert "candidate" not in str([bootstrap, event])
 

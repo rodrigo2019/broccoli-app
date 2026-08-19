@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,8 +21,6 @@ from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
     DeviceDescriptor,
-    SegmentPage,
-    SessionPage,
     SessionSummary,
     TranscriptDelta,
     TranscriptSegment,
@@ -141,10 +139,6 @@ class StartSessionRequest(SessionRequest):
     title: str = ""
 
 
-class UpdateTitleRequest(BaseModel):
-    title: str
-
-
 class LoopbackHostMiddleware:
     """Reject Host headers that could expose this UI outside its local origin."""
 
@@ -252,10 +246,9 @@ def create_app(services: Services) -> FastAPI:
     async def bootstrap() -> dict[str, object]:
         authenticated = services.authenticated()
         if authenticated is None:
-            return _bootstrap_payload(None, SessionPage((), None), services.official_broccoli_url)
-        controller, remote = authenticated
-        page = await _call_remote(services, lambda: remote.list_sessions(cursor=None, query=""))
-        return _bootstrap_payload(controller, page, services.official_broccoli_url)
+            return _bootstrap_payload(None, services.official_broccoli_url)
+        controller, _remote = authenticated
+        return _bootstrap_payload(controller, services.official_broccoli_url)
 
     @app.get("/api/devices")
     async def devices() -> dict[str, object]:
@@ -266,35 +259,20 @@ def create_app(services: Services) -> FastAPI:
         }
 
     @app.get("/api/sessions")
-    async def list_sessions(cursor: str | None = None, q: str = "") -> dict[str, object]:
-        _controller, remote = _require_authenticated(services)
-        page = await _call_remote(services, lambda: remote.list_sessions(cursor=cursor, query=q))
-        return _session_page_payload(page)
+    async def list_sessions() -> None:
+        raise ApiError(409, "This backend does not provide session history.")
 
     @app.get("/api/sessions/{uuid_code}")
-    async def get_session(uuid_code: str) -> dict[str, object]:
-        _controller, remote = _require_authenticated(services)
-        session = await _call_remote(services, lambda: remote.get_session(uuid_code))
-        return _session_payload(session)
+    async def get_session(uuid_code: str) -> None:
+        raise ApiError(409, "This backend does not provide session history.")
 
     @app.get("/api/sessions/{uuid_code}/segments")
-    async def list_segments(uuid_code: str, cursor: str | None = None) -> dict[str, object]:
-        _controller, remote = _require_authenticated(services)
-        page = await _call_remote(services, lambda: remote.list_segments(uuid_code, cursor))
-        return _segment_page_payload(page)
+    async def list_segments(uuid_code: str) -> None:
+        raise ApiError(409, "This backend does not provide session history.")
 
     @app.patch("/api/sessions/{uuid_code}")
-    async def update_title(uuid_code: str, request: UpdateTitleRequest) -> dict[str, object]:
-        title = _validate_title(request.title)
-        controller, _remote = _require_authenticated(services)
-        try:
-            session = await controller.update_title(uuid_code, title)
-        except RemoteUnauthorizedError:
-            _delete_invalid_credential(services)
-            raise ApiError(401, "Authentication is required.") from None
-        except (RemoteRequestError, RemoteProtocolError):
-            raise ApiError(503, "The remote service is unavailable.") from None
-        return _session_payload(session)
+    async def update_title(uuid_code: str) -> None:
+        raise ApiError(409, "This backend does not provide session history.")
 
     @app.post("/api/sessions", status_code=201)
     async def start_session(request: StartSessionRequest) -> dict[str, object]:
@@ -316,22 +294,8 @@ def create_app(services: Services) -> FastAPI:
         return _session_payload(session)
 
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
-    async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
-        choices = _validated_choices(services.capture_backend, request)
-        controller, _remote = _require_authenticated(services)
-        try:
-            session = await controller.resume(uuid_code, choices)
-        except RuntimeError:
-            raise ApiError(409, "The current session cannot be changed.") from None
-        except DeviceUnavailableError:
-            raise ApiError(422, "The selected capture device is unavailable.") from None
-        except RemoteUnauthorizedError:
-            _delete_invalid_credential(services)
-            raise ApiError(401, "Authentication is required.") from None
-        except (RemoteRequestError, RemoteProtocolError):
-            raise ApiError(503, "The remote service is unavailable.") from None
-        services.save_selected_devices(choices)
-        return _session_payload(session)
+    async def resume_session(uuid_code: str) -> None:
+        raise ApiError(409, "This backend does not provide session history.")
 
     @app.post("/api/sessions/stop", status_code=204)
     async def stop_session() -> Response:
@@ -351,12 +315,7 @@ def create_app(services: Services) -> FastAPI:
         if authenticated is None:
             await websocket.close(code=1008)
             return
-        controller, remote = authenticated
-        try:
-            page = await _call_remote(services, lambda: remote.list_sessions(cursor=None, query=""))
-        except ApiError:
-            await websocket.close(code=1008)
-            return
+        controller, _remote = authenticated
         event_queue: asyncio.Queue[UiEvent] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -369,9 +328,7 @@ def create_app(services: Services) -> FastAPI:
             await websocket.send_json(
                 {
                     "type": "bootstrap",
-                    "bootstrap": _bootstrap_payload(
-                        controller, page, services.official_broccoli_url
-                    ),
+                    "bootstrap": _bootstrap_payload(controller, services.official_broccoli_url),
                 }
             )
             await _send_events(websocket, event_queue)
@@ -401,18 +358,6 @@ async def _send_events(websocket: WebSocket, event_queue: asyncio.Queue[UiEvent]
             await websocket.send_json(_event_payload(event_task.result()))
         if receive_task in done and receive_task.result()["type"] == "websocket.disconnect":
             return
-
-
-async def _call_remote[RemoteResult](
-    services: Services, operation: Callable[[], Awaitable[RemoteResult]]
-) -> RemoteResult:
-    try:
-        return await operation()
-    except RemoteUnauthorizedError:
-        _delete_invalid_credential(services)
-        raise ApiError(401, "Authentication is required.") from None
-    except (RemoteRequestError, RemoteProtocolError):
-        raise ApiError(503, "The remote service is unavailable.") from None
 
 
 def _require_authenticated(services: Services) -> tuple[DesktopSessionController, ListeningRemote]:
@@ -452,7 +397,7 @@ def _validate_title(title: str) -> str:
 
 
 def _bootstrap_payload(
-    controller: DesktopSessionController | None, page: SessionPage, official_broccoli_url: str
+    controller: DesktopSessionController | None, official_broccoli_url: str
 ) -> dict[str, object]:
     choices = controller.selected_devices if controller is not None else None
     return {
@@ -470,26 +415,18 @@ def _bootstrap_payload(
         "session": _session_payload(controller.session)
         if controller and controller.session
         else None,
-        "sessions": _session_page_payload(page),
+        "sessions": {"sessions": [], "next_cursor": None},
+        "capabilities": {
+            "history": False,
+            "remote_title": False,
+            "user_resume": False,
+            "segment_history": False,
+        },
     }
 
 
 def _device_payload(device: DeviceDescriptor) -> dict[str, str]:
     return {"device_id": device.device_id, "label": device.label, "kind": device.kind}
-
-
-def _session_page_payload(page: SessionPage) -> dict[str, object]:
-    return {
-        "sessions": [_session_payload(session) for session in page.sessions],
-        "next_cursor": page.next_cursor,
-    }
-
-
-def _segment_page_payload(page: SegmentPage) -> dict[str, object]:
-    return {
-        "segments": [_segment_payload(segment) for segment in page.segments],
-        "next_cursor": page.next_cursor,
-    }
 
 
 def _session_payload(session: SessionSummary) -> dict[str, object]:

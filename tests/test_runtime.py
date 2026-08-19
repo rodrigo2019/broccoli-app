@@ -518,5 +518,6 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
 
     assert login.status_code == 204
     assert bootstrap.json()["official_broccoli_url"] == VISUAL_TEST_BROCCOLI_URL
-    assert bootstrap.json()["sessions"]["sessions"][0]["title"] == "Daily"
+    assert bootstrap.json()["sessions"] == {"sessions": [], "next_cursor": None}
+    assert bootstrap.json()["capabilities"]["history"] is False
     assert VISUAL_TEST_TOKEN not in bootstrap.text

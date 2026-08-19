@@ -33,6 +33,12 @@
 
   const state = {
     authenticated: false,
+    capabilities: {
+      history: false,
+      remote_title: false,
+      user_resume: false,
+      segment_history: false,
+    },
     sessions: [],
     nextCursor: null,
     selectedSession: null,
@@ -40,7 +46,6 @@
     connectionState: "idle",
     pendingDeltas: new Map(),
     eventSocket: null,
-    searchTimer: null,
   };
 
   const badgeClasses = {
@@ -63,10 +68,6 @@
     }
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Não foi possível concluir esta ação.");
-  }
-
-  function sessionPath(uuidCode, suffix = "") {
-    return `/api/sessions/${encodeURIComponent(uuidCode)}${suffix}`;
   }
 
   function showStatus(message, tone = "info") {
@@ -125,6 +126,15 @@
 
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
+    elements.sessionSearch.disabled = !state.capabilities.history;
+    elements.loadMoreButton.disabled = !state.capabilities.history || !state.nextCursor;
+    if (!state.capabilities.history) {
+      const unavailable = document.createElement("p");
+      unavailable.className = "empty-history";
+      unavailable.textContent = "Histórico não disponível neste backend.";
+      elements.sessionLibrary.append(unavailable);
+      return;
+    }
     if (!state.sessions.length) {
       const empty = document.createElement("p");
       empty.className = "empty-history";
@@ -144,20 +154,27 @@
       details.className = "text-xs text-base-content/60";
       details.textContent = `${session.segment_count} segmentos`;
       row.append(title, details);
-      row.addEventListener("click", () => selectSession(session));
+      row.addEventListener("click", () => {
+        state.selectedSession = session;
+        clearTimeline();
+        renderSessions();
+        renderSessionDetails();
+      });
       elements.sessionLibrary.append(row);
     }
-    elements.loadMoreButton.classList.toggle("hidden", !state.nextCursor);
   }
 
   function renderSessionDetails() {
     const session = state.selectedSession;
     elements.sessionTitle.value = session?.title || "";
     elements.sessionMeta.textContent = session
-      ? `Código ${session.uuid_code} · ${session.segment_count} segmentos`
-      : "Escolha uma sessão para começar.";
+      ? `Código ${session.uuid_code} · ${session.segment_count} segmentos · título somente local`
+      : "Inicie uma captura para gerar um código local.";
+    elements.sessionTitle.title = state.capabilities.remote_title
+      ? ""
+      : "Este título é mantido somente durante esta captura.";
     elements.copyCodeButton.disabled = !session;
-    elements.resumeSessionButton.disabled = !session;
+    elements.resumeSessionButton.disabled = !state.capabilities.user_resume || !session;
   }
 
   function renderConnectionState() {
@@ -253,44 +270,10 @@
     const empty = document.createElement("p");
     empty.id = "emptyTimeline";
     empty.className = "empty-history";
-    empty.textContent = "A transcrição aparecerá aqui.";
+    empty.textContent = state.capabilities.segment_history
+      ? "A transcrição aparecerá aqui."
+      : "A transcrição aparecerá aqui durante esta captura.";
     elements.transcriptTimeline.append(empty);
-  }
-
-  async function loadSegments(session) {
-    clearTimeline();
-    try {
-      const page = await localFetch(sessionPath(session.uuid_code, "/segments"));
-      for (const segment of page.segments) {
-        renderSegment(segment);
-      }
-    } catch (error) {
-      showStatus(error.message, "error");
-    }
-  }
-
-  async function selectSession(session) {
-    state.selectedSession = session;
-    renderSessions();
-    renderSessionDetails();
-    await loadSegments(session);
-  }
-
-  async function loadSessions({ append = false } = {}) {
-    const cursor = append ? state.nextCursor : null;
-    const search = elements.sessionSearch.value.trim();
-    const params = new URLSearchParams();
-    if (cursor) params.set("cursor", cursor);
-    if (search) params.set("q", search);
-    const suffix = params.size ? `?${params}` : "";
-    try {
-      const page = await localFetch(`/api/sessions${suffix}`);
-      state.sessions = append ? [...state.sessions, ...page.sessions] : page.sessions;
-      state.nextCursor = page.next_cursor;
-      renderSessions();
-    } catch (error) {
-      showStatus(error.message, "error");
-    }
   }
 
   async function refreshDevices() {
@@ -321,32 +304,9 @@
         body: JSON.stringify({ ...devices, title: elements.sessionTitle.value }),
       });
       state.selectedSession = session;
-      state.sessions = [session, ...state.sessions.filter((item) => item.uuid_code !== session.uuid_code)];
+      state.sessions = [];
       state.connectionState = "starting";
       clearTimeline();
-      renderSessions();
-      renderSessionDetails();
-      renderConnectionState();
-    } catch (error) {
-      showStatus(error.message, "error");
-    }
-  }
-
-  async function resumeSession() {
-    const session = state.selectedSession;
-    const devices = selectedDevicePayload();
-    if (!session || !devices.microphone_id || !devices.system_device_id) {
-      elements.deviceRequired.classList.remove("hidden");
-      return;
-    }
-    try {
-      const resumed = await localFetch(sessionPath(session.uuid_code, "/resume"), {
-        method: "POST",
-        body: JSON.stringify(devices),
-      });
-      state.selectedSession = resumed;
-      state.sessions = state.sessions.map((item) => (item.uuid_code === resumed.uuid_code ? resumed : item));
-      state.connectionState = "starting";
       renderSessions();
       renderSessionDetails();
       renderConnectionState();
@@ -366,21 +326,11 @@
     }
   }
 
-  async function saveTitle() {
+  function saveLocalTitle() {
     const session = state.selectedSession;
     if (!session) return;
-    try {
-      const updated = await localFetch(sessionPath(session.uuid_code), {
-        method: "PATCH",
-        body: JSON.stringify({ title: elements.sessionTitle.value }),
-      });
-      state.selectedSession = updated;
-      state.sessions = state.sessions.map((item) => (item.uuid_code === updated.uuid_code ? updated : item));
-      renderSessions();
-      renderSessionDetails();
-    } catch (error) {
-      showStatus(error.message, "error");
-    }
+    state.selectedSession = { ...session, title: elements.sessionTitle.value.trim() };
+    renderSessionDetails();
   }
 
   async function copySessionCode() {
@@ -405,6 +355,7 @@
 
   function applyBootstrap(bootstrap, connectToEvents = true) {
     state.authenticated = bootstrap.authenticated;
+    state.capabilities = bootstrap.capabilities;
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
@@ -415,7 +366,7 @@
     renderSessions();
     renderSessionDetails();
     renderConnectionState();
-    if (state.selectedSession) loadSegments(state.selectedSession);
+    clearTimeline();
     if (state.authenticated) {
       refreshDevices();
       if (connectToEvents) connectEvents();
@@ -437,7 +388,6 @@
       renderConnectionState();
     } else if (event.type === "session" && event.session) {
       state.selectedSession = event.session;
-      state.sessions = [event.session, ...state.sessions.filter((item) => item.uuid_code !== event.session.uuid_code)];
       renderSessions();
       renderSessionDetails();
     } else if ((event.type === "warning" || event.type === "error") && event.message) {
@@ -494,16 +444,10 @@
   });
   elements.logoutButton.addEventListener("click", () => signOut().catch((error) => showStatus(error.message, "error")));
   elements.newSessionButton.addEventListener("click", prepareNewSession);
-  elements.loadMoreButton.addEventListener("click", () => loadSessions({ append: true }));
-  elements.sessionSearch.addEventListener("input", () => {
-    window.clearTimeout(state.searchTimer);
-    state.searchTimer = window.setTimeout(() => loadSessions(), 250);
-  });
   elements.refreshDevicesButton.addEventListener("click", refreshDevices);
   elements.startSessionButton.addEventListener("click", startNewSession);
-  elements.resumeSessionButton.addEventListener("click", resumeSession);
   elements.stopSessionButton.addEventListener("click", stopSession);
-  elements.sessionTitle.addEventListener("change", saveTitle);
+  elements.sessionTitle.addEventListener("change", saveLocalTitle);
   elements.copyCodeButton.addEventListener("click", copySessionCode);
 
   localFetch("/api/bootstrap")
