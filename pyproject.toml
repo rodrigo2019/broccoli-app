@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "broccoli-desktop"
+version = "0.1.0"
+description = "Windows desktop client for Broccoli live meeting transcription."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.141.1",
+    "keyring==25.7.0",
+    "PyAudioWPatch==0.2.12.8",
+    "pyinstaller==6.22.2",
+    "pystray==0.19.5",
+    "pywebview==6.2.1",
+    "soxr==1.1.0",
+    "uvicorn==0.52.4",
+    "webrtcvad-wheels==2.0.14",
+    "websockets==17.0.1",
+]
+
+[project.scripts]
+broccoli-desktop = "broccoli_desktop.__main__:main"
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "pytest==9.1.1",
+    "pytest-asyncio",
+    "ruff==0.16.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.uv]
+required-version = ">=0.11"

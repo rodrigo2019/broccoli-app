@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+.env
+build/
+dist/
+*.spec
+node_modules/
+artifacts/visual/
+broccoli_desktop/static/output.css

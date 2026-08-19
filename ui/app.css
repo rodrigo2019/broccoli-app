@@ -1,0 +1,48 @@
+@import "tailwindcss";
+@plugin "daisyui";
+@source "../broccoli_desktop/static";
+
+@plugin "daisyui/theme" {
+  name: "broccoli-light";
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: oklch(98% 0.01 135);
+  --color-base-200: oklch(95% 0.02 135);
+  --color-base-300: oklch(89% 0.04 135);
+  --color-base-content: oklch(25% 0.04 145);
+  --color-primary: oklch(55% 0.16 145);
+  --color-primary-content: oklch(98% 0.01 135);
+  --color-secondary: oklch(64% 0.15 175);
+  --color-secondary-content: oklch(98% 0.01 175);
+  --color-accent: oklch(74% 0.14 95);
+  --color-accent-content: oklch(25% 0.04 95);
+  --color-neutral: oklch(35% 0.04 145);
+  --color-neutral-content: oklch(96% 0.01 135);
+  --color-info: oklch(62% 0.14 235);
+  --color-success: oklch(62% 0.15 145);
+  --color-warning: oklch(78% 0.15 85);
+  --color-error: oklch(60% 0.2 25);
+}
+
+@plugin "daisyui/theme" {
+  name: "broccoli-dark";
+  prefersdark: true;
+  color-scheme: dark;
+  --color-base-100: oklch(22% 0.03 145);
+  --color-base-200: oklch(18% 0.03 145);
+  --color-base-300: oklch(14% 0.03 145);
+  --color-base-content: oklch(94% 0.02 135);
+  --color-primary: oklch(72% 0.16 145);
+  --color-primary-content: oklch(20% 0.03 145);
+  --color-secondary: oklch(76% 0.14 175);
+  --color-secondary-content: oklch(20% 0.03 175);
+  --color-accent: oklch(82% 0.14 95);
+  --color-accent-content: oklch(22% 0.03 95);
+  --color-neutral: oklch(34% 0.03 145);
+  --color-neutral-content: oklch(94% 0.02 135);
+  --color-info: oklch(72% 0.14 235);
+  --color-success: oklch(72% 0.15 145);
+  --color-warning: oklch(84% 0.14 85);
+  --color-error: oklch(70% 0.19 25);
+}
