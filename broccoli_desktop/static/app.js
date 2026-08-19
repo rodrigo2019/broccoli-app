@@ -298,6 +298,7 @@
       elements.deviceRequired.classList.remove("hidden");
       return;
     }
+    const previousConnectionState = state.connectionState;
     try {
       state.connectionState = "starting";
       clearTimeline();
@@ -311,6 +312,8 @@
       renderSessions();
       renderSessionDetails();
     } catch (error) {
+      state.connectionState = previousConnectionState;
+      renderConnectionState();
       showStatus(error.message, "error");
     }
   }

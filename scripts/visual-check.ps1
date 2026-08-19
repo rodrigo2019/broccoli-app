@@ -6,6 +6,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $artifactDirectory = Join-Path $projectRoot "artifacts\visual"
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $session = "broccoli-desktop-visual-qa"
+$namespace = "broccoli-desktop-visual-$PID"
 $server = $null
 $passed = $false
 
@@ -59,7 +60,7 @@ try {
     }
 
     # This fake-only session is headed, ephemeral, and limited to the two loopback names.
-    $browser = @("--session", $session, "--headed", "--allowed-domains", "127.0.0.1,localhost")
+    $browser = @("--session", $session, "--namespace", $namespace, "--headed", "--allowed-domains", "127.0.0.1,localhost")
     $invalidTokenText = "Token inv$([char]0x00E1)lido"
     $historyUnavailableText = "Hist$([char]0x00F3)rico n$([char]0x00E3)o dispon$([char]0x00ED)vel neste backend"
     $finalSegmentText = "we should ship"
@@ -88,6 +89,20 @@ try {
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("select", "#systemDeviceSelect", "system-1")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
+
+    $overlongTitle = "x" * 121
+    Invoke-Browser -BrowserArguments @("eval", "document.querySelector('#sessionTitle').value = '$overlongTitle'")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "The session title is invalid.")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    $startEnabled = (Invoke-Browser -BrowserArguments @("is", "enabled", "#startSessionButton") | Select-Object -Last 1).Trim()
+    if ($startEnabled -ne "true") {
+        throw "The start button remained disabled after the rejected start request."
+    }
+    Invoke-Browser -BrowserArguments @("eval", "document.querySelector('#sessionTitle').value = ''")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transmitindo")
     Invoke-Browser -BrowserArguments @("wait", "--text", $finalSegmentText)
@@ -120,7 +135,7 @@ try {
     }
     $passed = $true
 } finally {
-    & agent-browser --session $session --headed --allowed-domains "127.0.0.1,localhost" close | Out-Null
+    & agent-browser --session $session --namespace $namespace --headed --allowed-domains "127.0.0.1,localhost" close | Out-Null
     if ($null -ne $server -and -not $server.HasExited) {
         Stop-ProcessTree -ProcessId $server.Id
     }
