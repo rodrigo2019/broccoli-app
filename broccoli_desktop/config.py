@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-PRODUCTION_SERVER_URL = "https://broccoli.example"
+PRODUCTION_SERVER_URL = "https://broccoli.bosch-digital-factory.com"
 LOCAL_SERVER_URL = "http://127.0.0.1:8000"
 DEV_URL_ENVIRONMENT_VARIABLE = "BROCCOLI_DESKTOP_DEV_URL"
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from broccoli_desktop.credentials import CredentialStore
+from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
 
 
 class FakeKeyring:
@@ -19,6 +19,20 @@ class FakeKeyring:
     def delete_password(self, service_name: str, username: str) -> None:
         self.deleted.append((service_name, username))
         self.values.pop((service_name, username), None)
+
+
+class FailingKeyring:
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+
+    def get_password(self, service_name: str, username: str) -> str | None:
+        raise RuntimeError(f"backend error: {self.secret}")
+
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        raise RuntimeError(f"backend error: {password}")
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        raise RuntimeError(f"backend error: {self.secret}")
 
 
 @pytest.fixture
@@ -56,3 +70,22 @@ def test_loading_a_token_uses_the_fixed_service_and_account(fake_keyring: FakeKe
     fake_keyring.values[("Broccoli Desktop", "api-token")] = "candidate-token"
 
     assert CredentialStore(fake_keyring).load_token() == "candidate-token"
+
+
+@pytest.mark.parametrize("operation", ["load", "save", "delete"])
+def test_backend_failures_do_not_propagate_credential_material(operation: str) -> None:
+    secret = "secret-that-must-not-escape"
+    store = CredentialStore(FailingKeyring(secret))
+
+    with pytest.raises(CredentialStorageError) as error:
+        if operation == "load":
+            store.load_token()
+        elif operation == "save":
+            store.save_token(secret)
+        else:
+            store.delete_token()
+
+    assert str(error.value) == "Credential storage is unavailable."
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__

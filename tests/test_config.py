@@ -28,7 +28,8 @@ def test_dev_flag_uses_the_local_development_url(monkeypatch: pytest.MonkeyPatch
 def test_default_config_uses_the_compiled_production_url() -> None:
     config = parse_runtime_config([])
 
-    assert config.server_url == PRODUCTION_SERVER_URL
+    assert PRODUCTION_SERVER_URL == "https://broccoli.bosch-digital-factory.com"
+    assert config.server_url == "https://broccoli.bosch-digital-factory.com"
     assert config.environment == "production"
 
 
