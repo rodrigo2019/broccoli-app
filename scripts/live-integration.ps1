@@ -23,6 +23,37 @@ function Assert-RequiredFile {
     }
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory = $true)][string]$Argument)
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $quoted = [System.Text.StringBuilder]::new('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes += 1
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append((-join ('\' * (($backslashes * 2) + 1))))
+            [void]$quoted.Append('"')
+        } else {
+            [void]$quoted.Append((-join ('\' * $backslashes)));
+            [void]$quoted.Append($character)
+        }
+        $backslashes = 0
+    }
+    [void]$quoted.Append((-join ('\' * ($backslashes * 2))))
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
 function Start-ChildProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -36,9 +67,7 @@ function Start-ChildProcess {
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    foreach ($argument in $Arguments) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument $_ }) -join " ")
     foreach ($name in $Environment.Keys) {
         $startInfo.Environment[$name] = [string]$Environment[$name]
     }
