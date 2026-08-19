@@ -25,6 +25,15 @@ class DeviceDescriptor:
 
 
 @dataclass(frozen=True)
+class AudioFrame:
+    """An ephemeral 100 ms PCM frame ready for the Listening transport."""
+
+    channel: Literal["mic", "system"]
+    offset_ms: int
+    pcm: bytes
+
+
+@dataclass(frozen=True)
 class SessionSummary:
     uuid_code: str
     title: str
