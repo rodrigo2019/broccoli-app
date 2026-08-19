@@ -83,6 +83,16 @@ class DesktopSessionController:
         return len(self._buffered_frames) * FRAME_DURATION_MS
 
     @property
+    def selected_devices(self) -> CaptureChoices | None:
+        """Return the currently selected local capture device identities."""
+        return self._choices
+
+    @property
+    def session(self) -> SessionSummary | None:
+        """Return the active local session summary without remote payload data."""
+        return self._session
+
+    @property
     def pipeline_base_offset_ms(self) -> int:
         if self._pipeline is None:
             return 0
