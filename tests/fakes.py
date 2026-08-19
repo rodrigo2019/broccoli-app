@@ -45,12 +45,17 @@ class FakeLiveRemoteStream:
     )
     frames: list[bytes] = field(default_factory=list)
     controls: list[dict[str, str]] = field(default_factory=list)
+    fail_send: bool = False
     closed: bool = False
 
     async def send_bytes(self, frame: bytes) -> None:
+        if self.fail_send:
+            raise FakeRemoteClosedError()
         self.frames.append(frame)
 
     async def send_control(self, message: dict[str, str]) -> None:
+        if self.closed:
+            raise FakeRemoteClosedError()
         self.controls.append(message.copy())
 
     async def events(self) -> AsyncIterator[RemoteEvent]:
@@ -91,6 +96,7 @@ class FakeSessionRemote:
     next_offsets: list[int] = field(default_factory=lambda: [0])
     streams: list[FakeLiveRemoteStream] = field(default_factory=list)
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
+    fail_send_stream_indexes: set[int] = field(default_factory=set)
     unauthorized: bool = False
 
     async def verify_token(self) -> SessionPage:
@@ -133,7 +139,7 @@ class FakeSessionRemote:
                 is_live=True,
             )
         offset = self.next_offsets[min(len(self.streams), len(self.next_offsets) - 1)]
-        stream = FakeLiveRemoteStream()
+        stream = FakeLiveRemoteStream(fail_send=len(self.streams) in self.fail_send_stream_indexes)
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
         await stream.emit(SessionStarted(uuid_code, 1, offset, 14_400))

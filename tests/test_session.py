@@ -37,6 +37,15 @@ async def settle() -> None:
     await asyncio.sleep(0)
 
 
+class BlockingClock:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def sleep(self, _delay: float) -> None:
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
 def test_event_hub_notifies_subscribers_and_retains_immutable_events() -> None:
     hub = EventHub()
     received: list[UiEvent] = []
@@ -130,6 +139,45 @@ async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_f
         100,
         300,
     ]
+    assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_reconnect_ends_the_logical_remote_session_without_retrying(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    clock = BlockingClock()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await fake_remote.emit_failure()
+    await clock.entered.wait()
+    await controller.stop()
+    await settle()
+
+    assert fake_remote.streams[0].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[0].closed is True
+    assert fake_remote.stream_requests == [(None, "Speakers")]
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_failed_replay_attempt_closes_its_stream_before_the_next_retry(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    fake_remote.fail_send_stream_indexes = {1}
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames([AudioFrame("system", 100, b"\x00\x00")])
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert fake_clock.delays == [1, 2]
+    assert fake_remote.streams[1].closed is True
+    assert fake_remote.streams[2].frames
     assert controller.state is ConnectionState.STREAMING
 
     await controller.stop()

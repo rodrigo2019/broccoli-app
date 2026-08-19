@@ -26,6 +26,7 @@ from broccoli_desktop.remote import (
     RemoteEvent,
     RemoteFailure,
     RemoteProtocolError,
+    RemoteStream,
     RemoteUnauthorizedError,
     SessionEnded,
     SessionStarted,
@@ -66,7 +67,8 @@ class DesktopSessionController:
         self.pending_deltas: dict[str, TranscriptDelta] = {}
         self._buffered_frames: list[AudioFrame] = []
         self._capture: CaptureSession | None = None
-        self._stream = None
+        self._stream: RemoteStream | None = None
+        self._recovery_stream: RemoteStream | None = None
         self._pipeline: AudioPipeline | None = None
         self._session: SessionSummary | None = None
         self._session_uuid: str | None = None
@@ -102,8 +104,9 @@ class DesktopSessionController:
         reader = self._reader_task
         if reader is not None and reader is not asyncio.current_task():
             reader.cancel()
-        stream = self._stream
+        stream = self._stream or self._recovery_stream
         self._stream = None
+        self._recovery_stream = None
         if stream is not None:
             try:
                 await stream.send_control({"type": "session.end"})
@@ -245,8 +248,7 @@ class DesktopSessionController:
         self._recovery_active = True
         failed_stream = self._stream
         self._stream = None
-        if failed_stream is not None:
-            await self._close_stream(failed_stream)
+        self._recovery_stream = failed_stream
         self._set_state(
             ConnectionState.RECONNECTING, message="Connection interrupted. Reconnecting."
         )
@@ -255,11 +257,16 @@ class DesktopSessionController:
                 await self._sleep(delay)
                 if self.state is not ConnectionState.RECONNECTING:
                     return
+                stream: RemoteStream | None = None
                 try:
                     stream = await self._remote.connect_stream(
                         resume_code=self._session_uuid,
                         device_label=self._device_label or "",
                     )
+                    previous_stream = self._recovery_stream
+                    self._recovery_stream = stream
+                    if previous_stream is not None:
+                        await self._close_stream(previous_stream)
                     iterator = stream.events()
                     started = await anext(iterator)
                     if not isinstance(started, SessionStarted):
@@ -268,6 +275,7 @@ class DesktopSessionController:
                         raise RemoteProtocolError("Remote resumed an unexpected session.")
                     self._set_pipeline(started.next_offset_ms)
                     self._stream = stream
+                    self._recovery_stream = None
                     for frame in self._buffered_frames:
                         await stream.send_bytes(
                             encode_audio_frame(
@@ -279,13 +287,16 @@ class DesktopSessionController:
                     self._reader_task = asyncio.create_task(self._listen(iterator))
                     return
                 except RemoteUnauthorizedError:
+                    await self._discard_recovery_stream(stream or self._recovery_stream)
                     self._stop_capture()
                     self._set_state(ConnectionState.FAILED, message="Authentication failed.")
                     return
                 except Exception:
+                    await self._discard_recovery_stream(stream)
                     self.events.publish(
                         UiEvent(type="recoverable_error", message="Connection retry failed.")
                     )
+            await self._discard_recovery_stream(self._recovery_stream)
             self._stop_capture()
             self._set_state(ConnectionState.FAILED, message="Connection could not be restored.")
         finally:
@@ -293,16 +304,18 @@ class DesktopSessionController:
 
     async def _end_from_remote(self) -> None:
         self._stop_capture()
-        stream = self._stream
+        stream = self._stream or self._recovery_stream
         self._stream = None
+        self._recovery_stream = None
         if stream is not None:
             await self._close_stream(stream)
         self._set_state(ConnectionState.STOPPED)
 
     async def _fail_from_remote(self) -> None:
         self._stop_capture()
-        stream = self._stream
+        stream = self._stream or self._recovery_stream
         self._stream = None
+        self._recovery_stream = None
         if stream is not None:
             await self._close_stream(stream)
         self._set_state(ConnectionState.FAILED, message="The remote session could not continue.")
@@ -321,7 +334,7 @@ class DesktopSessionController:
         loop.call_soon_threadsafe(lambda: asyncio.create_task(self._forward_frame(frame)))
 
     async def _forward_frame(self, frame: AudioFrame) -> None:
-        stream = self._stream
+        stream = self._stream or self._recovery_stream
         if self.state is not ConnectionState.STREAMING or stream is None:
             self.enqueue_audio_frames([frame])
             return
@@ -348,6 +361,7 @@ class DesktopSessionController:
             return
         stream = self._stream
         self._stream = None
+        self._recovery_stream = None
         if stream is not None:
             await self._close_stream(stream)
         self._set_state(
@@ -397,6 +411,15 @@ class DesktopSessionController:
                 await close()
             except Exception:
                 pass
+
+    async def _discard_recovery_stream(self, stream: RemoteStream | None) -> None:
+        if stream is None:
+            return
+        if self._stream is stream:
+            self._stream = None
+        if self._recovery_stream is stream:
+            self._recovery_stream = None
+        await self._close_stream(stream)
 
     @staticmethod
     def _channel(channel: str) -> Literal["mic", "system"]:
