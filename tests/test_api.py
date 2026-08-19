@@ -15,10 +15,13 @@ from broccoli_desktop.models import (
 )
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from tests.fakes import (
+    VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
     FakeClock,
     FakeSessionRemote,
+    visual_test_remote,
 )
+from tests.visual_server import create_visual_app
 
 
 @dataclass
@@ -125,6 +128,28 @@ def login(client: TestClient, token: str = "candidate") -> None:
     response = client.post("/api/login", json={"token": token})
 
     assert response.status_code == 204
+
+
+def login_with_visual_token(client: TestClient) -> None:
+    """Authenticate an in-process visual server with its fixed fake-only credential."""
+    response = client.post("/api/login", json={"token": VISUAL_TEST_TOKEN})
+
+    assert response.status_code == 204
+
+
+def test_fake_bootstrap_exposes_the_same_capability_shape() -> None:
+    """The browser visual server must use the browser-only capability contract."""
+    client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
+    login_with_visual_token(client)
+
+    assert client.get("/api/bootstrap").json()["capabilities"]["history"] is False
+
+
+def test_visual_fake_does_not_seed_removed_history_workflow() -> None:
+    """The deterministic visual remote must start fresh rather than model browse/resume history."""
+    remote = visual_test_remote()
+
+    assert asyncio.run(remote.list_sessions(None, "")).sessions == ()
 
 
 def test_root_serves_the_desktop_shell(client: TestClient) -> None:

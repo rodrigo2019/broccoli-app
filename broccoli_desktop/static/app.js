@@ -299,17 +299,17 @@
       return;
     }
     try {
+      state.connectionState = "starting";
+      clearTimeline();
+      renderConnectionState();
       const session = await localFetch("/api/sessions", {
         method: "POST",
         body: JSON.stringify({ ...devices, title: elements.sessionTitle.value }),
       });
       state.selectedSession = session;
       state.sessions = [];
-      state.connectionState = "starting";
-      clearTimeline();
       renderSessions();
       renderSessionDetails();
-      renderConnectionState();
     } catch (error) {
       showStatus(error.message, "error");
     }

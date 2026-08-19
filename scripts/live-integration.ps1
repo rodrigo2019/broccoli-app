@@ -1,0 +1,129 @@
+[CmdletBinding()]
+param(
+    [ValidateRange(1, 65535)]
+    [int]$DesktopPort = 8765
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$desktopRoot = Split-Path -Parent $PSScriptRoot
+$desktopPython = Join-Path $desktopRoot ".venv\Scripts\python.exe"
+$backendRoot = "C:\repos\broccoli"
+$backendProject = Join-Path $backendRoot "broccoli"
+$backendPython = Join-Path $backendRoot ".venv\Scripts\python.exe"
+$backendProcess = $null
+$desktopProcess = $null
+
+function Assert-RequiredFile {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Description)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Description was not found at '$Path'."
+    }
+}
+
+function Start-ChildProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [hashtable]$Environment = @{}
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+    foreach ($name in $Environment.Keys) {
+        $startInfo.Environment[$name] = [string]$Environment[$name]
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Unable to start '$FilePath'."
+    }
+    return $process
+}
+
+function Wait-ForUnauthenticatedResponse {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    for ($attempt = 0; $attempt -lt 100; $attempt += 1) {
+        if ($Process.HasExited) {
+            throw "$Description stopped before it became ready."
+        }
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 1
+            if ($response.StatusCode -eq 200) {
+                return
+            }
+        } catch {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    throw "$Description did not provide a ready unauthenticated response at '$Uri'."
+}
+
+function Stop-ProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" |
+        Select-Object -ExpandProperty ProcessId
+    foreach ($childId in $children) {
+        Stop-ProcessTree -ProcessId $childId
+    }
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+try {
+    if ($DesktopPort -eq 8000) {
+        throw "DesktopPort must not be 8000 because the local platform uses 127.0.0.1:8000."
+    }
+    Assert-RequiredFile -Path $desktopPython -Description "The desktop virtual environment Python"
+    Assert-RequiredFile -Path $backendPython -Description "The backend virtual environment Python"
+    Assert-RequiredFile -Path (Join-Path $backendProject "manage.py") -Description "The backend manage.py"
+
+    $backendProcess = Start-ChildProcess `
+        -FilePath $backendPython `
+        -Arguments @("manage.py", "runserver", "127.0.0.1:8000", "--noreload") `
+        -WorkingDirectory $backendProject
+    Wait-ForUnauthenticatedResponse `
+        -Uri "http://127.0.0.1:8000/admin/login/" `
+        -Process $backendProcess `
+        -Description "The local platform"
+
+    $desktopProcess = Start-ChildProcess `
+        -FilePath $desktopPython `
+        -Arguments @("-m", "broccoli_desktop.browser_only", "--port", "$DesktopPort", "--local") `
+        -WorkingDirectory $desktopRoot `
+        -Environment @{ "BROCCOLI_DESKTOP_WEBSOCKET_PATH" = "/ws/listening/" }
+    Wait-ForUnauthenticatedResponse `
+        -Uri "http://127.0.0.1:$DesktopPort/health" `
+        -Process $desktopProcess `
+        -Description "The desktop browser-only service"
+
+    Write-Output "Local platform and desktop browser-only service are ready. Press Ctrl+C to stop both process trees."
+    while ($true) {
+        if ($backendProcess.HasExited -or $desktopProcess.HasExited) {
+            throw "A live integration child process exited unexpectedly."
+        }
+        Start-Sleep -Seconds 1
+    }
+} finally {
+    if ($null -ne $desktopProcess -and -not $desktopProcess.HasExited) {
+        Stop-ProcessTree -ProcessId $desktopProcess.Id
+    }
+    if ($null -ne $backendProcess -and -not $backendProcess.HasExited) {
+        Stop-ProcessTree -ProcessId $backendProcess.Id
+    }
+}

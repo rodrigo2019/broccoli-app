@@ -10,7 +10,6 @@ import uvicorn
 
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app
 from broccoli_desktop.models import DeviceDescriptor
-from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from tests.fakes import (
     VISUAL_TEST_BROCCOLI_URL,
     FakeCaptureBackend,
@@ -34,14 +33,6 @@ class VisualCredentials:
         self.token = None
 
 
-class VisualSessionController(DesktopSessionController):
-    """Seed selected fake devices so the visual resume flow needs no hardware interaction."""
-
-    def __init__(self, remote: object, capture_backend: FakeCaptureBackend) -> None:
-        super().__init__(remote, capture_backend)  # type: ignore[arg-type]
-        self._choices = CaptureChoices(microphone_id="mic-1", system_device_id="system-1")
-
-
 def create_visual_app(*, port: int):
     """Build an app containing only deterministic task fakes and loopback metadata."""
     capture_backend = FakeCaptureBackend(
@@ -57,7 +48,6 @@ def create_visual_app(*, port: int):
             capture_backend=capture_backend,
             loopback_port=port,
             official_broccoli_url=VISUAL_TEST_BROCCOLI_URL,
-            controller_factory=VisualSessionController,
         )
     )
 

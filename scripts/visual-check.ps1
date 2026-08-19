@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $artifactDirectory = Join-Path $projectRoot "artifacts\visual"
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
-$session = $null
+$session = "broccoli-desktop-visual-qa"
 $server = $null
 $passed = $false
 
@@ -58,15 +58,11 @@ try {
         throw "The fake browser-only server did not become healthy."
     }
 
-    $session = (& agent-browser session id --scope worktree --prefix broccoli-desktop-visual).Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($session)) {
-        throw "Unable to create the isolated agent-browser session."
-    }
-    $browser = @("--session", $session, "--allowed-domains", "127.0.0.1,localhost")
+    # This fake-only session is headed, ephemeral, and limited to the two loopback names.
+    $browser = @("--session", $session, "--headed", "--allowed-domains", "127.0.0.1,localhost")
     $invalidTokenText = "Token inv$([char]0x00E1)lido"
-    $newSessionText = "Nova sess$([char]0x00E3)o"
-    $copiedCodeText = "C$([char]0x00F3)digo copiado"
-    $meetingNotebookText = "Caderno de reuni$([char]0x00E3)o"
+    $historyUnavailableText = "Hist$([char]0x00F3)rico n$([char]0x00E3)o dispon$([char]0x00ED)vel neste backend"
+    $finalSegmentText = "we should ship"
 
     Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/")
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
@@ -74,33 +70,38 @@ try {
     Invoke-Browser -BrowserArguments @("wait", "--text", "Entrar")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "login.png"))
+
     Invoke-Browser -BrowserArguments @("find", "testid", "token-input", "fill", "bad-token")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
     Invoke-Browser -BrowserArguments @("wait", "--text", $invalidTokenText)
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
+
     Invoke-Browser -BrowserArguments @("find", "testid", "token-input", "fill", "visual-test-token")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
-    Invoke-Browser -BrowserArguments @("wait", "--text", $newSessionText)
+    Invoke-Browser -BrowserArguments @("wait", "--text", $historyUnavailableText)
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "notebook-light.png"))
-    Invoke-Browser -BrowserArguments @("find", "testid", "session-search", "fill", "Daily")
-    Invoke-Browser -BrowserArguments @("wait", "--text", "Daily")
-    Invoke-Browser -BrowserArguments @("find", "testid", "session-row-session-1", "click")
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-ready.png"))
+
+    Invoke-Browser -BrowserArguments @("select", "#microphoneSelect", "mic-1")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    Invoke-Browser -BrowserArguments @("find", "testid", "resume-session", "click")
-    Invoke-Browser -BrowserArguments @("wait", "--text", "we should ship")
-    Invoke-Browser -BrowserArguments @("find", "testid", "copy-session-code", "click")
-    Invoke-Browser -BrowserArguments @("wait", "--text", $copiedCodeText)
-    $openBroccoliUrl = (Invoke-Browser -BrowserArguments @("get", "attr", '[data-testid="open-broccoli"]', "href") | Select-Object -Last 1).Trim()
-    if ($openBroccoliUrl -ne "http://127.0.0.1:8000") {
-        throw "Unexpected fake bootstrap URL: '$openBroccoliUrl'."
-    }
+    Invoke-Browser -BrowserArguments @("select", "#systemDeviceSelect", "system-1")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transmitindo")
-    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "notebook-streaming.png"))
+    Invoke-Browser -BrowserArguments @("wait", "--text", $finalSegmentText)
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-streaming.png"))
+
+    Invoke-Browser -BrowserArguments @("find", "testid", "stop-session", "click")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Parado")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("set", "media", "dark")
     Invoke-Browser -BrowserArguments @("reload")
-    Invoke-Browser -BrowserArguments @("wait", "--text", $meetingNotebookText)
-    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "notebook-dark.png"))
+    Invoke-Browser -BrowserArguments @("wait", "--text", $historyUnavailableText)
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-stopped-dark.png"))
     Invoke-Browser -BrowserArguments @("a11y", "--tags", "wcag2a,wcag2aa")
 
     $errorsJson = Invoke-Browser -BrowserArguments @("errors", "--json")
@@ -119,9 +120,7 @@ try {
     }
     $passed = $true
 } finally {
-    if ($null -ne $session) {
-        & agent-browser --session $session --allowed-domains "127.0.0.1,localhost" close | Out-Null
-    }
+    & agent-browser --session $session --headed --allowed-domains "127.0.0.1,localhost" close | Out-Null
     if ($null -ne $server -and -not $server.HasExited) {
         Stop-ProcessTree -ProcessId $server.Id
     }

@@ -345,38 +345,12 @@ class VisualTestRemoteFactory:
 
 
 def visual_test_remote() -> FakeSessionRemote:
-    """Seed the offline session and stream states consumed by visual UI tests."""
-    daily = SessionSummary(
-        uuid_code="session-1",
-        title="Daily",
-        status="stopped",
-        started_at="2026-08-19T09:00:00Z",
-        ended_at="2026-08-19T09:30:00Z",
-        device_label="Speakers",
-        segment_count=0,
-        is_live=False,
-    )
-    planning = SessionSummary(
-        uuid_code="session-2",
-        title="Planning",
-        status="stopped",
-        started_at="2026-08-18T14:00:00Z",
-        ended_at="2026-08-18T14:45:00Z",
-        device_label="Speakers",
-        segment_count=0,
-        is_live=False,
-    )
+    """Seed only a fresh fake capture and one final transcript segment."""
     delta, segment = delta_final_pair()
     return FakeSessionRemote(
-        sessions={daily.uuid_code: daily, planning.uuid_code: planning},
-        next_sequences=[{"mic": 1, "system": 1}, {"mic": 1, "system": 1}],
-        session_pages={
-            (None, ""): SessionPage((daily,), "history-2"),
-            ("history-2", ""): SessionPage((planning,), None),
-            (None, "Daily"): SessionPage((daily,), None),
-            (None, "Planning"): SessionPage((planning,), None),
-        },
-        stream_event_scripts=[[delta, segment, FakeRemoteClosedError()], []],
+        sessions={},
+        next_sequences=[{"mic": 1, "system": 1}],
+        stream_event_scripts=[[delta, segment]],
     )
 
 
