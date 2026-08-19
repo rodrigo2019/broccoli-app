@@ -5,12 +5,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi.testclient import TestClient
-from pytest import fixture
+from pytest import fixture, raises
 
 from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.models import ConnectionState
-from broccoli_desktop.runtime import DesktopRuntime, start_runtime
+from broccoli_desktop.runtime import (
+    DesktopRuntime,
+    PyWebViewWindow,
+    _create_production_server,
+    start_runtime,
+)
 from tests.fakes import (
     VISUAL_TEST_BROCCOLI_URL,
     VISUAL_TEST_TOKEN,
@@ -63,6 +68,57 @@ class FakeWindow:
 
 
 @dataclass
+class FakeClosingEvent:
+    """PyWebView-shaped event that cancels native close when a handler returns False."""
+
+    handlers: list[Any] = field(default_factory=list)
+
+    def __iadd__(self, handler: Any) -> FakeClosingEvent:
+        self.handlers.append(handler)
+        return self
+
+    def dispatch(self) -> bool:
+        return any(handler() is False for handler in self.handlers)
+
+
+@dataclass
+class FakeWebViewEvents:
+    closing: FakeClosingEvent = field(default_factory=FakeClosingEvent)
+
+
+@dataclass
+class FakeNativeWindow:
+    """PyWebView-like fake that only destroys when its closing event permits it."""
+
+    hidden: bool = False
+    destroyed: bool = False
+    events: FakeWebViewEvents = field(default_factory=FakeWebViewEvents)
+
+    def hide(self) -> None:
+        self.hidden = True
+
+    def show(self) -> None:
+        pass
+
+    def restore(self) -> None:
+        pass
+
+    def focus(self) -> None:
+        pass
+
+    def destroy(self) -> None:
+        if not self.events.closing.dispatch():
+            self.destroyed = True
+
+    def request_user_close(self) -> bool:
+        """Return whether the native backend cancelled the user close request."""
+        cancelled = self.events.closing.dispatch()
+        if not cancelled:
+            self.destroyed = True
+        return cancelled
+
+
+@dataclass
 class FakeSession:
     state: ConnectionState = ConnectionState.IDLE
     stop_calls: int = 0
@@ -89,6 +145,20 @@ class FakeServer:
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
+
+
+@dataclass
+class FailingStopServer(FakeServer):
+    """Fail exactly one controller-stop scheduling attempt without leaking a coroutine."""
+
+    fail_stop_once: bool = True
+
+    def run_coroutine(self, coroutine: Any) -> None:
+        if self.fail_stop_once:
+            self.fail_stop_once = False
+            coroutine.close()
+            raise RuntimeError("The controller stop failed.")
+        super().run_coroutine(coroutine)
 
 
 @dataclass
@@ -170,6 +240,27 @@ def test_window_close_hides_instead_of_stopping_capture(
     assert runtime.session.stop_calls == 0
 
 
+def test_user_close_hides_but_quit_allows_the_native_window_to_destroy() -> None:
+    """The close callback must cancel user close only, never runtime teardown."""
+    native_window = FakeNativeWindow()
+    server = FakeServer(controller=FakeSession())
+    runtime = DesktopRuntime(
+        server=server,
+        window=PyWebViewWindow(native_window),
+        tray=FakeTray(),
+        dialog=FakeDialog(),
+    )
+    runtime.start()
+
+    assert native_window.request_user_close() is True
+    assert native_window.hidden is True
+    assert native_window.destroyed is False
+
+    runtime.request_quit()
+
+    assert native_window.destroyed is True
+
+
 def test_quit_requires_confirmation_when_capture_is_active(
     fake_dialog: FakeDialog, runtime: DesktopRuntime
 ) -> None:
@@ -214,6 +305,30 @@ def test_shutdown_is_idempotent_for_active_capture(
     assert fake_server.shutdown_calls == 1
     assert fake_tray.stop_calls == 1
     assert runtime.window.destroyed is True
+
+
+def test_shutdown_continues_after_stop_failure_and_retries_only_that_step() -> None:
+    """A failed capture stop cannot block teardown, and retry avoids duplicate cleanup."""
+    session = FakeSession(state=ConnectionState.STREAMING)
+    server = FailingStopServer(controller=session)
+    tray = FakeTray(running=True)
+    window = FakeWindow()
+    runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=FakeDialog())
+
+    with raises(RuntimeError, match="controller stop failed"):
+        runtime.shutdown()
+
+    assert session.stop_calls == 0
+    assert server.shutdown_calls == 1
+    assert tray.stop_calls == 1
+    assert window.destroyed is True
+
+    runtime.shutdown()
+
+    assert session.stop_calls == 1
+    assert server.shutdown_calls == 1
+    assert tray.stop_calls == 1
+    assert window.destroyed is True
 
 
 def test_server_start_failure_never_creates_a_window() -> None:
@@ -262,6 +377,18 @@ def test_window_start_failure_stops_the_loopback_server() -> None:
     assert result is None
     assert server.shutdown_calls == 1
     assert dialog.errors == ["Broccoli Desktop could not open its window."]
+
+
+def test_production_server_rejects_a_missing_configured_websocket_path() -> None:
+    """Production composition must fail safely instead of inventing a remote route."""
+    config = RuntimeConfig(
+        environment="local",
+        server_url="http://127.0.0.1:8000",
+        websocket_path=None,
+    )
+
+    with raises(RuntimeError, match="backend-provided WebSocket path"):
+        _create_production_server(config)
 
 
 def test_health_endpoint_is_local_and_dependency_free() -> None:

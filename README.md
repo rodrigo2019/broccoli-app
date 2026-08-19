@@ -33,7 +33,22 @@ Run validation:
 .\scripts\check.ps1
 ```
 
-The future `broccoli-desktop` command will support `--local` for
+## Backend WebSocket configuration
+
+Before launching the desktop client, obtain the exact WebSocket path from the
+backend owner and set it locally. The path is non-secret, but it must be supplied
+by the deployed backend; Broccoli Desktop never guesses a remote route.
+
+```powershell
+$env:BROCCOLI_DESKTOP_WEBSOCKET_PATH = "/path-provided-by-the-backend-owner"
+broccoli-desktop --local
+```
+
+The normal desktop runtime will display a local startup error when this setting
+is missing or is not an absolute path. The fake browser-only visual runner does
+not need a production remote path.
+
+The `broccoli-desktop` command supports `--local` for
 `http://127.0.0.1:8000` and `--dev` for a development URL supplied by local build
 configuration. Production builds use the official remote Broccoli backend, which is
 an external prerequisite.

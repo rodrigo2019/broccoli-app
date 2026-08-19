@@ -11,6 +11,7 @@ from typing import Literal
 PRODUCTION_SERVER_URL = "https://broccoli.bosch-digital-factory.com"
 LOCAL_SERVER_URL = "http://127.0.0.1:8000"
 DEV_URL_ENVIRONMENT_VARIABLE = "BROCCOLI_DESKTOP_DEV_URL"
+BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE = "BROCCOLI_DESKTOP_WEBSOCKET_PATH"
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class RuntimeConfig:
 
     environment: Literal["production", "development", "local"]
     server_url: str
+    websocket_path: str | None = None
 
 
 def parse_runtime_config(argv: Sequence[str]) -> RuntimeConfig:
@@ -29,11 +31,18 @@ def parse_runtime_config(argv: Sequence[str]) -> RuntimeConfig:
     environment.add_argument("--dev", action="store_true")
     arguments = parser.parse_args(argv)
 
+    websocket_path = os.environ.get(BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE)
     if arguments.local:
-        return RuntimeConfig(environment="local", server_url=LOCAL_SERVER_URL)
+        return RuntimeConfig(
+            environment="local", server_url=LOCAL_SERVER_URL, websocket_path=websocket_path
+        )
     if arguments.dev:
         server_url = os.environ.get(DEV_URL_ENVIRONMENT_VARIABLE)
         if not server_url:
             parser.error(f"--dev requires {DEV_URL_ENVIRONMENT_VARIABLE} to be set")
-        return RuntimeConfig(environment="development", server_url=server_url)
-    return RuntimeConfig(environment="production", server_url=PRODUCTION_SERVER_URL)
+        return RuntimeConfig(
+            environment="development", server_url=server_url, websocket_path=websocket_path
+        )
+    return RuntimeConfig(
+        environment="production", server_url=PRODUCTION_SERVER_URL, websocket_path=websocket_path
+    )

@@ -5,7 +5,11 @@ import types
 
 import pytest
 
-from broccoli_desktop.config import PRODUCTION_SERVER_URL, parse_runtime_config
+from broccoli_desktop.config import (
+    BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE,
+    PRODUCTION_SERVER_URL,
+    parse_runtime_config,
+)
 from broccoli_desktop.models import ConnectionState, SessionSummary, validate_title
 
 
@@ -31,6 +35,15 @@ def test_default_config_uses_the_compiled_production_url() -> None:
     assert PRODUCTION_SERVER_URL == "https://broccoli.bosch-digital-factory.com"
     assert config.server_url == "https://broccoli.bosch-digital-factory.com"
     assert config.environment == "production"
+
+
+def test_config_reads_the_backend_owned_websocket_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launcher carries the supplied route without guessing a remote endpoint."""
+    monkeypatch.setenv(BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE, "/backend/listening")
+
+    config = parse_runtime_config([])
+
+    assert config.websocket_path == "/backend/listening"
 
 
 def test_config_rejects_conflicting_local_and_dev_flags() -> None:

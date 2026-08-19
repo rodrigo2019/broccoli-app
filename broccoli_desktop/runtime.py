@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import threading
 import time
@@ -16,12 +15,14 @@ import uvicorn
 
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app, create_uvicorn_config
 from broccoli_desktop.capture import PyAudioCaptureBackend
-from broccoli_desktop.config import RuntimeConfig
+from broccoli_desktop.config import (
+    BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE,
+    RuntimeConfig,
+)
 from broccoli_desktop.credentials import CredentialStore
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
 
-BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE = "BROCCOLI_DESKTOP_WEBSOCKET_PATH"
 HEALTH_PATH = "/health"
 STARTUP_TIMEOUT_SECONDS = 10
 
@@ -208,7 +209,11 @@ class DesktopRuntime:
         self.window = window
         self._tray = tray
         self._dialog = dialog
-        self._shutdown = False
+        self._capture_stopped = False
+        self._server_stopped = False
+        self._tray_stopped = False
+        self._window_destroyed = False
+        self._destroying_window = False
 
     @property
     def session(self) -> SessionProtocol | None:
@@ -227,6 +232,8 @@ class DesktopRuntime:
 
     def on_window_closing(self) -> bool:
         """Hide the window and cancel native destruction while the tray remains alive."""
+        if self._destroying_window:
+            return True
         self.window.hide()
         return False
 
@@ -249,16 +256,33 @@ class DesktopRuntime:
         self.shutdown()
 
     def shutdown(self) -> None:
-        """Stop active capture and each native resource exactly once."""
-        if self._shutdown:
-            return
-        self._shutdown = True
+        """Attempt every teardown step and retry only a step that previously failed."""
+        failures: list[Exception] = []
         session = self.session
-        if session is not None and session.state in _ACTIVE_CAPTURE_STATES:
-            self.stop_capture()
-        self._server.shutdown()
-        self._tray.stop()
-        self.window.destroy()
+        if not self._capture_stopped:
+            if session is None or session.state not in _ACTIVE_CAPTURE_STATES:
+                self._capture_stopped = True
+            else:
+                self._complete_teardown_step("_capture_stopped", self.stop_capture, failures)
+        self._complete_teardown_step("_server_stopped", self._server.shutdown, failures)
+        self._complete_teardown_step("_tray_stopped", self._tray.stop, failures)
+        self._destroying_window = True
+        self._complete_teardown_step("_window_destroyed", self.window.destroy, failures)
+        if failures:
+            raise failures[0]
+
+    def _complete_teardown_step(
+        self, attribute: str, action: Callable[[], None], failures: list[Exception]
+    ) -> None:
+        """Run one cleanup action once, retaining it for a later retry if it fails."""
+        if getattr(self, attribute):
+            return
+        try:
+            action()
+        except Exception as error:
+            failures.append(error)
+        else:
+            setattr(self, attribute, True)
 
 
 _ACTIVE_CAPTURE_STATES = frozenset(
@@ -322,7 +346,7 @@ def start(config: RuntimeConfig) -> None:
 
 
 def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
-    websocket_path = _configured_websocket_path()
+    websocket_path = _configured_websocket_path(config.websocket_path)
 
     def create_services(port: int) -> Services:
         return Services(
@@ -338,11 +362,13 @@ def _create_production_server(config: RuntimeConfig) -> UvicornLoopbackServer:
     return UvicornLoopbackServer(create_services)
 
 
-def _configured_websocket_path() -> str:
-    """Accept the external path only from deployment composition, never a guessed route."""
-    path = os.environ.get(BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE)
+def _configured_websocket_path(path: str | None) -> str:
+    """Accept the caller-supplied external path only, never a guessed route."""
     if path is None or not path.startswith("/") or path.startswith("//"):
-        raise RuntimeError("The backend-provided WebSocket path is not configured.")
+        raise RuntimeError(
+            f"{BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE} must contain the backend-provided "
+            "WebSocket path as an absolute path."
+        )
     return path
 
 
