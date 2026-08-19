@@ -117,6 +117,26 @@ async def test_start_new_opens_without_resume_code_and_updates_the_requested_tit
 
 
 @pytest.mark.asyncio
+async def test_update_title_changes_only_the_active_local_summary(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    async def remote_title_update_must_not_be_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("remote title updates are outside the Listening contract")
+
+    fake_remote.update_title = remote_title_update_must_not_be_called  # type: ignore[method-assign]
+    summary = await controller.update_title(started.uuid_code, "Renamed")
+
+    assert summary.title == "Renamed"
+    assert controller.session == summary
+    assert fake_remote.sessions[started.uuid_code].title == "Existing session"
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_final_segment_increments_the_local_active_session_count(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

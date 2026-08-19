@@ -141,10 +141,11 @@ class DesktopSessionController:
         self._on_authentication_failure = callback
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
-        """Persist a user-selected title through the typed remote boundary."""
-        summary = await self._remote.update_title(uuid_code, title)
-        if self._session_uuid == uuid_code:
-            self._session = summary
+        """Update the active capture label without calling an unavailable remote endpoint."""
+        if self._session is None or self._session_uuid != uuid_code:
+            raise RemoteProtocolError("The requested local session is not active.")
+        summary = replace(self._session, title=title)
+        self._session = summary
         self.events.publish(UiEvent(type="session", session=summary))
         return summary
 

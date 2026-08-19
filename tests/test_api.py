@@ -267,36 +267,35 @@ def test_authenticated_routes_use_the_injected_remote_and_map_resources(
     sessions = client.get("/api/sessions", params={"cursor": "after", "q": "existing"})
     session = client.get("/api/sessions/session-1")
     segments = client.get("/api/sessions/session-1/segments", params={"cursor": "later"})
-    renamed = client.patch("/api/sessions/session-1", json={"title": " Renamed "})
 
     assert sessions.status_code == 200
     assert session.status_code == 200
     assert segments.status_code == 200
-    assert renamed.status_code == 200
     assert sessions.json()["sessions"][0]["uuid_code"] == "session-1"
     assert session.json()["title"] == "Existing session"
     assert segments.json() == {"segments": [], "next_cursor": None}
-    assert renamed.json()["title"] == "Renamed"
-    assert fake_remote_factory.remote.sessions["session-1"].title == "Renamed"
 
 
-def test_title_updates_are_normalized_before_reaching_the_remote(
+def test_title_updates_an_active_session_locally_without_reaching_the_remote(
     client: TestClient,
     fake_remote_factory: FakeRemoteFactory,
 ) -> None:
     login(client)
-    received_titles: list[str] = []
-    original_update_title = fake_remote_factory.remote.update_title
+    started = client.post(
+        "/api/sessions",
+        json={"title": "Daily", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
 
-    async def record_title(uuid_code: str, title: str):
-        received_titles.append(title)
-        return await original_update_title(uuid_code, title)
+    async def remote_title_update_must_not_be_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("remote title updates are outside the Listening contract")
 
-    fake_remote_factory.remote.update_title = record_title  # type: ignore[method-assign]
+    fake_remote_factory.remote.update_title = remote_title_update_must_not_be_called  # type: ignore[method-assign]
     response = client.patch("/api/sessions/session-1", json={"title": " Renamed "})
 
+    assert started.status_code == 201
     assert response.status_code == 200
-    assert received_titles == ["Renamed"]
+    assert response.json()["title"] == "Renamed"
+    assert fake_remote_factory.remote.sessions["session-1"].title == "Existing session"
 
 
 def test_session_actions_validate_devices_titles_and_local_state(
