@@ -54,6 +54,12 @@ class SessionPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class SegmentPage:
+    segments: tuple[TranscriptSegment, ...]
+    next_cursor: str | None
+
+
 class ConnectionState(StrEnum):
     IDLE = "idle"
     STARTING = "starting"
