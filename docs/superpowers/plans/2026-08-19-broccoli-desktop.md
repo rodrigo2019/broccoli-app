@@ -21,6 +21,9 @@
 - Use the exact external REST paths and WebSocket event shapes in the approved spec.
 - Use LF-only files, committed uv.lock, committed package-lock.json, Ruff, and pytest.
 - Every task is test-first and ends with a focused commit. Do not use real microphone hardware, remote APIs, Azure, or Windows Credential Manager in automated tests.
+- Use `agent-browser` 0.34.0 for visual QA; provision its matching Chromium binary with `agent-browser install` rather than adding it to the desktop application's shipped dependencies.
+- Run browser-facing visual QA with the `agent-browser` skill against only the fake remote at `http://127.0.0.1`; always use an isolated worktree-scoped browser session, never a shared browser session, a real token, a profile, restore state, HAR capture, or a remote Broccoli URL.
+- Keep agent-browser screenshots under `artifacts/visual/`, review them before accepting the UI, and never commit those artifacts because they can contain fake transcript text.
 
 ## Locked file structure
 
@@ -119,7 +122,7 @@ Create broccoli_desktop/__init__.py containing __version__ = "0.1.0" and a minim
 
 - [ ] **Step 3: Add repository hygiene and frontend configuration**
 
-Create .gitattributes with * text=auto eol=lf and binary declarations for ico, png, exe, and dll. Create .editorconfig matching the main repository’s UTF-8/LF/Python-4-space rules. Ignore .venv, __pycache__, .ruff_cache, .pytest_cache, .env, build, dist, *.spec, node_modules, and broccoli_desktop/static/output.css.
+Create .gitattributes with * text=auto eol=lf and binary declarations for ico, png, exe, and dll. Create .editorconfig matching the main repository’s UTF-8/LF/Python-4-space rules. Ignore .venv, __pycache__, .ruff_cache, .pytest_cache, .env, build, dist, *.spec, node_modules, artifacts/visual, and broccoli_desktop/static/output.css.
 
 Create ui/package.json with Tailwind 4.1.17, @tailwindcss/cli 4.1.17, daisyui 5.5.8, and a build:css script that runs:
 
@@ -566,7 +569,7 @@ git commit -m "feat: add desktop session recovery and transcript events"
 
 **Files:**
 - Create: broccoli_desktop/api.py, tests/test_api.py
-- Modify: broccoli_desktop/runtime.py, broccoli_desktop/session.py
+- Modify: broccoli_desktop/session.py
 
 **Interfaces:**
 - Consumes: CredentialStore, ListeningRemote factory, DesktopSessionController, EventHub, and CaptureBackend.
@@ -633,7 +636,7 @@ Expected: token verification precedes persistence, all browser routes use inject
 - [ ] **Step 6: Commit local API**
 
 ~~~powershell
-git add broccoli_desktop/api.py broccoli_desktop/runtime.py broccoli_desktop/session.py tests/test_api.py
+git add broccoli_desktop/api.py broccoli_desktop/session.py tests/test_api.py
 git commit -m "feat: expose the local desktop API"
 ~~~
 
@@ -643,7 +646,7 @@ git commit -m "feat: expose the local desktop API"
 
 **Files:**
 - Create: broccoli_desktop/static/index.html, broccoli_desktop/static/app.js
-- Modify: ui/app.css, ui/package.json, tests/test_api.py
+- Modify: ui/app.css, ui/package.json, tests/fakes.py, tests/test_api.py
 - Generated: broccoli_desktop/static/output.css
 
 **Interfaces:**
@@ -667,9 +670,11 @@ def test_root_serves_the_desktop_shell(client):
 
 Build index.html with three stateful regions: loginView, mainView, and persistent statusBanner. mainView contains an aside with search input, New session button, Load more button, and sessionLibrary; it contains a main element with editable title, mic/system selectors, start/resume/stop controls, record notice, copy code button, open Broccoli button, and transcriptTimeline. Use literal daisyUI classes only; do not construct class names at runtime.
 
+Give every interaction a visible accessible name and a stable `data-testid` so the visual test can use semantic locators without brittle CSS selectors: `token-input`, `login-submit`, `login-error`, `session-search`, `new-session`, `load-more`, `session-library`, `session-row-<uuid>`, `resume-session`, `stop-session`, `copy-session-code`, `open-broccoli`, `status-banner`, and `transcript-timeline`. The external-open control must expose its target URL as an `href`; the visual test reads this attribute and never opens a remote page.
+
 - [ ] **Step 3: Implement the local UI client**
 
-In app.js, create a local fetch helper that calls only relative /api URLs. Implement login, logout, paginated search, title patch, new session, resume, stop, device refresh, clipboard copy, and window.open for the official Broccoli URL supplied by bootstrap. Keep token text only inside the submit handler; clear the input before rendering any next state.
+In app.js, create a local fetch helper that calls only relative /api URLs. Implement login, logout, paginated search, title patch, new session, resume, stop, device refresh, clipboard copy, and an `open-broccoli` anchor whose Bootstrap-supplied official URL is its `href`. Keep token text only inside the submit handler; clear the input before rendering any next state.
 
 Maintain Map keyed by utterance_id for pending deltas. Render delta text in an italic channel-specific row; replace it when segment arrives. Track whether timeline.scrollTop is near its bottom before auto-scrolling after a transcript event.
 
@@ -689,14 +694,16 @@ Set-Location ..
 
 Expected: output.css is created, the app shell is served locally, and its required DOM hooks exist.
 
-- [ ] **Step 6: Manually verify the UI against fakes**
+- [ ] **Step 6: Define the visual-test contract for the fake UI server**
 
-Start with scripts/run.ps1 in fake-remote mode. Verify login failure, successful login, session search/load-more, new session, resume session, delta replacement, copy button, open-Broccoli button, reconnecting state, device-required state, stop, and logout. Confirm browser developer tools show no token in DOM, local storage, session storage, network JSON responses, or event messages.
+Extend the deterministic fakes so the later browser-only test server can exercise these UI-visible states without a real remote endpoint or audio device: rejected `bad-token` login; accepted `visual-test-token` login; two history pages containing `Daily` and `Planning`; search filtering; a resumed `Daily` session that emits a delta followed by a final segment with the same `utterance_id`; a recoverable close that exposes reconnecting before streaming; and a captured-device-loss event. The fake bootstrap supplies `http://127.0.0.1:8000` as its official Broccoli URL. The fake-only runner is implemented in Task 9; do not add a debug endpoint to the production local API.
+
+Update `tests/test_api.py` to assert the required test IDs and accessible labels exist in the served shell. This locks the contract used by `scripts/visual-check.ps1` before the browser automation is added.
 
 - [ ] **Step 7: Commit the UI**
 
 ~~~powershell
-git add broccoli_desktop/static/index.html broccoli_desktop/static/app.js ui/app.css ui/package.json ui/package-lock.json tests/test_api.py
+git add broccoli_desktop/static/index.html broccoli_desktop/static/app.js ui/app.css ui/package.json ui/package-lock.json tests/fakes.py tests/test_api.py
 git commit -m "feat: add Broccoli Desktop meeting notebook UI"
 ~~~
 
@@ -705,8 +712,9 @@ git commit -m "feat: add Broccoli Desktop meeting notebook UI"
 ### Task 9: Integrate PyWebView and the Windows tray lifecycle
 
 **Files:**
-- Create: broccoli_desktop/runtime.py, broccoli_desktop/tray.py, tests/test_runtime.py, tests/test_tray.py
-- Modify: broccoli_desktop/__main__.py, scripts/run.ps1
+- Create: broccoli_desktop/runtime.py, broccoli_desktop/tray.py, tests/test_runtime.py, tests/test_tray.py, tests/visual_server.py
+- Create: scripts/run.ps1, scripts/visual-check.ps1
+- Modify: broccoli_desktop/__main__.py
 
 **Interfaces:**
 - Consumes: FastAPI application factory, DesktopSessionController, and EventHub.
@@ -731,9 +739,17 @@ def test_quit_requires_confirmation_when_capture_is_active(fake_dialog, runtime)
     assert runtime.window.destroyed is False
 ~~~
 
-- [ ] **Step 2: Implement loopback runtime startup**
+- [ ] **Step 2: Implement loopback runtime startup and the fake browser-only runner**
 
 Start Uvicorn on an available 127.0.0.1 port in a managed thread, wait for its health endpoint, and create a PyWebView window pointed at that exact local URL. Pass no remote credentials into JavaScript bindings. If the server cannot become healthy, show a native error and exit without opening capture.
+
+Create `tests/visual_server.py` as a test-only module that builds `create_app(Services(...))` from the deterministic fakes defined in Tasks 3, 5, and 6, then runs Uvicorn at an explicit `127.0.0.1` port. It must seed only `visual-test-token` and fake transcript/session data.
+
+Create `scripts/run.ps1` with `-FakeRemote`, `-BrowserOnly`, and `-Port` parameters. The `-FakeRemote -BrowserOnly` combination starts `tests.visual_server` and does not create a PyWebView window; the default starts the desktop runtime. Its browser-only form is the only web address that `agent-browser` may open during automated visual QA:
+
+~~~powershell
+.\scripts\run.ps1 -FakeRemote -BrowserOnly -Port 8765
+~~~
 
 - [ ] **Step 3: Implement tray behavior**
 
@@ -747,18 +763,63 @@ Add tests for server-start failure, tray stop action, a non-streaming quit witho
 
 ~~~powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_runtime.py tests/test_tray.py -v
-.\.venv\Scripts\ruff.exe format broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py
-.\.venv\Scripts\ruff.exe check --fix broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py
-.\.venv\Scripts\ruff.exe check broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py
+.\.venv\Scripts\ruff.exe format broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py tests/visual_server.py
+.\.venv\Scripts\ruff.exe check --fix broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py tests/visual_server.py
+.\.venv\Scripts\ruff.exe check broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py tests/test_runtime.py tests/test_tray.py tests/visual_server.py
 ~~~
 
 Expected: closing hides, tray actions reuse controller behavior, and shutdown cannot leave a loopback server or active capture thread behind.
 
-- [ ] **Step 6: Commit desktop runtime integration**
+- [ ] **Step 6: Run the agent-browser visual acceptance pass**
+
+Implement `scripts/visual-check.ps1` to start the fake browser-only server in a hidden child process, wait for `http://127.0.0.1:8765/`, run one isolated agent-browser session, and always stop both the browser and server in `finally`. It must first verify `agent-browser --version` returns `agent-browser 0.34.0`, use `agent-browser session id --scope worktree --prefix broccoli-desktop-visual`, then pass that value through `--session` to every command. Do not use `--restore`, `--profile`, `network har`, a real credential, or a URL outside `127.0.0.1`.
+
+Use a fixed desktop viewport and the snapshot/action/re-snapshot loop. The script must save only fake-data screenshots to the ignored `artifacts/visual/` directory, fail on a missing expected state, and run an axe audit. Its core commands are:
 
 ~~~powershell
-git add broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py scripts/run.ps1 tests/test_runtime.py tests/test_tray.py
-git commit -m "feat: add desktop window and tray lifecycle"
+$session = agent-browser session id --scope worktree --prefix broccoli-desktop-visual
+$browser = @("--session", $session, "--allowed-domains", "127.0.0.1,localhost")
+agent-browser @browser open http://127.0.0.1:8765/
+agent-browser @browser set viewport 1440 900
+agent-browser @browser set media light
+agent-browser @browser wait --text "Entrar"
+agent-browser @browser snapshot -i
+agent-browser @browser screenshot --full artifacts/visual/login.png
+agent-browser @browser find testid token-input fill bad-token
+agent-browser @browser find testid login-submit click
+agent-browser @browser wait --text "Token inválido"
+agent-browser @browser snapshot -i
+agent-browser @browser find testid token-input fill visual-test-token
+agent-browser @browser find testid login-submit click
+agent-browser @browser wait --text "Nova sessão"
+agent-browser @browser snapshot -i
+agent-browser @browser screenshot --full artifacts/visual/notebook-light.png
+agent-browser @browser find testid session-search fill Daily
+agent-browser @browser wait --text "Daily"
+agent-browser @browser find testid session-row-session-1 click
+agent-browser @browser snapshot -i
+agent-browser @browser find testid resume-session click
+agent-browser @browser wait --text "we should ship"
+agent-browser @browser find testid copy-session-code click
+agent-browser @browser wait --text "Código copiado"
+agent-browser @browser get attr '[data-testid="open-broccoli"]' href
+agent-browser @browser wait --text "Transmitindo"
+agent-browser @browser screenshot --full artifacts/visual/notebook-streaming.png
+agent-browser @browser set media dark
+agent-browser @browser reload
+agent-browser @browser wait --text "Caderno de reunião"
+agent-browser @browser screenshot --full artifacts/visual/notebook-dark.png
+agent-browser @browser a11y --tags wcag2a,wcag2aa
+agent-browser @browser eval "[document.documentElement.innerText.includes('visual-test-token'), localStorage.length, sessionStorage.length]"
+~~~
+
+Interpret the final `eval` result as `[false, 0, 0]`; fail the script if it differs. Capture the `get attr` result and fail unless it equals the fake bootstrap URL `http://127.0.0.1:8000`. Run `agent-browser @browser errors --json` and fail if its JSON array is nonempty; run `agent-browser @browser a11y --tags wcag2a,wcag2aa --json` and fail if its `violations` array is nonempty. Inspect `login.png`, `notebook-light.png`, `notebook-streaming.png`, and `notebook-dark.png` with the image viewer before accepting the task: login must be legible, the meeting-notebook sidebar and transcript must remain visible at 1440x900, status/recording indicators must be visually distinct, and dark mode must retain readable contrast. The test verifies layout and browser behavior; the Python suite remains responsible for state transitions that only a fake can trigger.
+
+- [ ] **Step 7: Commit desktop runtime integration and visual QA**
+
+~~~powershell
+git add broccoli_desktop/runtime.py broccoli_desktop/tray.py broccoli_desktop/__main__.py scripts/run.ps1 scripts/visual-check.ps1 tests/test_runtime.py tests/test_tray.py tests/visual_server.py
+git commit -m "feat: add desktop window and visual QA"
 ~~~
 
 ---
@@ -804,9 +865,9 @@ The PyInstaller spec must bundle broccoli_desktop/static, the application icon, 
 
 The Inno Setup script installs only the generated onedir tree, creates Start Menu and desktop shortcuts named Broccoli Desktop, creates an uninstaller, and checks that WebView2 is present before launching. Do not add an updater, telemetry, or administrator requirement.
 
-- [ ] **Step 4: Add Windows CI**
+- [ ] **Step 4: Add Windows CI, including visual browser checks**
 
-Create a GitHub Actions workflow on windows-latest that installs Python 3.12 and uv, runs uv sync --frozen, npm ci, CSS build, scripts/check.ps1, scripts/package.ps1, and scripts/installer.ps1, then uploads the installer as an artifact. CI does not use a real credential, microphone, or remote Broccoli endpoint.
+Create a GitHub Actions workflow on windows-latest that installs Python 3.12 and uv, runs uv sync --frozen, npm ci, CSS build, scripts/check.ps1, scripts/package.ps1, and scripts/installer.ps1, then uploads the installer as an artifact. Before the visual job, run `npm install --global agent-browser@0.34.0`, `agent-browser install`, and `scripts/visual-check.ps1`; publish `artifacts/visual/` only when that step fails. CI does not use a real credential, microphone, remote Broccoli endpoint, profile, restore state, or HAR capture.
 
 - [ ] **Step 5: Run packaging checks and the full suite**
 
@@ -817,9 +878,10 @@ Create a GitHub Actions workflow on windows-latest that installs Python 3.12 and
 .\scripts\build-css.ps1
 .\scripts\package.ps1
 .\scripts\installer.ps1
+.\scripts\visual-check.ps1
 ~~~
 
-Expected: all tests and lint pass, dist contains a runnable onedir bundle, and installer output contains a Broccoli Desktop .exe.
+Expected: all tests, lint, and visual checks pass; `dist` contains a runnable onedir bundle; installer output contains a Broccoli Desktop .exe; and the visual artifacts show only fake data.
 
 - [ ] **Step 6: Perform the Windows acceptance pass**
 
@@ -832,6 +894,7 @@ On a clean Windows 11 x64 account, install the generated .exe and verify:
 5. Closing hides to tray; Stop and Quit behave as specified.
 6. Network retry never retains more than ten seconds of audio and never writes an audio file.
 7. A revoked token returns to login and no token remains in local UI storage.
+8. The agent-browser fake-server pass has screenshots for login, notebook light/dark modes, and streaming; its axe audit has no violations.
 
 Record the environment URL and backend-contract confirmation outside the repository; do not record credentials or transcript content.
 
@@ -846,7 +909,7 @@ git commit -m "build: package Broccoli Desktop for Windows"
 
 ## Plan self-review
 
-- **Spec coverage:** Tasks 1–2 cover repository conventions, fixed dependencies, runtime URLs, and token storage. Tasks 3 and 6 cover the external prerequisite contract without changing it. Tasks 4–5 cover separate WASAPI sources, VAD, resampling, offsets, and no disk audio. Tasks 7–9 cover the loopback API, Caderno de reunião UI, deltas, tray, and recovery. Task 10 covers installer, CI, manual acceptance, and the external release gate.
+- **Spec coverage:** Tasks 1–2 cover repository conventions, fixed dependencies, runtime URLs, and token storage. Tasks 3 and 6 cover the external prerequisite contract without changing it. Tasks 4–5 cover separate WASAPI sources, VAD, resampling, offsets, and no disk audio. Tasks 7–9 cover the loopback API, Caderno de reunião UI, deltas, tray, recovery, and agent-browser visual QA. Task 10 covers installer, CI, manual acceptance, and the external release gate.
 - **No-backend scope:** No task names a file, command, migration, test, or deployment under C:\repos\broccoli. External endpoints are exercised only via fakes and a separately confirmed environment.
 - **Placeholder scan:** This document contains no deferred implementation markers; every task supplies exact target files, interfaces, commands, test cases, and commit contents.
 - **Type consistency:** ListeningRemote is defined before DesktopSessionController consumes it; AudioPipeline precedes CaptureSession and controller use; EventHub precedes API and tray use; create_app precedes runtime startup.
