@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from broccoli_desktop.capture import CaptureBackend, DeviceUnavailableError
+from broccoli_desktop.config import PRODUCTION_SERVER_URL
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
@@ -35,6 +38,7 @@ from broccoli_desktop.remote import (
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 
 LOOPBACK_HOST = "127.0.0.1"
+STATIC_DIRECTORY = Path(__file__).with_name("static")
 
 
 class CredentialStoreProtocol(Protocol):
@@ -59,6 +63,7 @@ class Services:
     remote_factory: RemoteFactory
     capture_backend: CaptureBackend
     loopback_port: int | None = None
+    official_broccoli_url: str = PRODUCTION_SERVER_URL
     controller_factory: ControllerFactory = DesktopSessionController
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
@@ -165,6 +170,7 @@ def create_app(services: Services) -> FastAPI:
     """Create the loopback JSON API with only injectable local dependencies."""
     app = FastAPI()
     app.add_middleware(LoopbackHostMiddleware, port=services.loopback_port)
+    app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
 
     @app.exception_handler(ApiError)
     async def api_error_handler(_request: Request, error: ApiError) -> JSONResponse:
@@ -215,10 +221,10 @@ def create_app(services: Services) -> FastAPI:
     async def bootstrap() -> dict[str, object]:
         authenticated = services.authenticated()
         if authenticated is None:
-            return _bootstrap_payload(None, SessionPage((), None))
+            return _bootstrap_payload(None, SessionPage((), None), services.official_broccoli_url)
         controller, remote = authenticated
         page = await _call_remote(services, lambda: remote.list_sessions(cursor=None, query=""))
-        return _bootstrap_payload(controller, page)
+        return _bootstrap_payload(controller, page, services.official_broccoli_url)
 
     @app.get("/api/devices")
     async def devices() -> dict[str, object]:
@@ -328,7 +334,12 @@ def create_app(services: Services) -> FastAPI:
         await websocket.accept()
         try:
             await websocket.send_json(
-                {"type": "bootstrap", "bootstrap": _bootstrap_payload(controller, page)}
+                {
+                    "type": "bootstrap",
+                    "bootstrap": _bootstrap_payload(
+                        controller, page, services.official_broccoli_url
+                    ),
+                }
             )
             await _send_events(websocket, event_queue)
         except WebSocketDisconnect:
@@ -336,9 +347,9 @@ def create_app(services: Services) -> FastAPI:
         finally:
             controller.events.unsubscribe(subscriber)
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def root() -> HTMLResponse:
-        return HTMLResponse("<!doctype html><title>Broccoli Desktop</title>")
+    @app.get("/", include_in_schema=False)
+    async def root() -> FileResponse:
+        return FileResponse(STATIC_DIRECTORY / "index.html")
 
     return app
 
@@ -400,11 +411,12 @@ def _validate_title(title: str) -> str:
 
 
 def _bootstrap_payload(
-    controller: DesktopSessionController | None, page: SessionPage
+    controller: DesktopSessionController | None, page: SessionPage, official_broccoli_url: str
 ) -> dict[str, object]:
     choices = controller.selected_devices if controller is not None else None
     return {
         "authenticated": controller is not None,
+        "official_broccoli_url": official_broccoli_url,
         "selected_devices": (
             {
                 "microphone_id": choices.microphone_id,

@@ -12,8 +12,13 @@ from broccoli_desktop.models import (
     SessionPage,
     UiEvent,
 )
-from broccoli_desktop.remote import RemoteRequestError
-from tests.fakes import FakeCaptureBackend, FakeSessionRemote
+from broccoli_desktop.remote import RemoteRequestError, RemoteUnauthorizedError
+from tests.fakes import (
+    VISUAL_TEST_TOKEN,
+    FakeCaptureBackend,
+    FakeSessionRemote,
+    visual_test_remote_factory,
+)
 
 
 @dataclass
@@ -102,6 +107,52 @@ def login(client: TestClient, token: str = "candidate") -> None:
     assert response.status_code == 204
 
 
+def test_root_serves_the_desktop_shell(client: TestClient) -> None:
+    """The loopback root exposes the controls required by the desktop UI."""
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="loginView"' in response.text
+    assert 'id="sessionLibrary"' in response.text
+    assert 'id="transcriptTimeline"' in response.text
+    assert "output.css" in response.text
+    assert 'data-testid="token-input"' in response.text
+    assert 'data-testid="login-submit"' in response.text
+    assert 'data-testid="login-error"' in response.text
+    assert 'data-testid="session-search"' in response.text
+    assert 'data-testid="new-session"' in response.text
+    assert 'data-testid="load-more"' in response.text
+    assert 'data-testid="session-library"' in response.text
+    assert 'data-testid="resume-session"' in response.text
+    assert 'data-testid="stop-session"' in response.text
+    assert 'data-testid="copy-session-code"' in response.text
+    assert 'data-testid="open-broccoli"' in response.text
+    assert 'data-testid="status-banner"' in response.text
+    assert 'data-testid="transcript-timeline"' in response.text
+    assert 'aria-label="Broccoli access token"' in response.text
+    assert 'aria-label="Search meeting sessions"' in response.text
+    assert 'aria-label="Microphone"' in response.text
+    assert 'aria-label="System audio"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_visual_ui_fakes_provide_only_deterministic_local_data() -> None:
+    """Task 9 can drive the notebook without a remote service or audio hardware."""
+    factory = visual_test_remote_factory()
+    remote = factory(VISUAL_TEST_TOKEN)
+
+    first_page = await remote.list_sessions(cursor=None, query="")
+    second_page = await remote.list_sessions(cursor="history-2", query="")
+    search_page = await remote.list_sessions(cursor=None, query="Daily")
+
+    assert [session.title for session in first_page.sessions] == ["Daily"]
+    assert first_page.next_cursor == "history-2"
+    assert [session.title for session in second_page.sessions] == ["Planning"]
+    assert [session.title for session in search_page.sessions] == ["Daily"]
+    with pytest.raises(RemoteUnauthorizedError):
+        await factory("bad-token").verify_token()
+
+
 def test_login_verifies_before_storing_the_token(
     client: TestClient,
     fake_remote_factory: FakeRemoteFactory,
@@ -145,6 +196,7 @@ def test_bootstrap_exposes_only_local_state_and_the_first_session_page(
     assert response.status_code == 200
     assert response.json() == {
         "authenticated": True,
+        "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
         "selected_devices": None,
         "state": "idle",
         "session": None,
@@ -174,6 +226,7 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
     assert response.status_code == 200
     assert response.json() == {
         "authenticated": False,
+        "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
         "selected_devices": None,
         "state": "idle",
         "session": None,

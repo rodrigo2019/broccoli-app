@@ -18,6 +18,9 @@ from broccoli_desktop.remote import (
     TranscriptSegmentEvent,
 )
 
+VISUAL_TEST_TOKEN = "visual-test-token"
+VISUAL_TEST_BROCCOLI_URL = "http://127.0.0.1:8000"
+
 
 class FakeRemoteClosedError(Exception):
     """Scripted remote stream closure used by lifecycle tests."""
@@ -94,6 +97,9 @@ class FakeSessionRemote:
         }
     )
     next_offsets: list[int] = field(default_factory=lambda: [0])
+    session_pages: dict[tuple[str | None, str], SessionPage] = field(default_factory=dict)
+    segment_pages: dict[tuple[str, str | None], SegmentPage] = field(default_factory=dict)
+    stream_event_scripts: list[list[RemoteEvent | Exception | None]] = field(default_factory=list)
     streams: list[FakeLiveRemoteStream] = field(default_factory=list)
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
     fail_send_stream_indexes: set[int] = field(default_factory=set)
@@ -105,6 +111,9 @@ class FakeSessionRemote:
 
     async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
         self._assert_authorized()
+        configured_page = self.session_pages.get((cursor, query))
+        if configured_page is not None:
+            return configured_page
         return SessionPage(tuple(self.sessions.values()), None)
 
     async def get_session(self, uuid_code: str) -> SessionSummary:
@@ -113,6 +122,9 @@ class FakeSessionRemote:
 
     async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
         self._assert_authorized()
+        configured_page = self.segment_pages.get((uuid_code, cursor))
+        if configured_page is not None:
+            return configured_page
         return SegmentPage((), None)
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
@@ -138,11 +150,15 @@ class FakeSessionRemote:
                 segment_count=0,
                 is_live=True,
             )
-        offset = self.next_offsets[min(len(self.streams), len(self.next_offsets) - 1)]
+        stream_index = len(self.streams)
+        offset = self.next_offsets[min(stream_index, len(self.next_offsets) - 1)]
         stream = FakeLiveRemoteStream(fail_send=len(self.streams) in self.fail_send_stream_indexes)
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
         await stream.emit(SessionStarted(uuid_code, 1, offset, 14_400))
+        if stream_index < len(self.stream_event_scripts):
+            for event in self.stream_event_scripts[stream_index]:
+                await stream.emit(event)
         return stream
 
     async def emit_delta(self, channel: str, utterance_id: str, text: str) -> None:
@@ -300,6 +316,59 @@ def delta_final_pair() -> tuple[TranscriptDeltaEvent, TranscriptSegmentEvent]:
 def remote_close(events: Sequence[RemoteEvent] = ()) -> FakeRemoteStream:
     """Return a stream that yields events before an in-process remote closure."""
     return FakeRemoteStream([*events, FakeRemoteClosedError()])
+
+
+@dataclass
+class VisualTestRemoteFactory:
+    """Return the one accepted browser-test remote without network access."""
+
+    remote: FakeSessionRemote = field(default_factory=lambda: visual_test_remote())
+
+    def __call__(self, token: str) -> FakeSessionRemote:
+        if token != VISUAL_TEST_TOKEN:
+            return FakeSessionRemote(unauthorized=True)
+        return self.remote
+
+
+def visual_test_remote() -> FakeSessionRemote:
+    """Seed the offline session and stream states consumed by visual UI tests."""
+    daily = SessionSummary(
+        uuid_code="session-1",
+        title="Daily",
+        status="stopped",
+        started_at="2026-08-19T09:00:00Z",
+        ended_at="2026-08-19T09:30:00Z",
+        device_label="Speakers",
+        segment_count=0,
+        is_live=False,
+    )
+    planning = SessionSummary(
+        uuid_code="session-2",
+        title="Planning",
+        status="stopped",
+        started_at="2026-08-18T14:00:00Z",
+        ended_at="2026-08-18T14:45:00Z",
+        device_label="Speakers",
+        segment_count=0,
+        is_live=False,
+    )
+    delta, segment = delta_final_pair()
+    return FakeSessionRemote(
+        sessions={daily.uuid_code: daily, planning.uuid_code: planning},
+        next_offsets=[0, 1_000],
+        session_pages={
+            (None, ""): SessionPage((daily,), "history-2"),
+            ("history-2", ""): SessionPage((planning,), None),
+            (None, "Daily"): SessionPage((daily,), None),
+            (None, "Planning"): SessionPage((planning,), None),
+        },
+        stream_event_scripts=[[delta, segment, FakeRemoteClosedError()], []],
+    )
+
+
+def visual_test_remote_factory() -> VisualTestRemoteFactory:
+    """Build the deterministic token gate used by the browser-only fake server."""
+    return VisualTestRemoteFactory()
 
 
 @dataclass

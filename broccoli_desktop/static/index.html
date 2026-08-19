@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="broccoli-light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Broccoli Desktop</title>
+    <link rel="stylesheet" href="/static/output.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body class="min-h-screen bg-base-200 text-base-content">
+    <div class="mx-auto flex min-h-screen max-w-screen-2xl flex-col p-4 lg:p-6">
+      <header class="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <p class="text-sm font-semibold text-primary">Broccoli Desktop</p>
+          <h1 class="text-3xl font-bold tracking-tight">Caderno de reunião</h1>
+        </div>
+        <button id="logoutButton" class="btn btn-ghost btn-sm hidden" type="button">
+          Sair
+        </button>
+      </header>
+
+      <div
+        id="statusBanner"
+        class="alert alert-info mb-4 hidden shadow-sm"
+        role="status"
+        aria-live="polite"
+        data-testid="status-banner"
+      >
+        <span id="statusMessage">Pronto para começar.</span>
+      </div>
+
+      <section id="loginView" class="mx-auto my-auto w-full max-w-md">
+        <div class="card bg-base-100 shadow-xl">
+          <div class="card-body">
+            <h2 class="card-title text-2xl">Entrar</h2>
+            <p class="text-sm text-base-content/70">
+              Cole seu token do Broccoli. Ele é guardado somente no Gerenciador de
+              Credenciais do Windows.
+            </p>
+            <form id="loginForm" class="mt-2 space-y-4">
+              <label class="form-control w-full" for="tokenInput">
+                <span class="label-text font-medium">Token de acesso</span>
+                <input
+                  id="tokenInput"
+                  class="input input-bordered w-full"
+                  type="password"
+                  autocomplete="off"
+                  aria-label="Broccoli access token"
+                  data-testid="token-input"
+                  required
+                />
+              </label>
+              <p
+                id="loginError"
+                class="text-error hidden"
+                role="alert"
+                data-testid="login-error"
+              ></p>
+              <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">
+                Entrar
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="mainView" class="hidden min-h-0 flex-1">
+        <div class="grid h-full gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
+          <aside class="card bg-base-100 min-h-0 shadow-sm">
+            <div class="card-body min-h-0 p-4">
+              <div class="flex items-center justify-between gap-2">
+                <h2 class="font-semibold">Sessões</h2>
+                <button id="newSessionButton" class="btn btn-primary btn-sm" type="button" data-testid="new-session">
+                  Nova sessão
+                </button>
+              </div>
+              <label class="form-control" for="sessionSearch">
+                <span class="label-text sr-only">Pesquisar sessões</span>
+                <input
+                  id="sessionSearch"
+                  class="input input-bordered input-sm w-full"
+                  type="search"
+                  placeholder="Pesquisar sessões"
+                  aria-label="Search meeting sessions"
+                  data-testid="session-search"
+                />
+              </label>
+              <div
+                id="sessionLibrary"
+                class="menu bg-base-100 min-h-0 flex-1 overflow-y-auto rounded-box p-0"
+                aria-label="Biblioteca de sessões"
+                data-testid="session-library"
+              ></div>
+              <button id="loadMoreButton" class="btn btn-ghost btn-sm" type="button" data-testid="load-more">
+                Carregar mais
+              </button>
+            </div>
+          </aside>
+
+          <main class="card bg-base-100 min-h-0 shadow-sm">
+            <div class="card-body min-h-0 gap-4 p-4 lg:p-6">
+              <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                <div class="min-w-0 flex-1">
+                  <label class="form-control" for="sessionTitle">
+                    <span class="label-text font-medium">Título da reunião</span>
+                    <input
+                      id="sessionTitle"
+                      class="input input-ghost px-0 text-2xl font-bold"
+                      type="text"
+                      maxlength="120"
+                      placeholder="Sem título"
+                      aria-label="Título da reunião"
+                    />
+                  </label>
+                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/60">Escolha uma sessão para começar.</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button id="copyCodeButton" class="btn btn-outline btn-sm" type="button" data-testid="copy-session-code">
+                    Copiar código
+                  </button>
+                  <a
+                    id="openBroccoliLink"
+                    class="btn btn-outline btn-sm"
+                    href=""
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="open-broccoli"
+                  >Abrir Broccoli</a>
+                </div>
+              </div>
+
+              <div id="recordingNotice" class="alert alert-warning hidden" role="status">
+                <span>Gravação e transcrição em andamento. Avise todos os participantes.</span>
+              </div>
+
+              <section class="grid gap-3 md:grid-cols-2" aria-label="Dispositivos de captura">
+                <label class="form-control" for="microphoneSelect">
+                  <span class="label-text font-medium">Microfone</span>
+                  <select id="microphoneSelect" class="select select-bordered w-full" aria-label="Microphone"></select>
+                </label>
+                <label class="form-control" for="systemDeviceSelect">
+                  <span class="label-text font-medium">Áudio do sistema</span>
+                  <select id="systemDeviceSelect" class="select select-bordered w-full" aria-label="System audio"></select>
+                </label>
+              </section>
+
+              <div id="deviceRequired" class="alert alert-error hidden" role="alert">
+                <span>Selecione um microfone e um dispositivo de áudio do sistema para continuar.</span>
+                <button id="refreshDevicesButton" class="btn btn-sm" type="button">Atualizar dispositivos</button>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <button id="startSessionButton" class="btn btn-primary" type="button">Iniciar captura</button>
+                <button id="resumeSessionButton" class="btn btn-secondary" type="button" data-testid="resume-session">
+                  Retomar sessão
+                </button>
+                <button id="stopSessionButton" class="btn btn-error btn-outline" type="button" data-testid="stop-session">
+                  Parar captura
+                </button>
+                <span id="connectionBadge" class="badge badge-neutral">Parado</span>
+              </div>
+
+              <section class="min-h-0 flex-1" aria-label="Transcrição">
+                <div class="mb-2 flex items-center justify-between">
+                  <h2 class="font-semibold">Transcrição</h2>
+                  <span class="text-sm text-base-content/60">Ao vivo</span>
+                </div>
+                <div
+                  id="transcriptTimeline"
+                  class="timeline-panel min-h-64 h-[28rem] overflow-y-auto rounded-box bg-base-200 p-4"
+                  aria-live="polite"
+                  data-testid="transcript-timeline"
+                >
+                  <p id="emptyTimeline" class="empty-history">A transcrição aparecerá aqui.</p>
+                </div>
+              </section>
+            </div>
+          </main>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

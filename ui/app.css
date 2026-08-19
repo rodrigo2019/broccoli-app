@@ -46,3 +46,41 @@
   --color-warning: oklch(84% 0.14 85);
   --color-error: oklch(70% 0.19 25);
 }
+
+@layer components {
+  .session-row {
+    @apply flex w-full flex-col gap-1 rounded-box px-3 py-3 transition-colors hover:bg-base-200;
+  }
+
+  .session-row-active {
+    @apply bg-primary text-primary-content hover:bg-primary;
+  }
+
+  .timeline-panel {
+    scrollbar-gutter: stable;
+  }
+
+  .transcript-row {
+    @apply mb-3 rounded-box bg-base-100 p-3 shadow-sm;
+  }
+
+  .transcript-row-delta {
+    @apply border border-dashed border-base-300;
+  }
+
+  .channel-label {
+    @apply badge mb-2 text-xs;
+  }
+
+  .channel-label-mic {
+    @apply badge-primary;
+  }
+
+  .channel-label-system {
+    @apply badge-secondary;
+  }
+
+  .empty-history {
+    @apply py-8 text-center text-sm text-base-content/60;
+  }
+}
