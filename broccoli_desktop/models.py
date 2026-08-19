@@ -25,6 +25,15 @@ class DeviceDescriptor:
 
 
 @dataclass(frozen=True)
+class CaptureEvent:
+    """A local capture lifecycle event that never carries raw audio."""
+
+    type: Literal["device_lost"]
+    device_id: str
+    message: str
+
+
+@dataclass(frozen=True)
 class AudioFrame:
     """An ephemeral 100 ms PCM frame ready for the Listening transport."""
 

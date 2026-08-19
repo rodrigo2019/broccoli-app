@@ -1,11 +1,12 @@
-"""Deterministic in-process implementations of the external Listening boundary."""
+"""Deterministic in-process implementations of external desktop boundaries."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
-from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary
+from broccoli_desktop.capture import DeviceUnavailableError
+from broccoli_desktop.models import DeviceDescriptor, SegmentPage, SessionPage, SessionSummary
 from broccoli_desktop.remote import (
     RemoteEvent,
     RemoteProtocolError,
@@ -144,3 +145,143 @@ def delta_final_pair() -> tuple[TranscriptDeltaEvent, TranscriptSegmentEvent]:
 def remote_close(events: Sequence[RemoteEvent] = ()) -> FakeRemoteStream:
     """Return a stream that yields events before an in-process remote closure."""
     return FakeRemoteStream([*events, FakeRemoteClosedError()])
+
+
+@dataclass
+class FakeCaptureHandle:
+    """In-memory capture source with observable cleanup and loss delivery."""
+
+    device_id: str
+    closed_sources: set[str]
+    drained: bool = False
+    closed: bool = False
+    _on_error: Callable[[Exception], None] | None = None
+
+    def close(self) -> None:
+        self.closed = True
+        self.closed_sources.add(self.device_id)
+
+    def drain(self) -> None:
+        self.drained = True
+
+    def set_error_handler(self, on_error: Callable[[Exception], None]) -> None:
+        self._on_error = on_error
+
+    def lose_device(self) -> None:
+        if self._on_error is None:
+            raise RuntimeError("No device-loss handler was installed.")
+        self._on_error(DeviceUnavailableError(self.device_id))
+
+
+@dataclass
+class FakeCaptureBackend:
+    """Offline capture backend that can synchronously deliver a scripted block."""
+
+    devices: list[DeviceDescriptor] = field(
+        default_factory=lambda: [
+            DeviceDescriptor("mic-1", "Microphone One", "mic"),
+            DeviceDescriptor("system-1", "Speakers", "system"),
+        ]
+    )
+    fail_opening: str | None = None
+    callback_pcm: bytes | None = None
+    callback_device_id: str | None = None
+    closed_sources: set[str] = field(default_factory=set)
+    handles: dict[str, FakeCaptureHandle] = field(default_factory=dict)
+
+    def list_devices(self) -> list[DeviceDescriptor]:
+        return list(self.devices)
+
+    def open_microphone(self, device_id: str, on_pcm: Callable[[bytes], None]) -> FakeCaptureHandle:
+        return self._open(device_id, on_pcm)
+
+    def open_loopback(self, device_id: str, on_pcm: Callable[[bytes], None]) -> FakeCaptureHandle:
+        return self._open(device_id, on_pcm)
+
+    def _open(self, device_id: str, on_pcm: Callable[[bytes], None]) -> FakeCaptureHandle:
+        if self.fail_opening == device_id:
+            raise OSError("The selected device is unavailable.")
+        handle = FakeCaptureHandle(device_id, self.closed_sources)
+        self.handles[device_id] = handle
+        if self.callback_pcm is not None and self.callback_device_id == device_id:
+            try:
+                on_pcm(self.callback_pcm)
+            except Exception:
+                handle.close()
+                raise
+        return handle
+
+
+@dataclass
+class FakePyAudioStream:
+    """Minimal stream double that invokes the configured PortAudio callback."""
+
+    callback: Callable[[bytes, int, object, int], tuple[None, int]]
+    closed: bool = False
+    stopped: bool = False
+
+    def emit(self, pcm: bytes, status_flags: int = 0) -> None:
+        self.callback(pcm, len(pcm) // 2, {}, status_flags)
+
+    def stop_stream(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class FakePyAudio:
+    """PyAudioWPatch-shaped fake that neither probes nor opens hardware."""
+
+    device_infos: list[dict[str, object]] = field(
+        default_factory=lambda: [
+            {
+                "index": 1,
+                "name": "Microphone One",
+                "maxInputChannels": 1,
+                "maxOutputChannels": 0,
+                "hostApi": 0,
+                "isLoopbackDevice": False,
+            },
+            {
+                "index": 2,
+                "name": "Speakers",
+                "maxInputChannels": 0,
+                "maxOutputChannels": 2,
+                "hostApi": 0,
+                "isLoopbackDevice": False,
+            },
+        ]
+    )
+    loopback_infos: list[dict[str, object]] = field(
+        default_factory=lambda: [
+            {
+                "index": 3,
+                "name": "Speakers (loopback)",
+                "maxInputChannels": 2,
+                "maxOutputChannels": 0,
+                "hostApi": 0,
+                "isLoopbackDevice": True,
+            }
+        ]
+    )
+    open_calls: list[dict[str, object]] = field(default_factory=list)
+    streams: list[FakePyAudioStream] = field(default_factory=list)
+
+    def get_device_info_generator(self):
+        yield from self.device_infos
+
+    def get_loopback_device_info_generator(self):
+        yield from self.loopback_infos
+
+    def get_wasapi_loopback_analogue_by_index(self, index: int) -> dict[str, object]:
+        if index != 2:
+            raise LookupError("No loopback device was found.")
+        return self.loopback_infos[0]
+
+    def open(self, **kwargs: object) -> FakePyAudioStream:
+        self.open_calls.append(kwargs)
+        stream = FakePyAudioStream(kwargs["stream_callback"])
+        self.streams.append(stream)
+        return stream
