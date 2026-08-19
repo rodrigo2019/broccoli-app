@@ -56,6 +56,10 @@
     @apply bg-primary text-primary-content hover:bg-primary;
   }
 
+  .session-row-active .text-xs {
+    color: var(--color-primary-content);
+  }
+
   .timeline-panel {
     scrollbar-gutter: stable;
   }
@@ -81,6 +85,23 @@
   }
 
   .empty-history {
-    @apply py-8 text-center text-sm text-base-content/60;
+    @apply py-8 text-center text-sm text-base-content/70;
+  }
+}
+
+@media (prefers-color-scheme: light) {
+  .text-primary {
+    color: oklch(45% 0.16 145);
+  }
+
+  .session-row-active {
+    background-color: oklch(50% 0.16 145);
+    color: oklch(98% 0.01 135);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .session-row-active .text-xs {
+    color: oklch(20% 0.03 145);
   }
 }

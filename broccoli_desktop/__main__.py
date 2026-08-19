@@ -17,7 +17,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise
         raise RuntimeError("Desktop runtime startup is not available yet.") from None
 
-    runtime.start(config)
+    start_runtime = getattr(runtime, "start_runtime", None)
+    if start_runtime is None:
+        start_runtime = runtime.start
+    start_runtime(config)
 
 
 if __name__ == "__main__":

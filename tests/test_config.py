@@ -60,15 +60,19 @@ def test_main_parses_the_config_before_lazily_starting_runtime(
     assert received[0].server_url == "http://127.0.0.1:8000"
 
 
-def test_main_reports_that_runtime_startup_is_not_available_yet(
+def test_main_prefers_the_runtime_entry_point(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from broccoli_desktop import __main__
 
-    monkeypatch.delitem(sys.modules, "broccoli_desktop.runtime", raising=False)
+    received: list[object] = []
+    runtime = types.ModuleType("broccoli_desktop.runtime")
+    runtime.start_runtime = received.append
+    monkeypatch.setitem(sys.modules, "broccoli_desktop.runtime", runtime)
 
-    with pytest.raises(RuntimeError, match="not available"):
-        __main__.main([])
+    __main__.main([])
+
+    assert received[0].server_url == "https://broccoli.bosch-digital-factory.com"
 
 
 def test_main_uses_command_line_arguments_when_none_are_supplied(

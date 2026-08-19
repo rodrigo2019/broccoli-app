@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR" data-theme="broccoli-light">
+<html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -85,12 +85,12 @@
                   data-testid="session-search"
                 />
               </label>
-              <div
+              <nav
                 id="sessionLibrary"
                 class="menu bg-base-100 min-h-0 flex-1 overflow-y-auto rounded-box p-0"
                 aria-label="Biblioteca de sessões"
                 data-testid="session-library"
-              ></div>
+              ></nav>
               <button id="loadMoreButton" class="btn btn-ghost btn-sm" type="button" data-testid="load-more">
                 Carregar mais
               </button>
@@ -112,7 +112,7 @@
                       aria-label="Título da reunião"
                     />
                   </label>
-                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/60">Escolha uma sessão para começar.</p>
+                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/70">Escolha uma sessão para começar.</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <button id="copyCodeButton" class="btn btn-outline btn-sm" type="button" data-testid="copy-session-code">
@@ -163,7 +163,7 @@
               <section class="min-h-0 flex-1" aria-label="Transcrição">
                 <div class="mb-2 flex items-center justify-between">
                   <h2 class="font-semibold">Transcrição</h2>
-                  <span class="text-sm text-base-content/60">Ao vivo</span>
+                  <span class="text-sm text-base-content/70">Ao vivo</span>
                 </div>
                 <div
                   id="transcriptTimeline"

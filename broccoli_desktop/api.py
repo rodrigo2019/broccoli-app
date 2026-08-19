@@ -190,6 +190,11 @@ def create_app(services: Services) -> FastAPI:
             status_code=503, content={"detail": "Credential storage is unavailable."}
         )
 
+    @app.get("/health", include_in_schema=False)
+    async def health() -> dict[str, str]:
+        """Report loopback readiness without reading credentials or remote state."""
+        return {"status": "ok"}
+
     @app.post("/api/login", status_code=204)
     async def login(request: LoginRequest) -> Response:
         token = request.token.strip()
