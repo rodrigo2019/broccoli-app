@@ -8,6 +8,7 @@ from broccoli_desktop.capture import (
     BLOCK_BYTES,
     BLOCK_FRAMES,
     SAMPLE_RATE,
+    AudioLevelMonitor,
     CaptureSession,
     DeviceUnavailableError,
     PyAudioCaptureBackend,
@@ -71,6 +72,41 @@ def test_enumeration_assigns_distinct_ids_to_same_named_devices(
     microphones = [device for device in backend.list_devices() if device.kind == "mic"]
 
     assert len({device.device_id for device in microphones}) == 2
+
+
+def test_audio_level_monitor_exposes_transient_input_and_output_peaks(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    monitor = AudioLevelMonitor(fake_capture_backend)
+
+    monitor.start("mic-1", "system-1")
+    fake_capture_backend.handles["mic-1"].emit(b"\xff\x7f" * BLOCK_FRAMES)
+    fake_capture_backend.handles["system-1"].emit(b"\x00\x40" * BLOCK_FRAMES)
+
+    snapshot = monitor.snapshot()
+
+    assert snapshot.active is True
+    assert snapshot.microphone > 0.99
+    assert snapshot.microphone_peak > 0.99
+    assert 0.49 < snapshot.system < 0.51
+    assert 0.49 < snapshot.system_peak < 0.51
+
+    monitor.stop()
+
+    assert monitor.snapshot().active is False
+    assert fake_capture_backend.closed_sources == {"mic-1", "system-1"}
+
+
+def test_audio_level_monitor_releases_the_first_source_when_the_second_cannot_open(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    fake_capture_backend.fail_opening = "system-1"
+    monitor = AudioLevelMonitor(fake_capture_backend)
+
+    with pytest.raises(DeviceUnavailableError):
+        monitor.start("mic-1", "system-1")
+
+    assert fake_capture_backend.closed_sources == {"mic-1"}
 
 
 def test_pyaudio_sources_use_48khz_mono_pcm16_20ms_blocks_and_dispatch_off_callback_thread(

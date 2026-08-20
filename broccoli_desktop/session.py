@@ -137,6 +137,16 @@ class DesktopSessionController:
         """Restore a previously validated local selection without starting capture."""
         self._choices = choices
 
+    def clear_selected_devices(self) -> None:
+        """Forget an idle local selection after the user restores default settings."""
+        if self.state in {
+            ConnectionState.STARTING,
+            ConnectionState.STREAMING,
+            ConnectionState.RECONNECTING,
+        }:
+            raise RuntimeError("An active capture owns the selected devices.")
+        self._choices = None
+
     def set_authentication_failure_handler(self, callback: Callable[[], None] | None) -> None:
         """Set the narrow local notification used when background recovery loses auth."""
         self._on_authentication_failure = callback

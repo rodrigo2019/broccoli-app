@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from hashlib import sha256
+from math import sqrt
 from queue import Empty, Full, Queue
+from struct import iter_unpack
 from threading import Event, RLock, Thread, current_thread
+from time import monotonic
 from typing import Literal, Protocol
 
 import pyaudiowpatch
@@ -230,6 +234,154 @@ class PyAudioCaptureBackend:
         """Use an opaque identity that distinguishes same-named endpoints."""
         identity = f"{kind}\0{info.get('hostApi', '')}\0{info['name']}\0{info['index']}"
         return f"{kind}:{sha256(identity.encode()).hexdigest()[:24]}"
+
+
+@dataclass(frozen=True)
+class AudioLevelSnapshot:
+    """Transient normalized levels for the local device-check UI."""
+
+    microphone: float
+    microphone_peak: float
+    system: float
+    system_peak: float
+    active: bool
+
+
+class AudioLevelMonitor:
+    """Read selected sources only long enough to show their local signal levels.
+
+    The monitor never retains PCM. It exposes normalized current and peak values
+    so the loopback UI can verify a microphone and an output device before a
+    transcription session begins.
+    """
+
+    _LEVEL_DECAY_PER_SECOND = 4.0
+    _PEAK_DECAY_PER_SECOND = 1.25
+
+    def __init__(self, backend: CaptureBackend) -> None:
+        self._backend = backend
+        self._lock = RLock()
+        self._handles: dict[Literal["mic", "system"], CaptureHandle] = {}
+        self._levels: dict[Literal["mic", "system"], float] = {"mic": 0.0, "system": 0.0}
+        self._peaks: dict[Literal["mic", "system"], float] = {"mic": 0.0, "system": 0.0}
+        self._updated_at: dict[Literal["mic", "system"], float] = {
+            "mic": monotonic(),
+            "system": monotonic(),
+        }
+        self._selection: tuple[str, str] | None = None
+        self._starting = False
+        self._startup_error: Exception | None = None
+
+    def start(self, microphone_id: str, system_device_id: str) -> None:
+        """Open the selected sources, replacing any prior device check."""
+        selection = (microphone_id, system_device_id)
+        with self._lock:
+            if self._selection == selection and self._handles:
+                return
+        self.stop()
+
+        opened: dict[Literal["mic", "system"], CaptureHandle] = {}
+        with self._lock:
+            self._starting = True
+            self._startup_error = None
+        try:
+            microphone = self._backend.open_microphone(
+                microphone_id, lambda pcm: self._record_level("mic", pcm)
+            )
+            microphone.set_error_handler(self._handle_source_error)
+            opened["mic"] = microphone
+            system = self._backend.open_loopback(
+                system_device_id, lambda pcm: self._record_level("system", pcm)
+            )
+            system.set_error_handler(self._handle_source_error)
+            opened["system"] = system
+            with self._lock:
+                startup_error = self._startup_error
+                if startup_error is None:
+                    self._handles = opened
+                    self._selection = selection
+                    now = monotonic()
+                    self._levels = {"mic": 0.0, "system": 0.0}
+                    self._peaks = {"mic": 0.0, "system": 0.0}
+                    self._updated_at = {"mic": now, "system": now}
+        except OSError as error:
+            self._close_handles(opened.values())
+            raise DeviceUnavailableError("capture device") from error
+        except Exception:
+            self._close_handles(opened.values())
+            raise
+        finally:
+            with self._lock:
+                self._starting = False
+
+        if startup_error is not None:
+            self._close_handles(opened.values())
+            if isinstance(startup_error, DeviceUnavailableError):
+                raise startup_error
+            raise DeviceUnavailableError("capture device") from startup_error
+
+    def stop(self) -> None:
+        """Release both temporary capture sources and reset the visible levels."""
+        with self._lock:
+            handles = tuple(self._handles.values())
+            self._handles.clear()
+            self._selection = None
+            self._levels = {"mic": 0.0, "system": 0.0}
+            self._peaks = {"mic": 0.0, "system": 0.0}
+            now = monotonic()
+            self._updated_at = {"mic": now, "system": now}
+        self._close_handles(handles)
+
+    def snapshot(self) -> AudioLevelSnapshot:
+        """Return decayed display values without exposing any captured samples."""
+        with self._lock:
+            now = monotonic()
+            microphone, microphone_peak = self._decayed_values("mic", now)
+            system, system_peak = self._decayed_values("system", now)
+            return AudioLevelSnapshot(
+                microphone=microphone,
+                microphone_peak=microphone_peak,
+                system=system,
+                system_peak=system_peak,
+                active=bool(self._handles),
+            )
+
+    def _record_level(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
+        level = _pcm_level(pcm)
+        with self._lock:
+            now = monotonic()
+            current, peak = self._decayed_values(channel, now)
+            self._levels[channel] = max(level, current)
+            self._peaks[channel] = max(level, peak)
+            self._updated_at[channel] = now
+
+    def _decayed_values(self, channel: Literal["mic", "system"], now: float) -> tuple[float, float]:
+        elapsed = max(0.0, now - self._updated_at[channel])
+        level = self._levels[channel] * max(0.0, 1.0 - elapsed * self._LEVEL_DECAY_PER_SECOND)
+        peak = self._peaks[channel] * max(0.0, 1.0 - elapsed * self._PEAK_DECAY_PER_SECOND)
+        return level, peak
+
+    def _handle_source_error(self, error: Exception) -> None:
+        with self._lock:
+            if self._starting:
+                self._startup_error = error
+                return
+        self.stop()
+
+    @staticmethod
+    def _close_handles(handles: Iterable[CaptureHandle]) -> None:
+        for handle in tuple(handles):
+            handle.drain()
+            handle.close()
+
+
+def _pcm_level(pcm: bytes) -> float:
+    """Compute an RMS amplitude from PCM16 without retaining the sample data."""
+    if len(pcm) < 2:
+        return 0.0
+    sample_count = len(pcm) // 2
+    sum_squares = sum(sample * sample for (sample,) in iter_unpack("<h", pcm[: sample_count * 2]))
+    return min(1.0, sqrt(sum_squares / sample_count) / 32_768)
 
 
 class CaptureSession:

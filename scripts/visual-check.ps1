@@ -62,7 +62,6 @@ try {
     # This fake-only session is headed, ephemeral, and limited to the two loopback names.
     $browser = @("--session", $session, "--namespace", $namespace, "--headed", "--allowed-domains", "127.0.0.1,localhost")
     $invalidTokenText = "Token inv$([char]0x00E1)lido"
-    $historyUnavailableText = "Hist$([char]0x00F3)rico n$([char]0x00E3)o dispon$([char]0x00ED)vel neste backend"
     $finalSegmentText = "we should ship"
 
     Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/")
@@ -81,13 +80,19 @@ try {
     Invoke-Browser -BrowserArguments @("find", "testid", "token-input", "fill", "visual-test-token")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
-    Invoke-Browser -BrowserArguments @("wait", "--text", $historyUnavailableText)
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-ready.png"))
 
-    Invoke-Browser -BrowserArguments @("select", "#microphoneSelect", "mic-1")
+    Invoke-Browser -BrowserArguments @("find", "testid", "settings-button", "click")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    Invoke-Browser -BrowserArguments @("select", "#systemDeviceSelect", "system-1")
+    Invoke-Browser -BrowserArguments @("select", "#settingsMicrophoneSelect", "mic-1")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("select", "#settingsSystemDeviceSelect", "system-1")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("find", "testid", "save-settings", "click")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Voltar para a captura")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
     $overlongTitle = "x" * 121
@@ -96,7 +101,7 @@ try {
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
     Invoke-Browser -BrowserArguments @("wait", "--text", "The session title is invalid.")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    $startEnabled = (Invoke-Browser -BrowserArguments @("is", "enabled", "#startSessionButton") | Select-Object -Last 1).Trim()
+    $startEnabled = (Invoke-Browser -BrowserArguments @("is", "enabled", "#captureToggleButton") | Select-Object -Last 1).Trim()
     if ($startEnabled -ne "true") {
         throw "The start button remained disabled after the rejected start request."
     }
@@ -104,17 +109,21 @@ try {
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
-    Invoke-Browser -BrowserArguments @("wait", "--text", "Transmitindo")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#captureToggleButton')?.getAttribute('aria-label') === 'Parar captura'"
+    )
     Invoke-Browser -BrowserArguments @("wait", "--text", $finalSegmentText)
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-streaming.png"))
 
-    Invoke-Browser -BrowserArguments @("find", "testid", "stop-session", "click")
-    Invoke-Browser -BrowserArguments @("wait", "--text", "Parado")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Parar captura")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Captura encerrada.")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("set", "media", "dark")
     Invoke-Browser -BrowserArguments @("reload")
-    Invoke-Browser -BrowserArguments @("wait", "--text", $historyUnavailableText)
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-stopped-dark.png"))
     Invoke-Browser -BrowserArguments @("a11y", "--tags", "wcag2a,wcag2aa")
@@ -129,8 +138,8 @@ try {
     if (@($accessibility.violations).Count -ne 0) {
         throw "Accessibility violations were reported: $accessibilityJson"
     }
-    $storage = Invoke-Browser -BrowserArguments @("eval", "[document.documentElement.innerText.includes('visual-test-token'), localStorage.length, sessionStorage.length]") | ConvertFrom-Json
-    if (@($storage).Count -ne 3 -or $storage[0] -ne $false -or $storage[1] -ne 0 -or $storage[2] -ne 0) {
+    $storage = Invoke-Browser -BrowserArguments @("eval", "[document.documentElement.innerText.includes('visual-test-token'), localStorage.getItem('broccoli-desktop-settings')?.includes('visual-test-token') ?? false, sessionStorage.length]") | ConvertFrom-Json
+    if (@($storage).Count -ne 3 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0) {
         throw "The browser retained fake credential data in page text or web storage."
     }
     $passed = $true

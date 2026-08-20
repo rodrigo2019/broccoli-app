@@ -174,6 +174,7 @@ class UvicornLoopbackServer:
         if self._shutdown:
             return
         self._shutdown = True
+        self._services.stop_audio_level_monitor()
         self._server.should_exit = True
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():

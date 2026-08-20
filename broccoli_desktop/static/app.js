@@ -4,38 +4,95 @@
   const elements = {
     loginView: document.querySelector("#loginView"),
     mainView: document.querySelector("#mainView"),
+    settingsView: document.querySelector("#settingsView"),
     loginForm: document.querySelector("#loginForm"),
     tokenInput: document.querySelector("#tokenInput"),
     loginError: document.querySelector("#loginError"),
     sidebarFooter: document.querySelector("#sidebarFooter"),
+    settingsButton: document.querySelector("#settingsButton"),
     logoutButton: document.querySelector("#logoutButton"),
     statusBanner: document.querySelector("#statusBanner"),
     statusMessage: document.querySelector("#statusMessage"),
     newSessionButton: document.querySelector("#newSessionButton"),
     loadMoreButton: document.querySelector("#loadMoreButton"),
     sessionLibrary: document.querySelector("#sessionLibrary"),
+    backToTranscriptButton: document.querySelector("#backToTranscriptButton"),
+    transcriptHeaderContext: document.querySelector("#transcriptHeaderContext"),
+    settingsHeaderTitle: document.querySelector("#settingsHeaderTitle"),
+    transcriptHeaderActions: document.querySelector("#transcriptHeaderActions"),
+    settingsForm: document.querySelector("#settingsForm"),
+    settingsRefreshDevicesButton: document.querySelector("#settingsRefreshDevicesButton"),
+    settingsMicrophoneSelect: document.querySelector("#settingsMicrophoneSelect"),
+    settingsSystemDeviceSelect: document.querySelector("#settingsSystemDeviceSelect"),
+    settingsMicrophoneMeter: document.querySelector("#settingsMicrophoneMeter"),
+    settingsSystemMeter: document.querySelector("#settingsSystemMeter"),
+    settingsMicrophoneLevel: document.querySelector("#settingsMicrophoneLevel"),
+    settingsSystemLevel: document.querySelector("#settingsSystemLevel"),
+    settingsAudioTestStatus: document.querySelector("#settingsAudioTestStatus"),
+    settingsAudioTestButton: document.querySelector("#settingsAudioTestButton"),
+    themeLightOption: document.querySelector("#themeLightOption"),
+    themeDarkOption: document.querySelector("#themeDarkOption"),
+    proxyEnabled: document.querySelector("#proxyEnabled"),
+    proxyFields: document.querySelector("#proxyFields"),
+    proxyHost: document.querySelector("#proxyHost"),
+    proxyPort: document.querySelector("#proxyPort"),
+    proxyUsername: document.querySelector("#proxyUsername"),
+    proxyPassword: document.querySelector("#proxyPassword"),
+    resetSettingsButton: document.querySelector("#resetSettingsButton"),
     sessionTitle: document.querySelector("#sessionTitle"),
     sessionMeta: document.querySelector("#sessionMeta"),
-    microphoneSelect: document.querySelector("#microphoneSelect"),
-    systemDeviceSelect: document.querySelector("#systemDeviceSelect"),
     refreshDevicesButton: document.querySelector("#refreshDevicesButton"),
     deviceRequired: document.querySelector("#deviceRequired"),
-    startSessionButton: document.querySelector("#startSessionButton"),
-    resumeSessionButton: document.querySelector("#resumeSessionButton"),
-    stopSessionButton: document.querySelector("#stopSessionButton"),
+    captureToggleButton: document.querySelector("#captureToggleButton"),
     copyCodeButton: document.querySelector("#copyCodeButton"),
     openBroccoliLink: document.querySelector("#openBroccoliLink"),
-    recordingNotice: document.querySelector("#recordingNotice"),
-    recordingIdleNotice: document.querySelector("#recordingIdleNotice"),
-    recordingTime: document.querySelector("#recordingTime"),
-    connectionBadge: document.querySelector("#connectionBadge"),
     captureDock: document.querySelector("#captureDock"),
-    waveformBars: document.querySelector("#waveformBars"),
-    microphoneMeter: document.querySelector("#microphoneMeter"),
-    systemMeter: document.querySelector("#systemMeter"),
+    microphoneHistogram: document.querySelector("#microphoneHistogram"),
+    systemHistogram: document.querySelector("#systemHistogram"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
     emptyTimeline: document.querySelector("#emptyTimeline"),
   };
+
+  const SETTINGS_STORAGE_KEY = "broccoli-desktop-settings";
+  const defaultSettings = {
+    theme: "dark",
+    microphoneId: "",
+    systemDeviceId: "",
+    proxyEnabled: false,
+    proxyHost: "",
+    proxyPort: "",
+    proxyUsername: "",
+    proxyPassword: "",
+  };
+
+  function loadSettings() {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
+      if (!saved || typeof saved !== "object") return { ...defaultSettings };
+      return {
+        ...defaultSettings,
+        ...saved,
+        theme: ["light", "dark"].includes(saved.theme) ? saved.theme : defaultSettings.theme,
+        proxyEnabled: Boolean(saved.proxyEnabled),
+      };
+    } catch {
+      return { ...defaultSettings };
+    }
+  }
+
+  function persistSettings() {
+    try {
+      window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
+    } catch {
+      // Local preferences are best-effort in restricted browser contexts.
+    }
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme === "light" ? "broccoli-light" : "broccoli-dark";
+  }
+
+  applyTheme(loadSettings().theme);
 
   const state = {
     authenticated: false,
@@ -55,38 +112,35 @@
     sessionsLoading: false,
     sessionsRequestId: 0,
     segmentsLoading: false,
-    captureStartedAt: null,
-    captureTimer: null,
-  };
-
-  const badgeClasses = {
-    idle: "badge badge-neutral hidden sm:inline-flex",
-    starting: "badge badge-info hidden sm:inline-flex",
-    streaming: "badge badge-success hidden sm:inline-flex",
-    reconnecting: "badge badge-warning hidden sm:inline-flex",
-    stopped: "badge badge-neutral hidden sm:inline-flex",
-    failed: "badge badge-error hidden sm:inline-flex",
-    device_selection_required: "badge badge-error hidden sm:inline-flex",
+    activeView: "transcript",
+    devices: [],
+    settings: loadSettings(),
+    audioTestActive: false,
+    audioTestTimer: null,
+    audioMeterBars: { microphone: [], system: [] },
   };
 
   class CaptureMotion {
-    constructor({ waveformBars, microphoneMeter, systemMeter }) {
-      this.waveformBars = waveformBars;
-      this.microphoneMeter = microphoneMeter;
-      this.systemMeter = systemMeter;
-      this.waveBars = [];
-      this.meterBars = [];
+    constructor({ microphoneHistogram, systemHistogram }) {
+      this.microphoneHistogram = microphoneHistogram;
+      this.systemHistogram = systemHistogram;
+      this.histogramBars = { microphone: [], system: [] };
       this.captureState = "idle";
       this.animationFrame = null;
       this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     }
 
     mount() {
-      this.waveBars = this.createBars(this.waveformBars, 48, "wave-bar");
-      this.meterBars = [
-        ...this.createBars(this.microphoneMeter, 8, "meter-bar"),
-        ...this.createBars(this.systemMeter, 8, "meter-bar"),
-      ];
+      this.histogramBars.microphone = this.createBars(
+        this.microphoneHistogram,
+        30,
+        "capture-histogram__bar",
+      );
+      this.histogramBars.system = this.createBars(
+        this.systemHistogram,
+        30,
+        "capture-histogram__bar",
+      );
       this.paint(0);
     }
 
@@ -139,22 +193,161 @@
     paint(time) {
       const active = this.isActive();
       const intensity = active && this.captureState === "streaming" ? 1 : 0.5;
-      this.waveBars.forEach((bar, index) => {
-        const center = 1 - Math.abs(index / Math.max(this.waveBars.length - 1, 1) - 0.5) * 1.55;
-        const movement = 0.5 + 0.5 * Math.sin(time * 0.008 + index * 1.63);
-        const secondary = 0.5 + 0.5 * Math.sin(time * 0.0037 + index * 0.73 + 1.2);
-        const height = active ? 12 + (movement * 0.58 + secondary * 0.42) * 64 * center * intensity : 16 + (index % 3) * 4;
-        bar.style.setProperty("--wave-height", `${height.toFixed(1)}%`);
-      });
-      this.meterBars.forEach((bar, index) => {
-        const movement = 0.45 + 0.55 * Math.sin(time * 0.01 + index * 1.8);
-        bar.style.opacity = active ? `${0.55 + movement * 0.45 * intensity}` : "0.45";
+      Object.entries(this.histogramBars).forEach(([channel, bars]) => {
+        const channelOffset = channel === "microphone" ? 0 : 2.4;
+        bars.forEach((bar, index) => {
+          const center = 1 - Math.abs(index / Math.max(bars.length - 1, 1) - 0.5) * 1.35;
+          const movement = 0.5 + 0.5 * Math.sin(time * 0.009 + index * 1.57 + channelOffset);
+          const pulse = 0.5 + 0.5 * Math.sin(time * 0.0043 + index * 0.61 + channelOffset);
+          const height = active
+            ? 16 + (movement * 0.64 + pulse * 0.36) * 68 * center * intensity
+            : 20 + (index % 4) * 5;
+          bar.style.setProperty("--histogram-height", `${height.toFixed(1)}%`);
+        });
       });
     }
   }
 
   const captureMotion = new CaptureMotion(elements);
   captureMotion.mount();
+
+  const AUDIO_METER_SEGMENTS = 18;
+
+  function mountAudioMeter(container, channel) {
+    if (!container) return [];
+    const bars = [];
+    container.replaceChildren();
+    for (let index = 0; index < AUDIO_METER_SEGMENTS; index += 1) {
+      const bar = document.createElement("span");
+      bar.className = "audio-level-card__segment";
+      bar.dataset.index = String(index);
+      bar.style.setProperty(
+        "--segment-height",
+        `${Math.round(34 + (index / Math.max(AUDIO_METER_SEGMENTS - 1, 1)) * 66)}%`,
+      );
+      bar.setAttribute("aria-hidden", "true");
+      container.append(bar);
+      bars.push(bar);
+    }
+    state.audioMeterBars[channel] = bars;
+    return bars;
+  }
+
+  function meterAmount(value) {
+    return Math.min(1, Math.sqrt(Math.max(0, Number(value) || 0)) * 1.6);
+  }
+
+  function formatDecibels(value) {
+    if (!value || value < 0.003) return "−∞ dB";
+    return `${Math.max(-48, Math.round(20 * Math.log10(value)))} dB`;
+  }
+
+  function renderAudioMeter(channel, measurement = {}, active = false) {
+    const isMicrophone = channel === "microphone";
+    const container = isMicrophone ? elements.settingsMicrophoneMeter : elements.settingsSystemMeter;
+    const reading = isMicrophone ? elements.settingsMicrophoneLevel : elements.settingsSystemLevel;
+    const bars = state.audioMeterBars[channel];
+    const level = active ? Math.max(0, Math.min(1, Number(measurement.level) || 0)) : 0;
+    const peak = active ? Math.max(level, Math.min(1, Number(measurement.peak) || 0)) : 0;
+    const activeBars = Math.ceil(meterAmount(level) * bars.length);
+    const peakBar = Math.max(0, Math.ceil(meterAmount(peak) * bars.length) - 1);
+    bars.forEach((bar, index) => {
+      bar.classList.toggle("is-active", index < activeBars);
+      bar.classList.toggle("is-peak", active && index === peakBar && peak > 0);
+    });
+    const percent = Math.round(level * 100);
+    container.setAttribute("aria-valuenow", String(percent));
+    container.setAttribute(
+      "aria-valuetext",
+      active ? `${formatDecibels(level)}, pico ${formatDecibels(peak)}` : "Teste não iniciado",
+    );
+    reading.textContent = active ? formatDecibels(level) : "Aguardando";
+  }
+
+  function renderAudioTestControls() {
+    elements.settingsAudioTestButton.textContent = state.audioTestActive
+      ? "Parar teste"
+      : "Testar entrada e saída";
+    elements.settingsAudioTestButton.classList.toggle("btn-error", state.audioTestActive);
+    elements.settingsAudioTestButton.classList.toggle("btn-outline", !state.audioTestActive);
+  }
+
+  function finishAudioTest(message = "Escolha os dispositivos e inicie o teste.") {
+    if (state.audioTestTimer !== null) {
+      window.clearInterval(state.audioTestTimer);
+      state.audioTestTimer = null;
+    }
+    state.audioTestActive = false;
+    renderAudioMeter("microphone");
+    renderAudioMeter("system");
+    elements.settingsAudioTestStatus.textContent = message;
+    renderAudioTestControls();
+  }
+
+  async function refreshAudioTestLevels() {
+    if (!state.audioTestActive) return;
+    try {
+      const levels = await localFetch("/api/audio-levels");
+      if (!state.audioTestActive) return;
+      if (!levels.active) {
+        finishAudioTest("O teste foi interrompido. Selecione os dispositivos novamente para tentar de novo.");
+        return;
+      }
+      renderAudioMeter("microphone", levels.microphone, true);
+      renderAudioMeter("system", levels.system, true);
+    } catch (error) {
+      finishAudioTest(error.message);
+    }
+  }
+
+  async function startAudioTest() {
+    const microphoneId = elements.settingsMicrophoneSelect.value;
+    const systemDeviceId = elements.settingsSystemDeviceSelect.value;
+    if (!microphoneId || !systemDeviceId) {
+      finishAudioTest("Escolha um microfone e uma saída de áudio antes de testar.");
+      return;
+    }
+    elements.settingsAudioTestButton.disabled = true;
+    try {
+      const levels = await localFetch("/api/audio-levels", {
+        method: "POST",
+        body: JSON.stringify({ microphone_id: microphoneId, system_device_id: systemDeviceId }),
+      });
+      state.audioTestActive = levels.active;
+      renderAudioMeter("microphone", levels.microphone, levels.active);
+      renderAudioMeter("system", levels.system, levels.active);
+      if (!levels.active) {
+        finishAudioTest("Não foi possível iniciar o teste de áudio.");
+        return;
+      }
+      elements.settingsAudioTestStatus.textContent = "Teste em execução. Fale no microfone e reproduza um som no computador.";
+      renderAudioTestControls();
+      state.audioTestTimer = window.setInterval(() => {
+        refreshAudioTestLevels();
+      }, 120);
+    } catch (error) {
+      finishAudioTest(error.message);
+    } finally {
+      elements.settingsAudioTestButton.disabled = false;
+    }
+  }
+
+  async function stopAudioTest(message = "Teste de áudio encerrado.") {
+    const wasActive = state.audioTestActive;
+    finishAudioTest(message);
+    if (!wasActive) return;
+    try {
+      await localFetch("/api/audio-levels", { method: "DELETE" });
+    } catch (error) {
+      showStatus(error.message, "error");
+    }
+  }
+
+  mountAudioMeter(elements.settingsMicrophoneMeter, "microphone");
+  mountAudioMeter(elements.settingsSystemMeter, "system");
+  renderAudioMeter("microphone");
+  renderAudioMeter("system");
+  renderAudioTestControls();
 
   async function localFetch(path, options = {}) {
     const response = await fetch(path, {
@@ -190,25 +383,36 @@
   }
 
   function renderView() {
+    const settingsOpen = state.authenticated && state.activeView === "settings";
     elements.loginView.classList.toggle("hidden", state.authenticated);
-    elements.mainView.classList.toggle("hidden", !state.authenticated);
+    elements.mainView.classList.toggle("hidden", !state.authenticated || settingsOpen);
+    elements.settingsView.classList.toggle("hidden", !settingsOpen);
     elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
     elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
+    elements.transcriptHeaderContext.classList.toggle("hidden", settingsOpen);
+    elements.settingsHeaderTitle.classList.toggle("hidden", !settingsOpen);
+    elements.transcriptHeaderActions.classList.toggle("hidden", settingsOpen);
+    elements.settingsButton.classList.toggle("btn-primary", settingsOpen);
+    elements.settingsButton.classList.toggle("btn-ghost", !settingsOpen);
+    elements.settingsButton.setAttribute("aria-current", settingsOpen ? "page" : "false");
   }
 
   function renderDevices(devices) {
+    state.devices = devices;
     const selected = state.selectedDevices || {};
-    renderDeviceSelect(elements.microphoneSelect, devices.filter((device) => device.kind === "mic"), selected.microphone_id);
+    const microphoneId = selected.microphone_id || state.settings.microphoneId;
+    const systemDeviceId = selected.system_device_id || state.settings.systemDeviceId;
+    renderDeviceSelect(elements.settingsMicrophoneSelect, devices.filter((device) => device.kind === "mic"), microphoneId);
     renderDeviceSelect(
-      elements.systemDeviceSelect,
+      elements.settingsSystemDeviceSelect,
       devices.filter((device) => device.kind === "system"),
-      selected.system_device_id,
+      systemDeviceId,
     );
     updateDeviceRequirement();
   }
 
   function updateDeviceRequirement() {
-    const required = !elements.microphoneSelect.value || !elements.systemDeviceSelect.value;
+    const required = !state.selectedDevices?.microphone_id || !state.selectedDevices?.system_device_id;
     elements.deviceRequired.classList.toggle("hidden", !required);
   }
 
@@ -232,6 +436,98 @@
 
   function syncDeviceSelectTitle(select) {
     select.title = select.selectedOptions[0]?.textContent || "";
+  }
+
+  function updateProxyFieldsVisibility() {
+    elements.proxyFields.classList.toggle("hidden", !elements.proxyEnabled.checked);
+  }
+
+  function renderSettings() {
+    elements.themeLightOption.checked = state.settings.theme === "light";
+    elements.themeDarkOption.checked = state.settings.theme === "dark";
+    elements.proxyEnabled.checked = state.settings.proxyEnabled;
+    elements.proxyHost.value = state.settings.proxyHost;
+    elements.proxyPort.value = state.settings.proxyPort;
+    elements.proxyUsername.value = state.settings.proxyUsername;
+    elements.proxyPassword.value = state.settings.proxyPassword;
+    updateProxyFieldsVisibility();
+    renderAudioTestControls();
+  }
+
+  function showSettings() {
+    if (!state.authenticated) return;
+    state.activeView = "settings";
+    renderView();
+    renderSettings();
+  }
+
+  function showTranscript() {
+    state.activeView = "transcript";
+    renderView();
+    stopAudioTest().catch(() => {});
+  }
+
+  function collectSettings() {
+    return {
+      ...state.settings,
+      theme: elements.themeLightOption.checked ? "light" : "dark",
+      microphoneId: elements.settingsMicrophoneSelect.value,
+      systemDeviceId: elements.settingsSystemDeviceSelect.value,
+      proxyEnabled: elements.proxyEnabled.checked,
+      proxyHost: elements.proxyHost.value.trim(),
+      proxyPort: elements.proxyPort.value.trim(),
+      proxyUsername: elements.proxyUsername.value.trim(),
+      proxyPassword: elements.proxyPassword.value,
+    };
+  }
+
+  async function saveDeviceSelection() {
+    const microphoneId = elements.settingsMicrophoneSelect.value;
+    const systemDeviceId = elements.settingsSystemDeviceSelect.value;
+    if (!microphoneId && !systemDeviceId) {
+      await localFetch("/api/devices/selection", { method: "DELETE" });
+      state.selectedDevices = null;
+      return;
+    }
+    if (!microphoneId || !systemDeviceId) {
+      throw new Error("Selecione um microfone e uma saída de áudio para salvar a configuração.");
+    }
+    await localFetch("/api/devices/selection", {
+      method: "PUT",
+      body: JSON.stringify({ microphone_id: microphoneId, system_device_id: systemDeviceId }),
+    });
+    state.selectedDevices = { microphone_id: microphoneId, system_device_id: systemDeviceId };
+  }
+
+  async function saveSettings(event) {
+    event.preventDefault();
+    const nextSettings = collectSettings();
+    applyTheme(nextSettings.theme);
+    try {
+      await saveDeviceSelection();
+    } catch (error) {
+      showStatus(error.message, "error");
+      return;
+    }
+    state.settings = nextSettings;
+    persistSettings();
+    updateDeviceRequirement();
+    renderSettings();
+    showStatus("Configurações salvas nesta máquina.", "success");
+  }
+
+  async function resetSettings() {
+    state.settings = { ...defaultSettings };
+    applyTheme(state.settings.theme);
+    elements.settingsMicrophoneSelect.value = "";
+    elements.settingsSystemDeviceSelect.value = "";
+    persistSettings();
+    await stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
+    await localFetch("/api/devices/selection", { method: "DELETE" });
+    state.selectedDevices = null;
+    renderSettings();
+    updateDeviceRequirement();
+    showStatus("Configurações restauradas.", "info");
   }
 
   function renderSessions() {
@@ -265,27 +561,22 @@
     }
     for (const session of state.sessions) {
       const item = document.createElement("li");
-      item.className = "min-w-0 max-w-full shrink-0 overflow-hidden";
+      item.className = "min-w-0 max-w-full shrink-0 overflow-hidden rounded-md";
       const row = document.createElement("button");
       row.type = "button";
       const active = state.selectedSession?.uuid_code === session.uuid_code;
       row.className = active
-        ? "btn h-auto min-h-0 w-full min-w-0 max-w-full flex-col items-start justify-start gap-1 overflow-hidden whitespace-normal border border-primary/20 bg-primary/15 px-3 py-3 text-left normal-case text-base-content hover:bg-primary/20"
-        : "btn btn-ghost h-auto min-h-0 w-full min-w-0 max-w-full flex-col items-start justify-start gap-1 overflow-hidden whitespace-normal px-3 py-3 text-left normal-case";
+        ? "btn h-10 min-h-0 w-full min-w-0 max-w-full justify-start overflow-hidden rounded-md border-0 bg-primary/15 px-3 text-left text-base font-medium normal-case text-base-content hover:bg-primary/20"
+        : "btn btn-ghost h-10 min-h-0 w-full min-w-0 max-w-full justify-start overflow-hidden rounded-md px-3 text-left text-base font-medium normal-case";
       row.dataset.testid = `session-row-${session.uuid_code}`;
       const sessionLabel = session.title || session.device_label || session.uuid_code;
       row.setAttribute("aria-label", `Abrir sessão ${sessionLabel}`);
       row.title = sessionLabel;
       const title = document.createElement("span");
-      title.className = "block w-full min-w-0 max-w-full truncate text-left font-semibold";
+      title.className = "block min-w-0 flex-1 truncate text-left";
       title.title = sessionLabel;
       title.textContent = sessionLabel;
-      const details = document.createElement("span");
-      details.className = active
-        ? "block max-w-full truncate text-xs text-primary"
-        : "block max-w-full truncate text-xs text-base-content/60";
-      details.textContent = `${session.segment_count} segmentos`;
-      row.append(title, details);
+      row.append(title);
       row.addEventListener("click", () => {
         selectSession(session).catch((error) => showStatus(error.message, "error"));
       });
@@ -357,37 +648,17 @@
     return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
   }
 
-  function formatCaptureTime(milliseconds) {
-    const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-
-  function updateCaptureTimer() {
-    if (isCaptureActive() && !state.captureStartedAt) {
-      state.captureStartedAt = Date.now();
-    }
-    if (state.captureStartedAt) {
-      elements.recordingTime.textContent = formatCaptureTime(Date.now() - state.captureStartedAt);
-    } else {
-      elements.recordingTime.textContent = "00:00";
-    }
-    if (isCaptureActive() && state.captureTimer === null) {
-      state.captureTimer = window.setInterval(updateCaptureTimer, 1000);
-    } else if (!isCaptureActive() && state.captureTimer !== null) {
-      window.clearInterval(state.captureTimer);
-      state.captureTimer = null;
-    }
-  }
-
   function renderCaptureDock() {
     const active = isCaptureActive();
     elements.captureDock.dataset.captureState = state.connectionState;
-    elements.recordingNotice.classList.toggle("hidden", !active);
-    elements.recordingIdleNotice.classList.toggle("hidden", active);
+    elements.captureToggleButton.classList.toggle("btn-error", active);
+    elements.captureToggleButton.classList.toggle("btn-primary", !active);
+    elements.captureToggleButton.setAttribute("aria-label", active ? "Parar captura" : "Iniciar captura");
+    elements.captureToggleButton.title = active ? "Parar captura" : "Iniciar captura";
+    elements.captureToggleButton.innerHTML = active
+      ? '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>'
+      : '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6c0 .8.9 1.3 1.6.8l8.1-6.8a1 1 0 0 0 0-1.6L9.6 4.4A1 1 0 0 0 8 5.2Z"></path></svg>';
     captureMotion.setState(state.connectionState);
-    updateCaptureTimer();
   }
 
   async function selectSession(session) {
@@ -436,8 +707,6 @@
       ? ""
       : "Este título é mantido somente durante esta captura.";
     elements.copyCodeButton.disabled = !session;
-    const active = ["starting", "streaming", "reconnecting"].includes(state.connectionState);
-    elements.resumeSessionButton.disabled = !state.capabilities.user_resume || !session || active;
   }
 
   function renderConnectionState() {
@@ -450,14 +719,6 @@
       failed: "Falha",
       device_selection_required: "Dispositivo necessário",
     }[state.connectionState] || "Pronto";
-    elements.connectionBadge.className = badgeClasses[state.connectionState] || "badge badge-neutral";
-    elements.connectionBadge.textContent = label;
-    const active = state.connectionState === "starting" || state.connectionState === "streaming" || state.connectionState === "reconnecting";
-    elements.stopSessionButton.disabled = !active;
-    elements.startSessionButton.disabled = active;
-    elements.startSessionButton.textContent = state.selectedSession
-      ? "Continuar captura"
-      : "Iniciar captura";
     if (state.connectionState === "reconnecting") {
       showStatus("Reconectando à transcrição…", "warning");
     }
@@ -559,6 +820,7 @@
   }
 
   async function refreshDevices() {
+    await stopAudioTest("Dispositivos atualizados. Inicie um novo teste para verificar o sinal.");
     try {
       const response = await localFetch("/api/devices");
       renderDevices(response.devices);
@@ -569,8 +831,8 @@
 
   function selectedDevicePayload() {
     return {
-      microphone_id: elements.microphoneSelect.value,
-      system_device_id: elements.systemDeviceSelect.value,
+      microphone_id: state.selectedDevices?.microphone_id || "",
+      system_device_id: state.selectedDevices?.system_device_id || "",
     };
   }
 
@@ -578,10 +840,10 @@
     const devices = selectedDevicePayload();
     if (!devices.microphone_id || !devices.system_device_id) {
       elements.deviceRequired.classList.remove("hidden");
+      showSettings();
       return;
     }
     const previousConnectionState = state.connectionState;
-    const previousCaptureStartedAt = state.captureStartedAt;
     const currentSession = state.selectedSession;
     const path = currentSession
       ? `/api/sessions/${encodeURIComponent(currentSession.uuid_code)}/resume`
@@ -590,8 +852,8 @@
       ? devices
       : { ...devices, title: elements.sessionTitle.value };
     try {
+      await stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
       state.connectionState = "starting";
-      state.captureStartedAt = Date.now();
       clearTimeline();
       renderConnectionState();
       const session = await localFetch(path, {
@@ -604,7 +866,6 @@
       renderSessionDetails();
     } catch (error) {
       state.connectionState = previousConnectionState;
-      state.captureStartedAt = previousCaptureStartedAt;
       renderConnectionState();
       showStatus(error.message, "error");
     }
@@ -619,6 +880,13 @@
     } catch (error) {
       showStatus(error.message, "error");
     }
+  }
+
+  function toggleCapture() {
+    if (isCaptureActive()) {
+      return stopSession();
+    }
+    return startSession();
   }
 
   function saveLocalTitle() {
@@ -643,9 +911,9 @@
       showStatus("Pare a captura antes de iniciar uma nova sessão.", "warning");
       return;
     }
+    showTranscript();
     state.selectedSession = null;
     state.connectionState = "idle";
-    state.captureStartedAt = null;
     clearTimeline();
     renderSessions();
     renderSessionDetails();
@@ -659,7 +927,6 @@
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
-    state.captureStartedAt = isCaptureActive() ? state.captureStartedAt || Date.now() : null;
     if (connectToEvents || !state.authenticated) {
       state.sessions = bootstrap.sessions.sessions;
       state.nextCursor = bootstrap.sessions.next_cursor;
@@ -730,6 +997,7 @@
   }
 
   async function signOut() {
+    await stopAudioTest("Teste de áudio encerrado.");
     state.eventSocket?.close();
     state.eventSocket = null;
     await localFetch("/api/login", { method: "DELETE" });
@@ -742,7 +1010,7 @@
     state.selectedSession = null;
     state.selectedDevices = null;
     state.connectionState = "idle";
-    state.captureStartedAt = null;
+    state.activeView = "transcript";
     clearTimeline();
     renderView();
     renderSessions();
@@ -765,25 +1033,70 @@
       setLoginError(error.message === "Authentication is required." ? "Token inválido." : error.message);
     }
   });
+  elements.settingsButton.addEventListener("click", showSettings);
+  elements.backToTranscriptButton.addEventListener("click", showTranscript);
   elements.logoutButton.addEventListener("click", () => signOut().catch((error) => showStatus(error.message, "error")));
   elements.newSessionButton.addEventListener("click", prepareNewSession);
   elements.loadMoreButton.addEventListener("click", () =>
     loadSessions().catch((error) => showStatus(error.message, "error")),
   );
-  elements.refreshDevicesButton.addEventListener("click", refreshDevices);
-  elements.microphoneSelect.addEventListener("change", () => {
-    syncDeviceSelectTitle(elements.microphoneSelect);
-    updateDeviceRequirement();
+  elements.refreshDevicesButton.addEventListener("click", showSettings);
+  elements.settingsRefreshDevicesButton.addEventListener("click", refreshDevices);
+  elements.settingsForm.addEventListener("submit", (event) => {
+    saveSettings(event).catch((error) => showStatus(error.message, "error"));
   });
-  elements.systemDeviceSelect.addEventListener("change", () => {
-    syncDeviceSelectTitle(elements.systemDeviceSelect);
-    updateDeviceRequirement();
+  elements.resetSettingsButton.addEventListener("click", () => {
+    resetSettings().catch((error) => showStatus(error.message, "error"));
   });
-  elements.startSessionButton.addEventListener("click", startSession);
-  elements.resumeSessionButton.addEventListener("click", startSession);
-  elements.stopSessionButton.addEventListener("click", stopSession);
+  elements.settingsAudioTestButton.addEventListener("click", () => {
+    if (state.audioTestActive) {
+      stopAudioTest().catch(() => {});
+    } else {
+      startAudioTest();
+    }
+  });
+  elements.proxyEnabled.addEventListener("change", () => {
+    state.settings.proxyEnabled = elements.proxyEnabled.checked;
+    updateProxyFieldsVisibility();
+  });
+  elements.themeLightOption.addEventListener("change", () => {
+    if (elements.themeLightOption.checked) {
+      state.settings.theme = "light";
+      applyTheme("light");
+    }
+  });
+  elements.themeDarkOption.addEventListener("change", () => {
+    if (elements.themeDarkOption.checked) {
+      state.settings.theme = "dark";
+      applyTheme("dark");
+    }
+  });
+  elements.settingsMicrophoneSelect.addEventListener("change", () => {
+    state.settings.microphoneId = elements.settingsMicrophoneSelect.value;
+    syncDeviceSelectTitle(elements.settingsMicrophoneSelect);
+    if (state.audioTestActive) {
+      stopAudioTest("Microfone alterado. Inicie o teste novamente para verificar o novo sinal.").catch(
+        () => {},
+      );
+    }
+  });
+  elements.settingsSystemDeviceSelect.addEventListener("change", () => {
+    state.settings.systemDeviceId = elements.settingsSystemDeviceSelect.value;
+    syncDeviceSelectTitle(elements.settingsSystemDeviceSelect);
+    if (state.audioTestActive) {
+      stopAudioTest("Saída alterada. Inicie o teste novamente para verificar o novo sinal.").catch(
+        () => {},
+      );
+    }
+  });
+  elements.captureToggleButton.addEventListener("click", () => {
+    toggleCapture().catch((error) => showStatus(error.message, "error"));
+  });
   elements.sessionTitle.addEventListener("change", saveLocalTitle);
   elements.copyCodeButton.addEventListener("click", copySessionCode);
+  window.addEventListener("pagehide", () => {
+    stopAudioTest().catch(() => {});
+  });
 
   localFetch("/api/bootstrap")
     .then(applyBootstrap)

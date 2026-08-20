@@ -174,16 +174,23 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="login-submit"' in response.text
     assert 'data-testid="login-error"' in response.text
     assert 'data-testid="new-session"' in response.text
+    assert 'data-testid="settings-button"' in response.text
+    assert 'id="settingsView"' in response.text
+    assert 'id="settingsHeaderTitle"' in response.text
+    assert 'id="closeSettingsButton"' not in response.text
+    assert "Mock local" not in response.text
+    assert 'data-testid="proxy-toggle"' in response.text
+    assert 'data-testid="test-audio"' in response.text
     assert 'data-testid="session-library"' in response.text
-    assert 'data-testid="stop-session"' in response.text
+    assert 'data-testid="capture-toggle"' in response.text
     assert 'data-testid="copy-session-code"' in response.text
     assert 'data-testid="open-broccoli"' in response.text
     assert 'data-testid="status-banner"' in response.text
     assert 'data-testid="transcript-timeline"' in response.text
     assert 'aria-label="Broccoli access token"' in response.text
     assert 'data-testid="session-search"' not in response.text
-    assert 'aria-label="Microfone"' in response.text
-    assert 'aria-label="Áudio do sistema"' in response.text
+    assert 'id="settingsMicrophoneSelect"' in response.text
+    assert 'id="settingsSystemDeviceSelect"' in response.text
 
 
 def test_login_verifies_before_storing_the_token(
@@ -418,6 +425,62 @@ def test_devices_and_logout_use_local_dependencies_only(
     assert fake_credentials.token is None
 
 
+def test_audio_level_routes_read_selected_devices_without_returning_pcm(
+    client: TestClient,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    unauthenticated = client.post(
+        "/api/audio-levels",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    login(client)
+
+    started = client.post(
+        "/api/audio-levels",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    fake_capture.handles["mic-1"].emit(b"\xff\x7f")
+    fake_capture.handles["system-1"].emit(b"\x00\x40")
+    levels = client.get("/api/audio-levels")
+    stopped = client.delete("/api/audio-levels")
+
+    assert unauthenticated.status_code == 401
+    assert started.status_code == 200
+    assert started.json() == {
+        "active": True,
+        "microphone": {"level": 0.0, "peak": 0.0},
+        "system": {"level": 0.0, "peak": 0.0},
+    }
+    assert levels.status_code == 200
+    assert levels.json()["active"] is True
+    assert levels.json()["microphone"]["level"] > 0.99
+    assert 0.49 < levels.json()["system"]["peak"] < 0.51
+    assert b"\xff\x7f" not in levels.content
+    assert stopped.status_code == 204
+    assert fake_capture.closed_sources == {"mic-1", "system-1"}
+
+
+def test_audio_level_check_stops_before_a_capture_uses_the_devices(
+    client: TestClient,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    login(client)
+    meter = client.post(
+        "/api/audio-levels",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    capture = client.post(
+        "/api/sessions",
+        json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert meter.status_code == 200
+    assert capture.status_code == 201
+    assert fake_capture.closed_sources == {"mic-1", "system-1"}
+
+    client.post("/api/sessions/stop")
+
+
 @pytest.mark.parametrize(
     ("path", "body"),
     [
@@ -507,6 +570,48 @@ def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
     }
 
 
+def test_settings_can_save_and_clear_device_choices_before_a_capture_starts(
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    settings = FakeDeviceSettings()
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+    login(client)
+
+    saved = client.put(
+        "/api/devices/selection",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    reopened_services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    reopened_client = TestClient(create_app(reopened_services), headers={"host": "127.0.0.1"})
+    reopened = reopened_client.get("/api/bootstrap")
+    cleared = client.delete("/api/devices/selection")
+
+    assert saved.status_code == 204
+    assert settings.saved == [CaptureChoices("mic-1", "system-1")]
+    assert reopened.json()["selected_devices"] == {
+        "microphone_id": "mic-1",
+        "system_device_id": "system-1",
+    }
+    assert services.controller is not None
+    assert services.controller.selected_devices is None
+    assert cleared.status_code == 204
+    assert settings.selection is None
+    assert settings.clear_count == 1
+
+
 def test_missing_persisted_device_selection_is_cleared_and_requires_replacement(
     fake_credentials: FakeCredentials,
     fake_remote_factory: FakeRemoteFactory,
@@ -544,7 +649,9 @@ def test_static_client_renders_each_transcript_row_with_its_event_offset_timesta
 
     assert "function formatTranscriptTimestamp(offsetMs)" in source
     assert "timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);" in source
-    assert "row.append(timestamp, channel, text);" in source
+    assert "heading.append(speaker, timestamp);" in source
+    assert "content.append(heading, text);" in source
+    assert "row.append(avatar, content);" in source
 
 
 def test_notebook_contains_history_loading_and_selection_workflow() -> None:

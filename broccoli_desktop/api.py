@@ -15,7 +15,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from broccoli_desktop.capture import CaptureBackend, DeviceUnavailableError
+from broccoli_desktop.capture import (
+    AudioLevelMonitor,
+    AudioLevelSnapshot,
+    CaptureBackend,
+    DeviceUnavailableError,
+)
 from broccoli_desktop.config import PRODUCTION_SERVER_URL
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
@@ -70,6 +75,10 @@ class Services:
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
+    audio_levels: AudioLevelMonitor = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.audio_levels = AudioLevelMonitor(self.capture_backend)
 
     def authenticated(self) -> tuple[DesktopSessionController, ListeningRemote] | None:
         """Return the controller and remote for the persisted token, if any."""
@@ -98,6 +107,19 @@ class Services:
     def save_selected_devices(self, choices: CaptureChoices) -> None:
         """Persist only opaque IDs after a capture period was successfully opened."""
         self.device_settings.save(choices)
+
+    def start_audio_level_monitor(self, choices: CaptureChoices) -> None:
+        """Open a temporary local meter instead of sending audio to the remote service."""
+        self.audio_levels.start(choices.microphone_id, choices.system_device_id)
+
+    def stop_audio_level_monitor(self) -> None:
+        self.audio_levels.stop()
+
+    def clear_selected_devices(self) -> None:
+        """Clear the durable selection when the user restores audio defaults."""
+        self.device_settings.clear()
+        if self.controller is not None:
+            self.controller.clear_selected_devices()
 
     def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
@@ -237,6 +259,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.delete("/api/login", status_code=204)
     async def logout() -> Response:
+        services.stop_audio_level_monitor()
         controller = services.controller
         if controller is not None:
             await controller.stop()
@@ -259,6 +282,47 @@ def create_app(services: Services) -> FastAPI:
                 _device_payload(device) for device in services.capture_backend.list_devices()
             ]
         }
+
+    @app.put("/api/devices/selection", status_code=204)
+    async def save_device_selection(request: SessionRequest) -> Response:
+        choices = _validated_choices(services.capture_backend, request)
+        controller, _remote = _require_authenticated(services)
+        if _capture_is_active(controller):
+            raise ApiError(409, "Stop the active capture before changing audio devices.")
+        services.save_selected_devices(choices)
+        controller.restore_selected_devices(choices)
+        return Response(status_code=204)
+
+    @app.delete("/api/devices/selection", status_code=204)
+    async def clear_device_selection() -> Response:
+        controller, _remote = _require_authenticated(services)
+        if _capture_is_active(controller):
+            raise ApiError(409, "Stop the active capture before changing audio devices.")
+        services.clear_selected_devices()
+        return Response(status_code=204)
+
+    @app.post("/api/audio-levels")
+    async def start_audio_levels(request: SessionRequest) -> dict[str, object]:
+        choices = _validated_choices(services.capture_backend, request)
+        controller, _remote = _require_authenticated(services)
+        if _capture_is_active(controller):
+            raise ApiError(409, "Stop the active capture before testing audio devices.")
+        try:
+            services.start_audio_level_monitor(choices)
+        except DeviceUnavailableError:
+            raise ApiError(422, "The selected audio device is unavailable.") from None
+        return _audio_level_payload(services.audio_levels.snapshot())
+
+    @app.get("/api/audio-levels")
+    async def audio_levels() -> dict[str, object]:
+        _require_authenticated(services)
+        return _audio_level_payload(services.audio_levels.snapshot())
+
+    @app.delete("/api/audio-levels", status_code=204)
+    async def stop_audio_levels() -> Response:
+        _require_authenticated(services)
+        services.stop_audio_level_monitor()
+        return Response(status_code=204)
 
     @app.get("/api/sessions")
     async def list_sessions(request: Request) -> dict[str, object]:
@@ -309,6 +373,7 @@ def create_app(services: Services) -> FastAPI:
         title = _validate_title(request.title)
         choices = _validated_choices(services.capture_backend, request)
         controller, _remote = _require_authenticated(services)
+        services.stop_audio_level_monitor()
         try:
             session = await controller.start_new(choices, title)
         except RuntimeError:
@@ -327,6 +392,7 @@ def create_app(services: Services) -> FastAPI:
     async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
         choices = _validated_choices(services.capture_backend, request)
         controller, _remote = _require_authenticated(services)
+        services.stop_audio_level_monitor()
         try:
             session = await controller.resume(uuid_code, choices)
         except RuntimeError:
@@ -433,6 +499,14 @@ def _choices_are_available(backend: CaptureBackend, choices: CaptureChoices) -> 
     )
 
 
+def _capture_is_active(controller: DesktopSessionController) -> bool:
+    return controller.state in {
+        ConnectionState.STARTING,
+        ConnectionState.STREAMING,
+        ConnectionState.RECONNECTING,
+    }
+
+
 def _validate_title(title: str) -> str:
     try:
         return validate_title(title)
@@ -471,6 +545,14 @@ def _bootstrap_payload(
 
 def _device_payload(device: DeviceDescriptor) -> dict[str, str]:
     return {"device_id": device.device_id, "label": device.label, "kind": device.kind}
+
+
+def _audio_level_payload(snapshot: AudioLevelSnapshot) -> dict[str, object]:
+    return {
+        "active": snapshot.active,
+        "microphone": {"level": snapshot.microphone, "peak": snapshot.microphone_peak},
+        "system": {"level": snapshot.system, "peak": snapshot.system_peak},
+    }
 
 
 def _session_payload(session: SessionSummary) -> dict[str, object]:
