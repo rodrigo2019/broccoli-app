@@ -91,3 +91,8 @@ class AudioPipeline:
         if not buffer:
             self._buffer_offsets_ms[channel] = None
         return frames
+
+    @property
+    def next_offset_ms(self) -> int:
+        """Return the next shared offset after all captured channel input."""
+        return self._base_offset_ms + max(self._capture_offsets_ms.values())

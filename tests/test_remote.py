@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import httpx
 import pytest
 
+from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, TranscriptSegment
 from broccoli_desktop.remote import (
     HttpListeningRemote,
     SessionStarted,
@@ -18,9 +19,11 @@ from broccoli_desktop.remote import (
 class FakeTransport(httpx.AsyncBaseTransport):
     responses: list[object] = field(default_factory=list)
     requests: list[tuple[str, str, str]] = field(default_factory=list)
+    urls: list[str] = field(default_factory=list)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append((request.method, request.url.path, request.headers["Authorization"]))
+        self.urls.append(str(request.url))
         return httpx.Response(200, json=self.responses.pop(0), request=request)
 
 
@@ -92,6 +95,86 @@ async def test_verify_token_uses_the_declared_token_endpoint(
     await remote.verify_token()
 
     assert fake_transport.requests == [("GET", "/api/auth/me/", "Token secret")]
+
+
+@pytest.mark.asyncio
+async def test_history_requests_parse_pages_and_keep_query_parameters() -> None:
+    transport = FakeTransport(
+        responses=[
+            {
+                "sessions": [
+                    {
+                        "uuid_code": "session-2",
+                        "title": "",
+                        "status": "ended",
+                        "started_at": "2026-08-19T11:00:00Z",
+                        "ended_at": "2026-08-19T12:00:00Z",
+                        "device_label": "Speakers",
+                        "segment_count": 1,
+                        "is_live": False,
+                    }
+                ],
+                "next_cursor": "20",
+            },
+            {
+                "uuid_code": "session-2",
+                "title": "",
+                "status": "ended",
+                "started_at": "2026-08-19T11:00:00Z",
+                "ended_at": "2026-08-19T12:00:00Z",
+                "device_label": "Speakers",
+                "segment_count": 1,
+                "is_live": False,
+            },
+            {
+                "segments": [
+                    {
+                        "utterance_id": "system:1",
+                        "channel": "system",
+                        "text": "Hello",
+                        "started_offset_ms": 100,
+                        "ended_offset_ms": 900,
+                    }
+                ],
+                "next_cursor": None,
+            },
+        ]
+    )
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        transport,
+        websocket_path="/ws/listening/",
+    )
+
+    page = await remote.list_sessions("20", "meeting")
+    detail = await remote.get_session("session-2")
+    segments = await remote.list_segments("session-2", None)
+
+    assert page == SessionPage(
+        (
+            SessionSummary(
+                uuid_code="session-2",
+                title="",
+                status="ended",
+                started_at="2026-08-19T11:00:00Z",
+                ended_at="2026-08-19T12:00:00Z",
+                device_label="Speakers",
+                segment_count=1,
+                is_live=False,
+            ),
+        ),
+        "20",
+    )
+    assert detail.uuid_code == "session-2"
+    assert segments == SegmentPage(
+        (TranscriptSegment("system:1", "system", "Hello", 100, 900),), None
+    )
+    assert transport.urls == [
+        "https://broccoli.example/api/listening/desktop/sessions/?cursor=20&q=meeting",
+        "https://broccoli.example/api/listening/desktop/sessions/session-2/",
+        "https://broccoli.example/api/listening/desktop/sessions/session-2/segments/",
+    ]
 
 
 @pytest.mark.asyncio

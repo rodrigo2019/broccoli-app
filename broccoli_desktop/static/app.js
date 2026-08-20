@@ -36,7 +36,7 @@
     capabilities: {
       history: false,
       remote_title: false,
-      user_resume: false,
+      user_resume: true,
       segment_history: false,
     },
     sessions: [],
@@ -46,6 +46,9 @@
     connectionState: "idle",
     pendingDeltas: new Map(),
     eventSocket: null,
+    sessionsLoading: false,
+    sessionsRequestId: 0,
+    segmentsLoading: false,
   };
 
   const badgeClasses = {
@@ -127,7 +130,8 @@
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
     elements.sessionSearch.disabled = !state.capabilities.history;
-    elements.loadMoreButton.disabled = !state.capabilities.history || !state.nextCursor;
+    elements.loadMoreButton.disabled =
+      !state.capabilities.history || state.sessionsLoading || !state.nextCursor;
     if (!state.capabilities.history) {
       const unavailable = document.createElement("p");
       unavailable.className = "empty-history";
@@ -136,6 +140,13 @@
       return;
     }
     if (!state.sessions.length) {
+      if (state.sessionsLoading) {
+        const loading = document.createElement("p");
+        loading.className = "empty-history";
+        loading.textContent = "Carregando sessoes...";
+        elements.sessionLibrary.append(loading);
+        return;
+      }
       const empty = document.createElement("p");
       empty.className = "empty-history";
       empty.textContent = "Nenhuma sessão encontrada.";
@@ -146,21 +157,120 @@
       row.type = "button";
       row.className = "session-row text-left";
       row.dataset.testid = `session-row-${session.uuid_code}`;
-      row.setAttribute("aria-label", `Abrir sessão ${session.title || session.uuid_code}`);
+      const sessionLabel = session.title || session.device_label || session.uuid_code;
+      row.setAttribute("aria-label", `Abrir sessão ${sessionLabel}`);
       row.classList.toggle("session-row-active", state.selectedSession?.uuid_code === session.uuid_code);
       const title = document.createElement("strong");
-      title.textContent = session.title || "Sem título";
+      title.textContent = sessionLabel;
       const details = document.createElement("span");
       details.className = "text-xs text-base-content/60";
       details.textContent = `${session.segment_count} segmentos`;
       row.append(title, details);
       row.addEventListener("click", () => {
-        state.selectedSession = session;
-        clearTimeline();
-        renderSessions();
-        renderSessionDetails();
+        selectSession(session).catch((error) => showStatus(error.message, "error"));
       });
       elements.sessionLibrary.append(row);
+    }
+  }
+
+  function mergeSession(session) {
+    const index = state.sessions.findIndex((item) => item.uuid_code === session.uuid_code);
+    if (index === -1) {
+      state.sessions.unshift(session);
+    } else {
+      const existing = state.sessions[index];
+      state.sessions[index] = {
+        ...existing,
+        ...session,
+        // Titles are local until the backend stores them. Do not let a remote
+        // history refresh erase the title already shown for the live row.
+        title: session.title || existing.title,
+      };
+    }
+  }
+
+  async function loadSessions({ reset = false } = {}) {
+    if (!state.capabilities.history || (!reset && !state.nextCursor)) return;
+    const requestId = ++state.sessionsRequestId;
+    const cursor = reset ? null : state.nextCursor;
+    const query = elements.sessionSearch.value.trim();
+    const params = new URLSearchParams();
+    if (cursor) params.set("cursor", cursor);
+    if (query) params.set("q", query);
+    state.sessionsLoading = true;
+    renderSessions();
+    try {
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const page = await localFetch(`/api/sessions${suffix}`);
+      if (requestId !== state.sessionsRequestId) return;
+      const sessions = reset ? page.sessions : [...state.sessions, ...page.sessions];
+      if (state.selectedSession) {
+        state.sessions = sessions.map((session) =>
+          session.uuid_code === state.selectedSession.uuid_code && !session.title
+            ? { ...session, title: state.selectedSession.title }
+            : session,
+        );
+      } else {
+        state.sessions = sessions;
+      }
+      state.nextCursor = page.next_cursor;
+      if (state.selectedSession) {
+        const refreshed = state.sessions.find(
+          (session) => session.uuid_code === state.selectedSession.uuid_code,
+        );
+        if (refreshed) {
+          state.selectedSession = {
+            ...state.selectedSession,
+            ...refreshed,
+            title: refreshed.title || state.selectedSession.title,
+          };
+        }
+      }
+    } finally {
+      if (requestId === state.sessionsRequestId) {
+        state.sessionsLoading = false;
+        renderSessions();
+      }
+    }
+  }
+
+  function isCaptureActive() {
+    return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
+  }
+
+  async function selectSession(session) {
+    if (isCaptureActive() && state.selectedSession?.uuid_code !== session.uuid_code) {
+      showStatus("Pare a captura antes de abrir outra sessao.", "warning");
+      return;
+    }
+    state.selectedSession = session;
+    clearTimeline();
+    renderSessions();
+    renderSessionDetails();
+    if (!state.capabilities.segment_history) return;
+
+    state.segmentsLoading = true;
+    const empty = document.getElementById("emptyTimeline");
+    if (empty) empty.textContent = "Carregando transcricao...";
+    try {
+      let cursor = null;
+      do {
+        const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+        const page = await localFetch(
+          `/api/sessions/${encodeURIComponent(session.uuid_code)}/segments${params}`,
+        );
+        if (state.selectedSession?.uuid_code !== session.uuid_code) return;
+        for (const segment of page.segments) renderSegment(segment);
+        cursor = page.next_cursor;
+      } while (cursor);
+    } finally {
+      if (state.selectedSession?.uuid_code === session.uuid_code) {
+        const empty = document.getElementById("emptyTimeline");
+        if (empty && !elements.transcriptTimeline.querySelector("article")) {
+          empty.textContent = "A transcrição aparecerá aqui.";
+        }
+      }
+      state.segmentsLoading = false;
     }
   }
 
@@ -174,7 +284,8 @@
       ? ""
       : "Este título é mantido somente durante esta captura.";
     elements.copyCodeButton.disabled = !session;
-    elements.resumeSessionButton.disabled = !state.capabilities.user_resume || !session;
+    const active = ["starting", "streaming", "reconnecting"].includes(state.connectionState);
+    elements.resumeSessionButton.disabled = !state.capabilities.user_resume || !session || active;
   }
 
   function renderConnectionState() {
@@ -193,6 +304,9 @@
     elements.recordingNotice.classList.toggle("hidden", !active);
     elements.stopSessionButton.disabled = !active;
     elements.startSessionButton.disabled = active;
+    elements.startSessionButton.textContent = state.selectedSession
+      ? "Continuar captura"
+      : "Iniciar captura";
     if (state.connectionState === "reconnecting") {
       showStatus("Reconectando à transcrição…", "warning");
     }
@@ -292,23 +406,30 @@
     };
   }
 
-  async function startNewSession() {
+  async function startSession() {
     const devices = selectedDevicePayload();
     if (!devices.microphone_id || !devices.system_device_id) {
       elements.deviceRequired.classList.remove("hidden");
       return;
     }
     const previousConnectionState = state.connectionState;
+    const currentSession = state.selectedSession;
+    const path = currentSession
+      ? `/api/sessions/${encodeURIComponent(currentSession.uuid_code)}/resume`
+      : "/api/sessions";
+    const body = currentSession
+      ? devices
+      : { ...devices, title: elements.sessionTitle.value };
     try {
       state.connectionState = "starting";
       clearTimeline();
       renderConnectionState();
-      const session = await localFetch("/api/sessions", {
+      const session = await localFetch(path, {
         method: "POST",
-        body: JSON.stringify({ ...devices, title: elements.sessionTitle.value }),
+        body: JSON.stringify(body),
       });
       state.selectedSession = session;
-      state.sessions = [];
+      mergeSession(session);
       renderSessions();
       renderSessionDetails();
     } catch (error) {
@@ -347,6 +468,10 @@
   }
 
   function prepareNewSession() {
+    if (isCaptureActive()) {
+      showStatus("Pare a captura antes de iniciar uma nova sessão.", "warning");
+      return;
+    }
     state.selectedSession = null;
     state.connectionState = "idle";
     clearTimeline();
@@ -362,8 +487,11 @@
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
-    state.sessions = bootstrap.sessions.sessions;
-    state.nextCursor = bootstrap.sessions.next_cursor;
+    if (connectToEvents || !state.authenticated) {
+      state.sessions = bootstrap.sessions.sessions;
+      state.nextCursor = bootstrap.sessions.next_cursor;
+    }
+    if (state.selectedSession) mergeSession(state.selectedSession);
     elements.openBroccoliLink.href = bootstrap.official_broccoli_url;
     renderView();
     renderSessions();
@@ -373,6 +501,9 @@
     if (state.authenticated) {
       refreshDevices();
       if (connectToEvents) connectEvents();
+      if (connectToEvents) {
+        loadSessions({ reset: true }).catch((error) => showStatus(error.message, "error"));
+      }
     }
   }
 
@@ -385,12 +516,16 @@
       renderSegment(event.segment);
     } else if (event.type === "status" && event.state) {
       state.connectionState = event.state;
-      if (event.session) state.selectedSession = event.session;
+      if (event.session) {
+        state.selectedSession = event.session;
+        mergeSession(event.session);
+      }
       renderSessions();
       renderSessionDetails();
       renderConnectionState();
     } else if (event.type === "session" && event.session) {
       state.selectedSession = event.session;
+      mergeSession(event.session);
       renderSessions();
       renderSessionDetails();
     } else if ((event.type === "warning" || event.type === "error") && event.message) {
@@ -414,7 +549,9 @@
       if (state.authenticated && state.eventSocket === socket) {
         state.connectionState = "reconnecting";
         renderConnectionState();
-        window.setTimeout(connectEvents, 1000);
+        window.setTimeout(() => {
+          if (state.authenticated && state.eventSocket === socket) connectEvents();
+        }, 1000);
       }
     });
   }
@@ -423,11 +560,20 @@
     state.eventSocket?.close();
     state.eventSocket = null;
     await localFetch("/api/login", { method: "DELETE" });
+    state.sessionsRequestId += 1;
     state.authenticated = false;
     state.sessions = [];
+    state.nextCursor = null;
+    state.sessionsLoading = false;
+    state.segmentsLoading = false;
     state.selectedSession = null;
+    state.selectedDevices = null;
+    state.connectionState = "idle";
     clearTimeline();
     renderView();
+    renderSessions();
+    renderSessionDetails();
+    renderConnectionState();
     hideStatus();
   }
 
@@ -447,8 +593,20 @@
   });
   elements.logoutButton.addEventListener("click", () => signOut().catch((error) => showStatus(error.message, "error")));
   elements.newSessionButton.addEventListener("click", prepareNewSession);
+  let sessionSearchTimer = null;
+  elements.sessionSearch.addEventListener("input", () => {
+    window.clearTimeout(sessionSearchTimer);
+    sessionSearchTimer = window.setTimeout(
+      () => loadSessions({ reset: true }).catch((error) => showStatus(error.message, "error")),
+      250,
+    );
+  });
+  elements.loadMoreButton.addEventListener("click", () =>
+    loadSessions().catch((error) => showStatus(error.message, "error")),
+  );
   elements.refreshDevicesButton.addEventListener("click", refreshDevices);
-  elements.startSessionButton.addEventListener("click", startNewSession);
+  elements.startSessionButton.addEventListener("click", startSession);
+  elements.resumeSessionButton.addEventListener("click", startSession);
   elements.stopSessionButton.addEventListener("click", stopSession);
   elements.sessionTitle.addEventListener("change", saveLocalTitle);
   elements.copyCodeButton.addEventListener("click", copySessionCode);

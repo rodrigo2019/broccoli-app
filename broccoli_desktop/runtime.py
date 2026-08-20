@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import socket
 import threading
 import time
@@ -355,11 +356,42 @@ def start_runtime(
         runtime_dialog.show_error("Broccoli Desktop could not open its window.")
         return None
 
+    previous_interrupt_handler = _install_interrupt_handler(runtime)
     try:
         (webview_start or _start_pywebview)()
     finally:
+        _restore_interrupt_handler(previous_interrupt_handler)
         runtime.shutdown()
     return runtime
+
+
+def _install_interrupt_handler(runtime: DesktopRuntime) -> dict[int, Any]:
+    """Route console interrupts through the same teardown as native quit."""
+    previous_handlers: dict[int, Any] = {}
+
+    def handle_interrupt(_signum: int, _frame: Any) -> None:
+        # Ctrl+C must not open the active-capture confirmation dialog. It is an
+        # explicit console shutdown request, and DesktopRuntime.shutdown is
+        # already idempotent for repeated console signals.
+        runtime.shutdown()
+
+    for signum in _interrupt_signals():
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, handle_interrupt)
+    return previous_handlers
+
+
+def _restore_interrupt_handler(previous_handlers: dict[int, Any]) -> None:
+    for signum, handler in previous_handlers.items():
+        signal.signal(signum, handler)
+
+
+def _interrupt_signals() -> tuple[int, ...]:
+    signals = [signal.SIGINT]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        signals.append(sigbreak)
+    return tuple(signals)
 
 
 def start(config: RuntimeConfig) -> None:

@@ -11,6 +11,10 @@ from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
+    SegmentPage,
+    SessionPage,
+    SessionSummary,
+    TranscriptSegment,
     UiEvent,
 )
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
@@ -138,11 +142,16 @@ def login_with_visual_token(client: TestClient) -> None:
 
 
 def test_fake_bootstrap_exposes_the_same_capability_shape() -> None:
-    """The browser visual server must use the browser-only capability contract."""
+    """The browser visual server must expose the same history contract."""
     client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
     login_with_visual_token(client)
 
-    assert client.get("/api/bootstrap").json()["capabilities"]["history"] is False
+    assert client.get("/api/bootstrap").json()["capabilities"] == {
+        "history": True,
+        "remote_title": False,
+        "user_resume": True,
+        "segment_history": True,
+    }
 
 
 def test_visual_fake_does_not_seed_removed_history_workflow() -> None:
@@ -209,7 +218,7 @@ def test_login_does_not_store_a_rejected_token(
     assert "bad" not in response.text
 
 
-def test_bootstrap_marks_history_features_unavailable(
+def test_bootstrap_exposes_history_features(
     client: TestClient,
     fake_credentials: FakeCredentials,
 ) -> None:
@@ -226,10 +235,10 @@ def test_bootstrap_marks_history_features_unavailable(
         "session": None,
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
-            "history": False,
+            "history": True,
             "remote_title": False,
-            "user_resume": False,
-            "segment_history": False,
+            "user_resume": True,
+            "segment_history": True,
         },
     }
     assert "candidate" not in response.text
@@ -248,39 +257,116 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
         "session": None,
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
-            "history": False,
+            "history": True,
             "remote_title": False,
-            "user_resume": False,
-            "segment_history": False,
+            "user_resume": True,
+            "segment_history": True,
         },
     }
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "payload"),
-    [
-        ("get", "/api/sessions", None),
-        ("get", "/api/sessions/session-1", None),
-        ("get", "/api/sessions/session-1/segments", None),
-        ("patch", "/api/sessions/session-1", {"title": "Renamed"}),
-        (
-            "post",
-            "/api/sessions/session-1/resume",
-            {"microphone_id": "mic-1", "system_device_id": "system-1"},
-        ),
-    ],
-)
-def test_history_routes_report_the_unavailable_capability(
+def test_history_routes_proxy_session_and_segment_pages(
     client: TestClient,
-    method: str,
-    path: str,
-    payload: dict[str, str] | None,
+    fake_remote_factory: FakeRemoteFactory,
 ) -> None:
     login(client)
-    response = client.request(method.upper(), path, json=payload)
+
+    session = SessionSummary(
+        uuid_code="session-2",
+        title="Local title",
+        status="ended",
+        started_at="2026-08-19T11:00:00Z",
+        ended_at="2026-08-19T12:00:00Z",
+        device_label="Meeting speakers",
+        segment_count=1,
+        is_live=False,
+    )
+    segment = TranscriptSegment("system:1", "system", "A sentence", 100, 900)
+    fake_remote_factory.remote.session_pages[(None, "meeting")] = SessionPage((session,), "20")
+    fake_remote_factory.remote.sessions[session.uuid_code] = session
+    fake_remote_factory.remote.segment_pages[(session.uuid_code, None)] = SegmentPage(
+        (segment,), None
+    )
+
+    listed = client.get("/api/sessions?q=meeting")
+    detail = client.get(f"/api/sessions/{session.uuid_code}")
+    segments = client.get(f"/api/sessions/{session.uuid_code}/segments")
+
+    assert listed.status_code == 200
+    assert listed.json() == {
+        "sessions": [
+            {
+                "uuid_code": "session-2",
+                "title": "Local title",
+                "status": "ended",
+                "started_at": "2026-08-19T11:00:00Z",
+                "ended_at": "2026-08-19T12:00:00Z",
+                "device_label": "Meeting speakers",
+                "segment_count": 1,
+                "is_live": False,
+            }
+        ],
+        "next_cursor": "20",
+    }
+    assert detail.status_code == 200
+    assert detail.json()["uuid_code"] == session.uuid_code
+    assert segments.status_code == 200
+    assert segments.json() == {
+        "segments": [
+            {
+                "utterance_id": "system:1",
+                "channel": "system",
+                "text": "A sentence",
+                "started_offset_ms": 100,
+                "ended_offset_ms": 900,
+            }
+        ],
+        "next_cursor": None,
+    }
+
+
+def test_title_update_remains_unavailable_until_the_backend_persists_titles(
+    client: TestClient,
+) -> None:
+    login(client)
+
+    response = client.patch("/api/sessions/session-1", json={"title": "Renamed"})
 
     assert response.status_code == 409
     assert response.json() == {"detail": "This backend does not provide session history."}
+
+
+def test_resume_route_reuses_the_current_session_after_a_client_stop(
+    client: TestClient,
+    services: Services,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+
+    started = client.post(
+        "/api/sessions",
+        json={"title": "Daily", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    assert started.status_code == 201
+    stopped = client.post("/api/sessions/stop")
+    assert stopped.status_code == 204
+
+    resumed = client.post(
+        f"/api/sessions/{started.json()['uuid_code']}/resume",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert resumed.status_code == 201
+    assert resumed.json()["uuid_code"] == started.json()["uuid_code"]
+    assert resumed.json()["title"] == "Daily"
+    assert fake_remote_factory.remote.stream_requests == [
+        (None, "Speakers"),
+        (started.json()["uuid_code"], "Speakers"),
+    ]
+    assert services.controller is not None
+    assert services.controller.state is ConnectionState.STREAMING
+
+    client.post("/api/sessions/stop")
 
 
 def test_session_actions_validate_devices_titles_and_local_state(
@@ -461,11 +547,12 @@ def test_static_client_renders_each_transcript_row_with_its_event_offset_timesta
     assert "row.append(timestamp, channel, text);" in source
 
 
-def test_notebook_explains_history_is_unavailable() -> None:
+def test_notebook_contains_history_loading_and_selection_workflow() -> None:
     source = Path("broccoli_desktop/static/app.js").read_text(encoding="utf-8")
 
-    assert "Histórico não disponível neste backend" in source
-    assert "capabilities.history" in source
+    assert "async function loadSessions" in source
+    assert "async function selectSession" in source
+    assert "capabilities.segment_history" in source
 
 
 def test_keyring_outage_is_reported_without_exposing_credential_details(
@@ -513,10 +600,10 @@ def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
     assert bootstrap["bootstrap"]["authenticated"] is True
     assert bootstrap["bootstrap"]["sessions"] == {"sessions": [], "next_cursor": None}
     assert bootstrap["bootstrap"]["capabilities"] == {
-        "history": False,
+        "history": True,
         "remote_title": False,
-        "user_resume": False,
-        "segment_history": False,
+        "user_resume": True,
+        "segment_history": True,
     }
     assert event == {"type": "warning", "message": "Session credits are running low."}
     assert "candidate" not in str([bootstrap, event])

@@ -7,12 +7,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 import websockets
 
+from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, TranscriptSegment
+
 AUTH_ME_PATH = "/api/auth/me/"
+SESSION_LIST_PATH = "/api/listening/desktop/sessions/"
 
 
 class RemoteError(Exception):
@@ -121,6 +124,12 @@ class RemoteStream(Protocol):
 class ListeningRemote(Protocol):
     async def verify_token(self) -> None: ...
 
+    async def list_sessions(self, cursor: str | None, query: str) -> SessionPage: ...
+
+    async def get_session(self, uuid_code: str) -> SessionSummary: ...
+
+    async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage: ...
+
     async def connect_stream(
         self, *, resume_code: str | None, device_label: str, language: str
     ) -> RemoteStream: ...
@@ -157,6 +166,24 @@ class HttpListeningRemote:
 
     async def verify_token(self) -> None:
         await self._request_json("GET", AUTH_ME_PATH)
+
+    async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:
+        params = {key: value for key, value in {"cursor": cursor, "q": query}.items() if value}
+        return _parse_session_page(
+            await self._request_json("GET", _with_query(SESSION_LIST_PATH, params))
+        )
+
+    async def get_session(self, uuid_code: str) -> SessionSummary:
+        payload = await self._request_json(
+            "GET", f"{SESSION_LIST_PATH}{quote(uuid_code, safe='')}/"
+        )
+        return _parse_session(payload)
+
+    async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
+        path = f"{SESSION_LIST_PATH}{quote(uuid_code, safe='')}/segments/"
+        return _parse_segment_page(
+            await self._request_json("GET", _with_query(path, {"cursor": cursor}))
+        )
 
     async def connect_stream(
         self, *, resume_code: str | None, device_label: str, language: str
@@ -288,6 +315,69 @@ def _authorization_header(token: str) -> str:
     return f"Token {token}"
 
 
+def _with_query(path: str, params: Mapping[str, str | None]) -> str:
+    query = urlencode({key: value for key, value in params.items() if value})
+    return f"{path}?{query}" if query else path
+
+
+def _parse_session_page(payload: object) -> SessionPage:
+    values = _object(payload)
+    raw_sessions = values.get("sessions")
+    if not isinstance(raw_sessions, list):
+        raise RemoteProtocolError("Remote session list was invalid.")
+    next_cursor = _optional_string(values, "next_cursor")
+    return SessionPage(tuple(_parse_session(item) for item in raw_sessions), next_cursor)
+
+
+def _parse_session(payload: object) -> SessionSummary:
+    values = _object(payload)
+    status = _required_string(values, "status")
+    is_live = values.get("is_live")
+    segment_count = values.get("segment_count")
+    if (
+        not isinstance(is_live, bool)
+        or isinstance(segment_count, bool)
+        or not isinstance(segment_count, int)
+    ):
+        raise RemoteProtocolError("Remote session payload was invalid.")
+    title = values.get("title", "")
+    device_label = values.get("device_label", "")
+    if not isinstance(title, str) or not isinstance(device_label, str):
+        raise RemoteProtocolError("Remote session payload was invalid.")
+    return SessionSummary(
+        uuid_code=_required_string(values, "uuid_code"),
+        title=title,
+        status=status,
+        started_at=_optional_string(values, "started_at"),
+        ended_at=_optional_string(values, "ended_at"),
+        device_label=device_label,
+        segment_count=segment_count,
+        is_live=is_live,
+    )
+
+
+def _parse_segment_page(payload: object) -> SegmentPage:
+    values = _object(payload)
+    raw_segments = values.get("segments")
+    if not isinstance(raw_segments, list):
+        raise RemoteProtocolError("Remote segment list was invalid.")
+    next_cursor = _optional_string(values, "next_cursor")
+    return SegmentPage(tuple(_parse_segment(item) for item in raw_segments), next_cursor)
+
+
+def _parse_segment(payload: object) -> TranscriptSegment:
+    values = _object(payload)
+    started_offset_ms = _required_integer(values, "started_offset_ms")
+    ended_offset_ms = _required_integer(values, "ended_offset_ms")
+    return TranscriptSegment(
+        utterance_id=_required_string(values, "utterance_id"),
+        channel=_channel(values),
+        text=_required_string(values, "text"),
+        started_offset_ms=started_offset_ms,
+        ended_offset_ms=ended_offset_ms,
+    )
+
+
 def _stream_url(
     base_url: str,
     websocket_path: str,
@@ -344,6 +434,19 @@ def _close_code(error: Exception) -> int | None:
         if isinstance(code, int):
             return code
     return None
+
+
+def _object(payload: object) -> Mapping[str, object]:
+    if not isinstance(payload, dict):
+        raise RemoteProtocolError("Remote payload was invalid.")
+    return payload
+
+
+def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is not None and not isinstance(value, str):
+        raise RemoteProtocolError("Remote payload was invalid.")
+    return value
 
 
 def _event_values(message: str | bytes) -> Mapping[str, object]:

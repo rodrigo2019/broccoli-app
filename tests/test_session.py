@@ -130,6 +130,27 @@ async def test_start_new_leaves_transcription_language_for_the_remote_service_to
 
 
 @pytest.mark.asyncio
+async def test_resume_reuses_the_current_session_summary_and_remote_uuid(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await fake_remote.emit_segment("system", "system:1", "first segment", 100, 900)
+    await settle()
+    await controller.stop()
+
+    resumed = await controller.resume(started.uuid_code, CaptureChoices("mic-1", "system-1"))
+
+    assert resumed.uuid_code == started.uuid_code
+    assert resumed.title == "Daily"
+    assert resumed.segment_count == 1
+    assert fake_remote.stream_requests == [(None, "Speakers"), ("session-1", "Speakers")]
+    assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_update_title_changes_only_the_active_local_summary(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

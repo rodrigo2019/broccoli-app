@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
@@ -414,6 +415,40 @@ def test_browser_only_command_reuses_runtime_config_and_forwards_the_port(
     ]
 
 
+def test_console_interrupt_runs_the_complete_runtime_teardown(
+    fake_server: FakeServer,
+    fake_window: FakeWindow,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+) -> None:
+    """Ctrl+C must close the native runtime instead of leaving Uvicorn behind."""
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def interrupt() -> None:
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+
+    runtime = start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: fake_window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+        webview_start=interrupt,
+    )
+
+    assert runtime is not None
+    assert fake_server.shutdown_calls == 1
+    assert fake_tray.stop_calls == 1
+    assert fake_window.destroyed is True
+    assert signal.getsignal(signal.SIGINT) is previous_handler
+
+
 def test_window_close_hides_instead_of_stopping_capture(
     fake_window: FakeWindow, fake_tray: FakeTray, runtime: DesktopRuntime
 ) -> None:
@@ -670,5 +705,5 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
     assert login.status_code == 204
     assert bootstrap.json()["official_broccoli_url"] == VISUAL_TEST_BROCCOLI_URL
     assert bootstrap.json()["sessions"] == {"sessions": [], "next_cursor": None}
-    assert bootstrap.json()["capabilities"]["history"] is False
+    assert bootstrap.json()["capabilities"]["history"] is True
     assert VISUAL_TEST_TOKEN not in bootstrap.text

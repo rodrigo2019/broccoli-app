@@ -21,6 +21,8 @@ from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
     DeviceDescriptor,
+    SegmentPage,
+    SessionPage,
     SessionSummary,
     TranscriptDelta,
     TranscriptSegment,
@@ -259,16 +261,44 @@ def create_app(services: Services) -> FastAPI:
         }
 
     @app.get("/api/sessions")
-    async def list_sessions() -> None:
-        raise ApiError(409, "This backend does not provide session history.")
+    async def list_sessions(request: Request) -> dict[str, object]:
+        controller, remote = _require_authenticated(services)
+        del controller
+        cursor = request.query_params.get("cursor") or None
+        query = (request.query_params.get("q") or "").strip()
+        try:
+            page = await remote.list_sessions(cursor, query)
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+        return _session_page_payload(page)
 
     @app.get("/api/sessions/{uuid_code}")
-    async def get_session(uuid_code: str) -> None:
-        raise ApiError(409, "This backend does not provide session history.")
+    async def get_session(uuid_code: str) -> dict[str, object]:
+        _controller, remote = _require_authenticated(services)
+        try:
+            session = await remote.get_session(uuid_code)
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+        return _session_payload(session)
 
     @app.get("/api/sessions/{uuid_code}/segments")
-    async def list_segments(uuid_code: str) -> None:
-        raise ApiError(409, "This backend does not provide session history.")
+    async def list_segments(request: Request, uuid_code: str) -> dict[str, object]:
+        _controller, remote = _require_authenticated(services)
+        cursor = request.query_params.get("cursor") or None
+        try:
+            page = await remote.list_segments(uuid_code, cursor)
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+        return _segment_page_payload(page)
 
     @app.patch("/api/sessions/{uuid_code}")
     async def update_title(uuid_code: str) -> None:
@@ -294,8 +324,22 @@ def create_app(services: Services) -> FastAPI:
         return _session_payload(session)
 
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
-    async def resume_session(uuid_code: str) -> None:
-        raise ApiError(409, "This backend does not provide session history.")
+    async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
+        choices = _validated_choices(services.capture_backend, request)
+        controller, _remote = _require_authenticated(services)
+        try:
+            session = await controller.resume(uuid_code, choices)
+        except RuntimeError:
+            raise ApiError(409, "The current session cannot be changed.") from None
+        except DeviceUnavailableError:
+            raise ApiError(422, "The selected capture device is unavailable.") from None
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+        services.save_selected_devices(choices)
+        return _session_payload(session)
 
     @app.post("/api/sessions/stop", status_code=204)
     async def stop_session() -> Response:
@@ -417,10 +461,10 @@ def _bootstrap_payload(
         else None,
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
-            "history": False,
+            "history": True,
             "remote_title": False,
-            "user_resume": False,
-            "segment_history": False,
+            "user_resume": True,
+            "segment_history": True,
         },
     }
 
@@ -439,6 +483,20 @@ def _session_payload(session: SessionSummary) -> dict[str, object]:
         "device_label": session.device_label,
         "segment_count": session.segment_count,
         "is_live": session.is_live,
+    }
+
+
+def _session_page_payload(page: SessionPage) -> dict[str, object]:
+    return {
+        "sessions": [_session_payload(session) for session in page.sessions],
+        "next_cursor": page.next_cursor,
+    }
+
+
+def _segment_page_payload(page: SegmentPage) -> dict[str, object]:
+    return {
+        "segments": [_segment_payload(segment) for segment in page.segments],
+        "next_cursor": page.next_cursor,
     }
 
 

@@ -167,7 +167,14 @@ class DesktopSessionController:
             ConnectionState.RECONNECTING,
         }:
             raise RuntimeError("A desktop session is already active.")
+        previous_session = (
+            self._session if resume_code and self._session_uuid == resume_code else None
+        )
+        previous_offset_ms = (
+            self._pipeline.next_offset_ms if previous_session and self._pipeline else 0
+        )
         self._clear_buffered_frames()
+        self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
         self._device_label = self._selected_system_label(choices)
@@ -187,15 +194,17 @@ class DesktopSessionController:
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
-            self._set_pipeline(0)
+            self._set_pipeline(previous_offset_ms)
             summary = SessionSummary(
                 uuid_code=started.uuid_code,
-                title=title or "",
+                title=title
+                if title is not None
+                else (previous_session.title if previous_session else ""),
                 status="live",
-                started_at=None,
+                started_at=previous_session.started_at if previous_session else None,
                 ended_at=None,
                 device_label=self._device_label,
-                segment_count=0,
+                segment_count=previous_session.segment_count if previous_session else 0,
                 is_live=True,
             )
             self._session = summary
