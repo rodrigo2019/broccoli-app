@@ -11,3 +11,4 @@ node_modules/
 artifacts/visual/
 artifacts/integration/
 broccoli_desktop/static/output.css
+broccoli_desktop/static/vendor/

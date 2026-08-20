@@ -44,7 +44,7 @@ agent-browser --session broccoli-desktop-live-integration --headed --allowed-dom
    with `Control+V`, and submit. Once the capture UI appears, verify that the input is empty without
    printing its value.
 4. Select the first visible microphone and the first visible system-loopback device by label. Do
-   not record opaque device IDs. Confirm the unavailable-history explanation, then start capture.
+   not record opaque device IDs. Save the settings, return to the capture view, then start capture.
 5. In a third tab, play a public spoken-word video at
    `https://www.youtube.com/watch?v=iCvmsMzlF7o` headed for at least 60 seconds. Return to the
    desktop tab and wait up to 90 seconds for `Transmitindo` plus a non-empty live timeline row.

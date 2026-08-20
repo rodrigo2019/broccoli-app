@@ -17,6 +17,11 @@ from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, Tr
 AUTH_ME_PATH = "/api/auth/me/"
 SESSION_LIST_PATH = "/api/listening/desktop/sessions/"
 
+#: Bounds every request so a stalled backend cannot hang the local UI. Explicit
+#: because httpx's default applies one value to connect, read and write alike,
+#: and reading a hundred-segment page deserves more room than a TCP handshake.
+REQUEST_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+
 
 class RemoteError(Exception):
     """Base error for the external Listening boundary."""
@@ -181,6 +186,13 @@ class HttpListeningRemote:
         self._transport = transport
         self._websocket_path = websocket_path
         self._socket_factory = socket_factory or websockets.connect
+        self._client: httpx.AsyncClient | None = None
+
+    async def aclose(self) -> None:
+        """Release the pooled connections once this credential is done with."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def verify_token(self) -> None:
         await self._request_json("GET", AUTH_ME_PATH)
@@ -245,16 +257,26 @@ class HttpListeningRemote:
             raise RemoteRequestError from None
         return _WebSocketRemoteStream(socket)
 
+    def _http_client(self) -> httpx.AsyncClient:
+        """Return this credential's client, keeping its connection pool alive.
+
+        One client per request meant a fresh TLS handshake for every call --
+        paid once per page while walking a long meeting's segments.
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                headers={"Authorization": _authorization_header(self._token)},
+                transport=self._transport,
+                timeout=REQUEST_TIMEOUT,
+            )
+        return self._client
+
     async def _request(
         self, method: str, path: str, *, json_body: dict[str, Any] | None = None
     ) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(
-                base_url=self._base_url,
-                headers={"Authorization": _authorization_header(self._token)},
-                transport=self._transport,
-            ) as client:
-                response = await client.request(method, path, json=json_body)
+            response = await self._http_client().request(method, path, json=json_body)
         except httpx.HTTPError:
             raise RemoteRequestError from None
         if response.status_code in {401, 403}:

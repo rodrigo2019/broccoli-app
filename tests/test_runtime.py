@@ -805,10 +805,11 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
     client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
 
     login = client.post("/api/login", json={"token": VISUAL_TEST_TOKEN})
-    bootstrap = client.get("/api/bootstrap")
+    with client.websocket_connect("/api/events") as websocket:
+        bootstrap = websocket.receive_json()["bootstrap"]
 
     assert login.status_code == 204
-    assert bootstrap.json()["official_broccoli_url"] == VISUAL_TEST_BROCCOLI_URL
-    assert bootstrap.json()["sessions"] == {"sessions": [], "next_cursor": None}
-    assert bootstrap.json()["capabilities"]["history"] is True
-    assert VISUAL_TEST_TOKEN not in bootstrap.text
+    assert bootstrap["official_broccoli_url"] == VISUAL_TEST_BROCCOLI_URL
+    assert bootstrap["authenticated"] is True
+    assert [device["device_id"] for device in bootstrap["devices"]] == ["mic-1", "system-1"]
+    assert VISUAL_TEST_TOKEN not in str(bootstrap)

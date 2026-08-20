@@ -125,7 +125,24 @@ class FakeSessionRemote:
         configured_page = self.session_pages.get((cursor, query))
         if configured_page is not None:
             return configured_page
-        return SessionPage(tuple(self.sessions.values()), None)
+        return SessionPage(tuple(self._matching_sessions(query)), None)
+
+    def _matching_sessions(self, query: str) -> list[SessionSummary]:
+        """Filter the seeded sessions the way the backend list endpoint does.
+
+        Ignoring ``query`` here would let the sidebar search look like it works
+        against this fake no matter what it sends.
+        """
+        term = query.strip().casefold()
+        if not term:
+            return list(self.sessions.values())
+        return [
+            session
+            for session in self.sessions.values()
+            if term in session.uuid_code.casefold()
+            or term in (session.device_label or "").casefold()
+            or term in (session.title or "").casefold()
+        ]
 
     async def get_session(self, uuid_code: str) -> SessionSummary:
         self._assert_authorized()

@@ -2,10 +2,13 @@
   "name": "broccoli-desktop-ui",
   "private": true,
   "scripts": {
-    "build:css": "npx tailwindcss -i app.css -o ../broccoli_desktop/static/output.css"
+    "build:icons": "node copy-icons.mjs",
+    "build:css": "npx tailwindcss -i app.css -o ../broccoli_desktop/static/output.css",
+    "build": "npm run build:icons && npm run build:css"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.1.17",
+    "bootstrap-icons": "1.13.1",
     "daisyui": "5.5.8",
     "tailwindcss": "4.1.17"
   }

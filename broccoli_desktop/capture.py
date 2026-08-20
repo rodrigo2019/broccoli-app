@@ -343,6 +343,12 @@ class AudioLevelMonitor:
         self._close_handles(handles)
         self._publish(snapshot)
 
+    @property
+    def capture_active(self) -> bool:
+        """Whether the transcription capture, not a device check, owns the levels."""
+        with self._lock:
+            return self._capture_active
+
     def set_capture_active(self, active: bool) -> None:
         """Mark the shared capture session as the source of level events."""
         with self._lock:

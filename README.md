@@ -18,12 +18,13 @@ Sync the Python environment:
 .\scripts\sync.ps1
 ```
 
-Install the UI dependencies and build the Tailwind stylesheet:
+Install the UI dependencies, then build the Tailwind stylesheet and vendor the
+Bootstrap Icons font into the packaged static tree:
 
 ```powershell
 Set-Location ui
 npm ci
-npm run build:css
+npm run build
 Set-Location ..
 ```
 

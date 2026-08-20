@@ -26,7 +26,7 @@ jobs:
         run: npm ci
       - name: Build CSS
         working-directory: ui
-        run: npm run build:css
+        run: npm run build
       - name: Check Python code
         run: .\scripts\check.ps1
       - name: Build onedir package
@@ -56,7 +56,7 @@ jobs:
         run: uv sync --frozen
       - name: Build visual CSS
         working-directory: ui
-        run: npm ci && npm run build:css
+        run: npm ci && npm run build
       - name: Install fixed browser tooling
         run: |
           npm install --global agent-browser@0.34.0

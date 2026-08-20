@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,18 +142,33 @@ def login_with_visual_token(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def test_fake_bootstrap_exposes_the_same_capability_shape() -> None:
-    """The browser visual server must expose the same history contract."""
+def bootstrap_payload(client: TestClient) -> dict:
+    """Read the snapshot the event socket sends on connect.
+
+    The bootstrap has one home now: opening the socket is how the UI learns
+    whether it is authenticated, so the tests ask the same way the UI does.
+
+    Closing straight after the first message is the shape a real client uses to
+    reconnect, and it is what caught the gap between the handler speaking and
+    the handler listening -- see ``_send_events``.
+    """
+    with client.websocket_connect("/api/events") as websocket:
+        message = websocket.receive_json()
+        websocket.close()
+
+    assert message["type"] == "bootstrap"
+    return message["bootstrap"]
+
+
+def test_fake_bootstrap_exposes_the_same_device_contract() -> None:
+    """The browser visual server must answer the same bootstrap the real one does."""
     client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
     login_with_visual_token(client)
 
-    assert client.get("/api/bootstrap").json()["capabilities"] == {
-        "history": True,
-        "remote_title": True,
-        "session_actions": True,
-        "user_resume": True,
-        "segment_history": True,
-    }
+    payload = bootstrap_payload(client)
+
+    assert payload["authenticated"] is True
+    assert [device["kind"] for device in payload["devices"]] == ["mic", "system"]
 
 
 def test_visual_fake_does_not_seed_removed_history_workflow() -> None:
@@ -188,10 +204,18 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="open-broccoli"' in response.text
     assert 'id="renameSessionModal"' in response.text
     assert 'id="deleteSessionModal"' in response.text
-    assert 'data-testid="status-banner"' in response.text
+    assert 'data-testid="notification-stack"' in response.text
+    assert 'data-testid="status-banner"' not in response.text
     assert 'data-testid="transcript-timeline"' in response.text
     assert 'aria-label="Broccoli access token"' in response.text
-    assert 'data-testid="session-search"' not in response.text
+    assert 'data-testid="session-search"' in response.text
+    assert 'id="drawer-toggle"' in response.text
+    assert 'data-testid="capture-indicator"' in response.text
+    assert "vendor/bootstrap-icons/bootstrap-icons.css" in response.text
+    assert 'class="form-control' not in response.text
+    assert "label-text" not in response.text
+    assert "input-bordered" not in response.text
+    assert "select-bordered" not in response.text
     assert 'id="settingsMicrophoneSelect"' in response.text
     assert 'id="settingsSystemDeviceSelect"' in response.text
 
@@ -228,52 +252,43 @@ def test_login_does_not_store_a_rejected_token(
     assert "bad" not in response.text
 
 
-def test_bootstrap_exposes_history_features(
+def test_bootstrap_carries_the_devices_the_first_screen_needs(
     client: TestClient,
     fake_credentials: FakeCredentials,
 ) -> None:
     login(client)
 
-    response = client.get("/api/bootstrap")
+    payload = bootstrap_payload(client)
 
-    assert response.status_code == 200
-    assert response.json() == {
+    assert payload == {
         "authenticated": True,
         "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
+        "devices": [
+            {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
+            {"device_id": "system-1", "label": "Speakers", "kind": "system"},
+        ],
         "selected_devices": None,
         "state": "idle",
         "session": None,
-        "sessions": {"sessions": [], "next_cursor": None},
-        "capabilities": {
-            "history": True,
-            "remote_title": True,
-            "session_actions": True,
-            "user_resume": True,
-            "segment_history": True,
-        },
     }
-    assert "candidate" not in response.text
+    assert "candidate" not in str(payload)
     assert fake_credentials.token == "candidate"
 
 
 def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestClient) -> None:
-    response = client.get("/api/bootstrap")
+    """The socket answers instead of refusing, so the login screen has a payload."""
+    payload = bootstrap_payload(client)
 
-    assert response.status_code == 200
-    assert response.json() == {
+    assert payload == {
         "authenticated": False,
         "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
+        "devices": [
+            {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
+            {"device_id": "system-1", "label": "Speakers", "kind": "system"},
+        ],
         "selected_devices": None,
         "state": "idle",
         "session": None,
-        "sessions": {"sessions": [], "next_cursor": None},
-        "capabilities": {
-            "history": True,
-            "remote_title": True,
-            "session_actions": True,
-            "user_resume": True,
-            "segment_history": True,
-        },
     }
 
 
@@ -301,7 +316,6 @@ def test_history_routes_proxy_session_and_segment_pages(
     )
 
     listed = client.get("/api/sessions?q=meeting")
-    detail = client.get(f"/api/sessions/{session.uuid_code}")
     segments = client.get(f"/api/sessions/{session.uuid_code}/segments")
 
     assert listed.status_code == 200
@@ -322,8 +336,6 @@ def test_history_routes_proxy_session_and_segment_pages(
         ],
         "next_cursor": "20",
     }
-    assert detail.status_code == 200
-    assert detail.json()["uuid_code"] == session.uuid_code
     assert segments.status_code == 200
     assert segments.json() == {
         "segments": [
@@ -439,39 +451,29 @@ def test_devices_and_logout_use_local_dependencies_only(
     assert fake_credentials.token is None
 
 
-def test_audio_level_routes_read_selected_devices_without_returning_pcm(
-    client: TestClient,
-    fake_capture: FakeCaptureBackend,
-) -> None:
-    unauthenticated = client.post(
-        "/api/audio-levels",
-        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+def test_audio_level_stream_requires_a_credential(client: TestClient) -> None:
+    assert client.get("/api/audio-levels/stream").status_code == 401
+    assert (
+        client.get(
+            "/api/audio-levels/stream",
+            params={"microphone_id": "mic-1", "system_device_id": "system-1"},
+        ).status_code
+        == 401
     )
+
+
+def test_audio_level_stream_rejects_a_device_check_that_is_not_available(
+    client: TestClient,
+) -> None:
     login(client)
 
-    started = client.post(
-        "/api/audio-levels",
-        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    response = client.get(
+        "/api/audio-levels/stream",
+        params={"microphone_id": "mic-1", "system_device_id": "mic-1"},
     )
-    fake_capture.handles["mic-1"].emit(b"\xff\x7f")
-    fake_capture.handles["system-1"].emit(b"\x00\x40")
-    levels = client.get("/api/audio-levels")
-    stopped = client.delete("/api/audio-levels")
 
-    assert unauthenticated.status_code == 401
-    assert started.status_code == 200
-    assert started.json() == {
-        "active": True,
-        "microphone": {"level": 0.0, "peak": 0.0},
-        "system": {"level": 0.0, "peak": 0.0},
-    }
-    assert levels.status_code == 200
-    assert levels.json()["active"] is True
-    assert levels.json()["microphone"]["level"] > 0.99
-    assert 0.49 < levels.json()["system"]["peak"] < 0.51
-    assert b"\xff\x7f" not in levels.content
-    assert stopped.status_code == 204
-    assert fake_capture.closed_sources == {"mic-1", "system-1"}
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Select an available microphone and system device."}
 
 
 @pytest.mark.asyncio
@@ -480,11 +482,10 @@ async def test_audio_level_stream_sends_initial_and_live_snapshots(
     services: Services,
     fake_capture: FakeCaptureBackend,
 ) -> None:
-    assert client.get("/api/audio-levels/stream").status_code == 401
     login(client)
     services.start_audio_level_monitor(CaptureChoices("mic-1", "system-1"))
 
-    events = _audio_level_events(services.audio_levels)
+    events = _audio_level_events(services, None)
     initial = await anext(events)
     assert initial.startswith("data: {")
     assert '"active":true' in initial
@@ -493,27 +494,84 @@ async def test_audio_level_stream_sends_initial_and_live_snapshots(
     update = await asyncio.wait_for(anext(events), timeout=1)
     assert update.startswith("data: {")
     assert '"active":true' in update
+    assert b"\xff\x7f" not in update.encode("utf-8")
     await events.aclose()
     services.stop_audio_level_monitor()
 
 
-def test_audio_level_check_stops_before_a_capture_uses_the_devices(
+@pytest.mark.asyncio
+async def test_audio_level_device_check_lives_and_dies_with_its_stream(
     client: TestClient,
+    services: Services,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    """Closing the stream releases the microphone, so a lost window cannot hold it."""
+    login(client)
+
+    events = _audio_level_events(services, CaptureChoices("mic-1", "system-1"))
+    initial = await anext(events)
+
+    assert '"active":true' in initial
+    assert fake_capture.closed_sources == set()
+
+    fake_capture.handles["mic-1"].emit(b"\xff\x7f")
+    update = await asyncio.wait_for(anext(events), timeout=1)
+    assert json.loads(update.removeprefix("data: "))["microphone"]["level"] > 0.99
+
+    await events.aclose()
+
+    assert fake_capture.closed_sources == {"mic-1", "system-1"}
+
+
+@pytest.mark.asyncio
+async def test_audio_level_stream_reports_an_unavailable_device_without_a_snapshot(
+    client: TestClient,
+    services: Services,
     fake_capture: FakeCaptureBackend,
 ) -> None:
     login(client)
-    meter = client.post(
-        "/api/audio-levels",
-        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
-    )
+    fake_capture.fail_opening = "mic-1"
+
+    events = _audio_level_events(services, CaptureChoices("mic-1", "system-1"))
+    first = await anext(events)
+
+    assert first.startswith("event: device_error\n")
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)
+
+
+@pytest.mark.asyncio
+async def test_audio_level_device_check_leaves_a_live_capture_meter_alone(
+    client: TestClient,
+    services: Services,
+) -> None:
+    """A test stream that closes after the capture took over must not blank the footer."""
+    login(client)
+
+    events = _audio_level_events(services, CaptureChoices("mic-1", "system-1"))
+    await anext(events)
+    services.audio_levels.set_capture_active(True)
+    await events.aclose()
+
+    assert services.audio_levels.capture_active is True
+    assert services.audio_levels.snapshot().active is True
+
+
+def test_audio_level_check_is_refused_while_a_capture_owns_the_devices(
+    client: TestClient,
+) -> None:
+    login(client)
     capture = client.post(
         "/api/sessions",
         json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
     )
+    refused = client.get(
+        "/api/audio-levels/stream",
+        params={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
 
-    assert meter.status_code == 200
     assert capture.status_code == 201
-    assert fake_capture.closed_sources == {"mic-1", "system-1"}
+    assert refused.status_code == 409
 
     client.post("/api/sessions/stop")
 
@@ -596,12 +654,12 @@ def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
         device_settings=settings,
     )
     fresh_client = TestClient(create_app(fresh_services), headers={"host": "127.0.0.1"})
-    bootstrap = fresh_client.get("/api/bootstrap")
+    bootstrap = bootstrap_payload(fresh_client)
 
     assert started.status_code == 201
     assert stopped.status_code == 204
     assert settings.saved == [CaptureChoices("mic-1", "system-1")]
-    assert bootstrap.json()["selected_devices"] == {
+    assert bootstrap["selected_devices"] == {
         "microphone_id": "mic-1",
         "system_device_id": "system-1",
     }
@@ -633,12 +691,12 @@ def test_settings_can_save_and_clear_device_choices_before_a_capture_starts(
         device_settings=settings,
     )
     reopened_client = TestClient(create_app(reopened_services), headers={"host": "127.0.0.1"})
-    reopened = reopened_client.get("/api/bootstrap")
+    reopened = bootstrap_payload(reopened_client)
     cleared = client.delete("/api/devices/selection")
 
     assert saved.status_code == 204
     assert settings.saved == [CaptureChoices("mic-1", "system-1")]
-    assert reopened.json()["selected_devices"] == {
+    assert reopened["selected_devices"] == {
         "microphone_id": "mic-1",
         "system_device_id": "system-1",
     }
@@ -667,13 +725,13 @@ def test_missing_persisted_device_selection_is_cleared_and_requires_replacement(
     fake_credentials.save_token("candidate")
     client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
 
-    bootstrap = client.get("/api/bootstrap")
+    bootstrap = bootstrap_payload(client)
     start = client.post(
         "/api/sessions",
         json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
     )
 
-    assert bootstrap.json()["selected_devices"] is None
+    assert bootstrap["selected_devices"] is None
     assert settings.selection is None
     assert settings.clear_count == 1
     assert start.status_code == 422
@@ -696,7 +754,9 @@ def test_notebook_contains_history_loading_and_selection_workflow() -> None:
 
     assert "async function loadSessions" in source
     assert "async function selectSession" in source
-    assert "capabilities.segment_history" in source
+    assert "async function loadSegments" in source
+    assert "function scheduleSessionSearch" in source
+    assert 'params.set("q", state.searchQuery)' in source
 
 
 def test_notebook_contains_session_action_menu_and_safe_live_delete_gate() -> None:
@@ -720,15 +780,15 @@ def test_keyring_outage_is_reported_without_exposing_credential_details(
     )
     client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
 
-    response = client.get("/api/bootstrap")
+    response = client.get("/api/sessions")
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Credential storage is unavailable."}
 
 
 def test_host_header_must_name_the_local_loopback_service(client: TestClient) -> None:
-    allowed = client.get("/api/bootstrap", headers={"host": "LOCALHOST:8765"})
-    response = client.get("/api/bootstrap", headers={"host": "example.invalid"})
+    allowed = client.get("/health", headers={"host": "LOCALHOST:8765"})
+    response = client.get("/health", headers={"host": "example.invalid"})
 
     assert allowed.status_code == 200
     assert response.status_code == 400
@@ -752,14 +812,6 @@ def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
 
     assert bootstrap["type"] == "bootstrap"
     assert bootstrap["bootstrap"]["authenticated"] is True
-    assert bootstrap["bootstrap"]["sessions"] == {"sessions": [], "next_cursor": None}
-    assert bootstrap["bootstrap"]["capabilities"] == {
-        "history": True,
-        "remote_title": True,
-        "session_actions": True,
-        "user_resume": True,
-        "segment_history": True,
-    }
     assert event == {"type": "warning", "message": "Session credits are running low."}
     assert "candidate" not in str([bootstrap, event])
 
@@ -770,3 +822,54 @@ def test_invalid_request_errors_do_not_echo_submitted_tokens(client: TestClient)
     assert response.status_code == 422
     assert response.json() == {"detail": "Invalid request."}
     assert "candidate" not in response.text
+
+
+def test_session_search_reaches_the_remote_with_the_typed_term(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    """The sidebar's search box is the only reader of the `q` parameter."""
+    login(client)
+    fake_remote_factory.remote.sessions = {
+        "session-1": SessionSummary(
+            uuid_code="session-1",
+            title="Weekly sync",
+            status="ended",
+            started_at="2026-08-19T10:00:00Z",
+            ended_at="2026-08-19T11:00:00Z",
+            device_label="Speakers",
+            segment_count=0,
+            is_live=False,
+        ),
+        "session-2": SessionSummary(
+            uuid_code="session-2",
+            title="Design review",
+            status="ended",
+            started_at="2026-08-19T12:00:00Z",
+            ended_at="2026-08-19T13:00:00Z",
+            device_label="Speakers",
+            segment_count=0,
+            is_live=False,
+        ),
+    }
+
+    matched = client.get("/api/sessions", params={"q": "design"})
+    missed = client.get("/api/sessions", params={"q": "zzz-no-match"})
+
+    assert [session["uuid_code"] for session in matched.json()["sessions"]] == ["session-2"]
+    assert missed.json() == {"sessions": [], "next_cursor": None}
+
+
+def test_the_event_socket_listens_before_it_speaks(client: TestClient) -> None:
+    """A client that answers the bootstrap by closing must not race the handler.
+
+    Reconnecting is exactly that shape: read the snapshot, drop the socket. If
+    the bootstrap went out before the receive task existed, the disconnect could
+    land with nobody reading it and the handler would be torn down mid-flight.
+    """
+    login(client)
+
+    for _ in range(20):
+        with client.websocket_connect("/api/events") as websocket:
+            assert websocket.receive_json()["type"] == "bootstrap"
+            websocket.close()

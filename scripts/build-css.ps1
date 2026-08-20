@@ -14,9 +14,9 @@ try {
         throw "npm ci failed with exit code $LASTEXITCODE."
     }
 
-    & npm run build:css
+    & npm run build
     if ($LASTEXITCODE -ne 0) {
-        throw "npm run build:css failed with exit code $LASTEXITCODE."
+        throw "npm run build failed with exit code $LASTEXITCODE."
     }
 } finally {
     Pop-Location

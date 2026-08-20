@@ -11,10 +11,11 @@
     sidebarFooter: document.querySelector("#sidebarFooter"),
     settingsButton: document.querySelector("#settingsButton"),
     logoutButton: document.querySelector("#logoutButton"),
-    statusBanner: document.querySelector("#statusBanner"),
-    statusMessage: document.querySelector("#statusMessage"),
+    notification: document.querySelector("#notification"),
     newSessionButton: document.querySelector("#newSessionButton"),
     loadMoreButton: document.querySelector("#loadMoreButton"),
+    sessionSearchInput: document.querySelector("#sessionSearchInput"),
+    sessionHistorySection: document.querySelector("#sessionHistorySection"),
     sessionLibrary: document.querySelector("#sessionLibrary"),
     renameSessionModal: document.querySelector("#renameSessionModal"),
     renameSessionInput: document.querySelector("#renameSessionInput"),
@@ -26,7 +27,9 @@
     backToTranscriptButton: document.querySelector("#backToTranscriptButton"),
     transcriptHeaderContext: document.querySelector("#transcriptHeaderContext"),
     settingsHeaderTitle: document.querySelector("#settingsHeaderTitle"),
-    transcriptHeaderActions: document.querySelector("#transcriptHeaderActions"),
+    captureIndicator: document.querySelector("#captureIndicator"),
+    captureIndicatorLabel: document.querySelector("#captureIndicatorLabel"),
+    themeToggleButton: document.querySelector("#themeToggleButton"),
     settingsForm: document.querySelector("#settingsForm"),
     settingsRefreshDevicesButton: document.querySelector("#settingsRefreshDevicesButton"),
     settingsMicrophoneSelect: document.querySelector("#settingsMicrophoneSelect"),
@@ -57,14 +60,14 @@
     microphoneHistogram: document.querySelector("#microphoneHistogram"),
     systemHistogram: document.querySelector("#systemHistogram"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
-    emptyTimeline: document.querySelector("#emptyTimeline"),
+    drawerToggle: document.querySelector("#drawer-toggle"),
   };
 
   const SETTINGS_STORAGE_KEY = "broccoli-desktop-settings";
+  // Same key and same values the platform writes, so the two surfaces agree on
+  // what "dark" means and a theme picked in one reads naturally in the other.
+  const THEME_STORAGE_KEY = "theme";
   const defaultSettings = {
-    theme: "dark",
-    microphoneId: "",
-    systemDeviceId: "",
     proxyEnabled: false,
     proxyHost: "",
     proxyPort: "",
@@ -76,12 +79,7 @@
     try {
       const saved = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
       if (!saved || typeof saved !== "object") return { ...defaultSettings };
-      return {
-        ...defaultSettings,
-        ...saved,
-        theme: ["light", "dark"].includes(saved.theme) ? saved.theme : defaultSettings.theme,
-        proxyEnabled: Boolean(saved.proxyEnabled),
-      };
+      return { ...defaultSettings, ...saved, proxyEnabled: Boolean(saved.proxyEnabled) };
     } catch {
       return { ...defaultSettings };
     }
@@ -95,40 +93,144 @@
     }
   }
 
-  function applyTheme(theme) {
-    document.documentElement.dataset.theme = theme === "light" ? "broccoli-light" : "broccoli-dark";
+  function loadTheme() {
+    try {
+      return window.localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
   }
 
-  applyTheme(loadSettings().theme);
+  function applyTheme(theme) {
+    const resolved = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", resolved);
+    const icon = elements.themeToggleButton?.querySelector("i");
+    if (icon) icon.className = resolved === "dark" ? "bi bi-moon" : "bi bi-sun";
+    if (elements.themeLightOption) elements.themeLightOption.checked = resolved === "light";
+    if (elements.themeDarkOption) elements.themeDarkOption.checked = resolved === "dark";
+  }
+
+  function setTheme(theme) {
+    state.theme = theme === "light" ? "light" : "dark";
+    applyTheme(state.theme);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, state.theme);
+    } catch {
+      // Same best-effort contract as the rest of the local preferences.
+    }
+  }
 
   const state = {
     authenticated: false,
-    capabilities: {
-      history: false,
-      remote_title: false,
-      session_actions: false,
-      user_resume: true,
-      segment_history: false,
-    },
     sessions: [],
     nextCursor: null,
+    searchQuery: "",
+    searchTimer: null,
     selectedSession: null,
     selectedDevices: null,
+    // The device pair chosen in the selects but not saved yet. Deliberately not
+    // persisted: the server owns the durable selection, and a second stored copy
+    // is exactly how the two drift apart.
+    pendingDevices: { microphone_id: "", system_device_id: "" },
     connectionState: "idle",
     pendingDeltas: new Map(),
     eventSocket: null,
+    eventRetryDelay: 0,
     sessionsLoading: false,
     sessionsRequestId: 0,
-    segmentsLoading: false,
+    segments: { cursor: null, loading: false, requestId: 0 },
     activeView: "transcript",
-    devices: [],
     settings: loadSettings(),
+    theme: loadTheme(),
     audioTestActive: false,
     audioMeterBars: { microphone: [], system: [] },
     audioLevelSource: null,
+    audioLevelRetry: null,
     renameSession: null,
     deleteSession: null,
   };
+
+  applyTheme(state.theme);
+
+  // ---------------------------------------------------------------- notifications
+
+  // Complete class names, never `alert-${type}`: the stylesheet is tree-shaken
+  // against the markup at build time, so a class assembled at runtime is not in
+  // it. Same map, same durations and same limit as the platform's base.js.
+  const NOTIFICATION_STYLES = {
+    success: { alertClass: "alert-success", icon: "bi bi-check-circle-fill" },
+    error: { alertClass: "alert-error", icon: "bi bi-x-circle-fill" },
+    warning: { alertClass: "alert-warning", icon: "bi bi-exclamation-triangle-fill" },
+    info: { alertClass: "alert-info", icon: "bi bi-info-circle-fill" },
+  };
+  const NOTIFICATION_DURATIONS = { error: 7000, warning: 6000 };
+  const NOTIFICATION_DEFAULT_DURATION = 5000;
+  const NOTIFICATION_LIMIT = 4;
+  const NOTIFICATION_FADE_MS = 400;
+
+  function dismissNotification(alert) {
+    if (!alert || alert.dataset.closing) return;
+    alert.dataset.closing = "true";
+    const timerId = Number(alert.dataset.timerId);
+    if (timerId) window.clearTimeout(timerId);
+    alert.classList.add("opacity-0", "-translate-y-4");
+    window.setTimeout(() => alert.remove(), NOTIFICATION_FADE_MS);
+  }
+
+  function showNotification(message, type = "info", duration) {
+    const container = elements.notification;
+    if (!container) return null;
+
+    const { alertClass, icon } = NOTIFICATION_STYLES[type] || NOTIFICATION_STYLES.info;
+    const hideAfter =
+      duration === undefined
+        ? (NOTIFICATION_DURATIONS[type] ?? NOTIFICATION_DEFAULT_DURATION)
+        : duration;
+
+    const alert = document.createElement("div");
+    alert.className = `alert ${alertClass} pointer-events-auto shadow-lg transition-all duration-300 opacity-0 -translate-y-4`;
+    alert.setAttribute("role", type === "error" ? "alert" : "status");
+
+    const body = document.createElement("div");
+    body.className = "flex items-center gap-2";
+    const iconElement = document.createElement("i");
+    iconElement.className = `${icon} text-xl`;
+    iconElement.setAttribute("aria-hidden", "true");
+    const messageElement = document.createElement("span");
+    // textContent, never innerHTML: these carry server details and device names.
+    messageElement.textContent = message;
+    body.append(iconElement, messageElement);
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "btn btn-ghost btn-sm btn-circle";
+    closeButton.setAttribute("aria-label", "Fechar");
+    closeButton.innerHTML = '<i class="bi bi-x-lg" aria-hidden="true"></i>';
+    closeButton.addEventListener("click", () => dismissNotification(alert));
+
+    alert.append(body, closeButton);
+    container.append(alert);
+
+    // Drop the oldest so a burst of failures cannot fill the viewport. Count
+    // only live nodes -- the ones already fading are on their way out.
+    const live = Array.from(container.children).filter((node) => !node.dataset.closing);
+    live.slice(0, -NOTIFICATION_LIMIT).forEach(dismissNotification);
+
+    window.requestAnimationFrame(() => {
+      alert.classList.remove("opacity-0", "-translate-y-4");
+    });
+
+    if (hideAfter > 0) {
+      alert.dataset.timerId = String(window.setTimeout(() => dismissNotification(alert), hideAfter));
+    }
+    return alert;
+  }
+
+  function closeNotifications() {
+    elements.notification?.querySelectorAll(".alert").forEach(dismissNotification);
+  }
+
+  // ------------------------------------------------------------------- capture motion
 
   class CaptureMotion {
     constructor({ microphoneHistogram, systemHistogram }) {
@@ -209,10 +311,7 @@
           const profile = 0.82 + 0.18 * Math.sin(index * 1.37 + channelOffset);
           const height = active ? 4 + envelope * 88 * profile : 4;
           bar.style.setProperty("--histogram-height", `${height.toFixed(1)}%`);
-          bar.classList.toggle(
-            "is-peak",
-            active && index === peakIndex && sample.peak > 0.04,
-          );
+          bar.classList.toggle("is-peak", active && index === peakIndex && sample.peak > 0.04);
         });
       });
     }
@@ -221,7 +320,10 @@
   const captureMotion = new CaptureMotion(elements);
   captureMotion.mount();
 
+  // ---------------------------------------------------------------- audio levels
+
   const AUDIO_METER_SEGMENTS = 18;
+  const AUDIO_LEVEL_RETRY_MS = 2000;
 
   function mountAudioMeter(container, channel) {
     if (!container) return [];
@@ -305,69 +407,95 @@
   }
 
   function closeAudioLevelStream() {
+    window.clearTimeout(state.audioLevelRetry);
+    state.audioLevelRetry = null;
     const source = state.audioLevelSource;
     state.audioLevelSource = null;
     source?.close();
   }
 
-  function connectAudioLevels() {
+  /**
+   * Open the one audio-level route.
+   *
+   * Without device IDs the stream is a passive observer feeding the capture
+   * footer. With them it *is* the settings device check: the server opens the
+   * meter for this connection and releases it when the connection ends, so
+   * stopping the test is just closing the stream -- no second request that a
+   * closing window might never send.
+   */
+  function connectAudioLevels(deviceTest = null) {
     if (!state.authenticated || !("EventSource" in window)) return;
-    if (state.audioLevelSource && state.audioLevelSource.readyState !== EventSource.CLOSED) return;
     closeAudioLevelStream();
-    const source = new EventSource("/api/audio-levels/stream");
+    const query = deviceTest ? `?${new URLSearchParams(deviceTest)}` : "";
+    const source = new EventSource(`/api/audio-levels/stream${query}`);
     state.audioLevelSource = source;
+
     source.addEventListener("message", (event) => {
+      if (state.audioLevelSource !== source) return;
       try {
         handleAudioLevelSnapshot(JSON.parse(event.data));
       } catch {
-        showStatus("Não foi possível processar o nível de áudio.", "error");
+        showNotification("Não foi possível processar o nível de áudio.", "error");
       }
     });
-    source.addEventListener("error", () => {
-      if (source.readyState === EventSource.CLOSED && state.audioLevelSource === source) {
-        state.audioLevelSource = null;
+
+    source.addEventListener("device_error", (event) => {
+      if (state.audioLevelSource !== source) return;
+      let detail = "Não foi possível iniciar o teste de áudio.";
+      try {
+        detail = JSON.parse(event.data).detail || detail;
+      } catch {
+        // Keep the generic message; the stream is ending either way.
       }
+      finishAudioTest(detail);
+      // The server closes the stream after this, and a completed stream is one
+      // EventSource happily reopens -- which would retry the dead device on a
+      // loop. Reopen the passive observer instead.
+      connectAudioLevels();
+    });
+
+    source.addEventListener("error", () => {
+      if (state.audioLevelSource !== source) return;
+      // readyState CONNECTING means the browser is retrying on its own.
+      if (source.readyState !== EventSource.CLOSED) return;
+      state.audioLevelSource = null;
+      if (deviceTest) {
+        finishAudioTest("Não foi possível iniciar o teste de áudio.");
+        connectAudioLevels();
+        return;
+      }
+      state.audioLevelRetry = window.setTimeout(() => {
+        if (state.authenticated && state.audioLevelSource === null) connectAudioLevels();
+      }, AUDIO_LEVEL_RETRY_MS);
     });
   }
 
-  async function startAudioTest() {
+  function startAudioTest() {
     const microphoneId = elements.settingsMicrophoneSelect.value;
     const systemDeviceId = elements.settingsSystemDeviceSelect.value;
     if (!microphoneId || !systemDeviceId) {
       finishAudioTest("Escolha um microfone e uma saída de áudio antes de testar.");
       return;
     }
-    elements.settingsAudioTestButton.disabled = true;
-    try {
-      const levels = await localFetch("/api/audio-levels", {
-        method: "POST",
-        body: JSON.stringify({ microphone_id: microphoneId, system_device_id: systemDeviceId }),
-      });
-      state.audioTestActive = levels.active;
-      renderAudioMeter("microphone", levels.microphone, levels.active);
-      renderAudioMeter("system", levels.system, levels.active);
-      if (!levels.active) {
-        finishAudioTest("Não foi possível iniciar o teste de áudio.");
-        return;
-      }
-      elements.settingsAudioTestStatus.textContent = "Teste em execução. Fale no microfone e reproduza um som no computador.";
-      renderAudioTestControls();
-    } catch (error) {
-      finishAudioTest(error.message);
-    } finally {
-      elements.settingsAudioTestButton.disabled = false;
+    // The server refuses this with a 409, but a refused EventSource surfaces as
+    // a bare connection error with no body to read -- so the one refusal the
+    // user can act on is caught here, where the reason is still known.
+    if (isCaptureActive()) {
+      finishAudioTest("Pare a captura antes de testar os dispositivos.");
+      return;
     }
+    state.audioTestActive = true;
+    elements.settingsAudioTestStatus.textContent =
+      "Teste em execução. Fale no microfone e reproduza um som no computador.";
+    renderAudioTestControls();
+    connectAudioLevels({ microphone_id: microphoneId, system_device_id: systemDeviceId });
   }
 
-  async function stopAudioTest(message = "Teste de áudio encerrado.") {
+  function stopAudioTest(message = "Teste de áudio encerrado.") {
     const wasActive = state.audioTestActive;
     finishAudioTest(message);
     if (!wasActive) return;
-    try {
-      await localFetch("/api/audio-levels", { method: "DELETE" });
-    } catch (error) {
-      showStatus(error.message, "error");
-    }
+    connectAudioLevels();
   }
 
   mountAudioMeter(elements.settingsMicrophoneMeter, "microphone");
@@ -375,6 +503,8 @@
   renderAudioMeter("microphone");
   renderAudioMeter("system");
   renderAudioTestControls();
+
+  // ------------------------------------------------------------------------ fetch
 
   async function localFetch(path, options = {}) {
     const response = await fetch(path, {
@@ -389,26 +519,16 @@
     throw new Error(payload.detail || "Não foi possível concluir esta ação.");
   }
 
-  function showStatus(message, tone = "info") {
-    const classes = {
-      info: "alert alert-info mb-4 shadow-sm",
-      success: "alert alert-success mb-4 shadow-sm",
-      warning: "alert alert-warning mb-4 shadow-sm",
-      error: "alert alert-error mb-4 shadow-sm",
-    };
-    elements.statusBanner.className = classes[tone];
-    elements.statusMessage.textContent = message;
-    elements.statusBanner.classList.remove("hidden");
-  }
-
-  function hideStatus() {
-    elements.statusBanner.classList.add("hidden");
+  function reportError(error) {
+    showNotification(error.message, "error");
   }
 
   function setLoginError(message = "") {
     elements.loginError.textContent = message;
     elements.loginError.classList.toggle("hidden", !message);
   }
+
+  // ------------------------------------------------------------------------ views
 
   function renderView() {
     const settingsOpen = state.authenticated && state.activeView === "settings";
@@ -417,20 +537,33 @@
     elements.settingsView.classList.toggle("hidden", !settingsOpen);
     elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
     elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
-    elements.transcriptHeaderContext.classList.toggle("hidden", settingsOpen);
+    elements.sessionHistorySection.classList.toggle("hidden", !state.authenticated);
+    elements.transcriptHeaderContext.classList.toggle("hidden", settingsOpen || !state.authenticated);
     elements.settingsHeaderTitle.classList.toggle("hidden", !settingsOpen);
-    elements.transcriptHeaderActions.classList.toggle("hidden", settingsOpen);
-    elements.settingsButton.classList.toggle("btn-primary", settingsOpen);
-    elements.settingsButton.classList.toggle("btn-ghost", !settingsOpen);
+    elements.backToTranscriptButton.classList.toggle("hidden", !settingsOpen);
+    // The capture badge and the code button describe an open session; on the
+    // login screen and in settings the header keeps only the theme toggle and
+    // the link out to the platform.
+    const sessionActionsVisible = state.authenticated && !settingsOpen;
+    elements.captureIndicator.classList.toggle("hidden", !sessionActionsVisible);
+    elements.copyCodeButton.classList.toggle("hidden", !sessionActionsVisible);
+    elements.openBroccoliLink.classList.toggle("hidden", !state.authenticated);
     elements.settingsButton.setAttribute("aria-current", settingsOpen ? "page" : "false");
   }
 
+  function closeDrawer() {
+    if (elements.drawerToggle) elements.drawerToggle.checked = false;
+  }
+
   function renderDevices(devices) {
-    state.devices = devices;
     const selected = state.selectedDevices || {};
-    const microphoneId = selected.microphone_id || state.settings.microphoneId;
-    const systemDeviceId = selected.system_device_id || state.settings.systemDeviceId;
-    renderDeviceSelect(elements.settingsMicrophoneSelect, devices.filter((device) => device.kind === "mic"), microphoneId);
+    const microphoneId = selected.microphone_id || state.pendingDevices.microphone_id;
+    const systemDeviceId = selected.system_device_id || state.pendingDevices.system_device_id;
+    renderDeviceSelect(
+      elements.settingsMicrophoneSelect,
+      devices.filter((device) => device.kind === "mic"),
+      microphoneId,
+    );
     renderDeviceSelect(
       elements.settingsSystemDeviceSelect,
       devices.filter((device) => device.kind === "system"),
@@ -440,7 +573,8 @@
   }
 
   function updateDeviceRequirement() {
-    const required = !state.selectedDevices?.microphone_id || !state.selectedDevices?.system_device_id;
+    const required =
+      !state.selectedDevices?.microphone_id || !state.selectedDevices?.system_device_id;
     elements.deviceRequired.classList.toggle("hidden", !required);
   }
 
@@ -471,8 +605,6 @@
   }
 
   function renderSettings() {
-    elements.themeLightOption.checked = state.settings.theme === "light";
-    elements.themeDarkOption.checked = state.settings.theme === "dark";
     elements.proxyEnabled.checked = state.settings.proxyEnabled;
     elements.proxyHost.value = state.settings.proxyHost;
     elements.proxyPort.value = state.settings.proxyPort;
@@ -485,6 +617,7 @@
   function showSettings() {
     if (!state.authenticated) return;
     state.activeView = "settings";
+    closeDrawer();
     renderView();
     renderSettings();
   }
@@ -492,15 +625,12 @@
   function showTranscript() {
     state.activeView = "transcript";
     renderView();
-    stopAudioTest().catch(() => {});
+    stopAudioTest();
   }
 
   function collectSettings() {
     return {
       ...state.settings,
-      theme: elements.themeLightOption.checked ? "light" : "dark",
-      microphoneId: elements.settingsMicrophoneSelect.value,
-      systemDeviceId: elements.settingsSystemDeviceSelect.value,
       proxyEnabled: elements.proxyEnabled.checked,
       proxyHost: elements.proxyHost.value.trim(),
       proxyPort: elements.proxyPort.value.trim(),
@@ -530,33 +660,36 @@
   async function saveSettings(event) {
     event.preventDefault();
     const nextSettings = collectSettings();
-    applyTheme(nextSettings.theme);
+    setTheme(elements.themeLightOption.checked ? "light" : "dark");
     try {
       await saveDeviceSelection();
     } catch (error) {
-      showStatus(error.message, "error");
+      reportError(error);
       return;
     }
     state.settings = nextSettings;
     persistSettings();
     updateDeviceRequirement();
     renderSettings();
-    showStatus("Configurações salvas nesta máquina.", "success");
+    showNotification("Configurações salvas nesta máquina.", "success");
   }
 
   async function resetSettings() {
     state.settings = { ...defaultSettings };
-    applyTheme(state.settings.theme);
+    setTheme("dark");
     elements.settingsMicrophoneSelect.value = "";
     elements.settingsSystemDeviceSelect.value = "";
+    state.pendingDevices = { microphone_id: "", system_device_id: "" };
     persistSettings();
-    await stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
+    stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
     await localFetch("/api/devices/selection", { method: "DELETE" });
     state.selectedDevices = null;
     renderSettings();
     updateDeviceRequirement();
-    showStatus("Configurações restauradas.", "info");
+    showNotification("Configurações restauradas.", "info");
   }
+
+  // ------------------------------------------------------------------- session list
 
   function sessionLabel(session) {
     return session.title || session.device_label || session.uuid_code;
@@ -577,26 +710,34 @@
     });
   }
 
+  function icon(name, extraClasses = "") {
+    const element = document.createElement("i");
+    element.className = `bi bi-${name}${extraClasses ? ` ${extraClasses}` : ""}`;
+    element.setAttribute("aria-hidden", "true");
+    return element;
+  }
+
   function pinIcon() {
-    const icon = document.createElement("span");
-    icon.className = "session-row-pin shrink-0 text-primary";
-    icon.setAttribute("aria-label", "Sessão fixada");
-    icon.title = "Sessão fixada";
-    icon.innerHTML = '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>';
-    return icon;
+    const element = icon("pin-angle-fill", "session-row-pin shrink-0 text-primary text-xs");
+    element.removeAttribute("aria-hidden");
+    element.setAttribute("aria-label", "Sessão fixada");
+    element.title = "Sessão fixada";
+    return element;
   }
 
   function closeSessionMenu(trigger) {
     trigger?.blur();
   }
 
-  function addSessionMenuAction(menu, { label, icon, className = "", disabled = false, onClick }) {
+  function addSessionMenuAction(menu, { label, iconName, className = "", disabled = false, onClick }) {
     const item = document.createElement("li");
     const action = document.createElement("button");
     action.type = "button";
     action.className = `session-menu-action ${className}`.trim();
     action.disabled = disabled;
-    action.innerHTML = `${icon}<span>${label}</span>`;
+    const text = document.createElement("span");
+    text.textContent = label;
+    action.append(icon(iconName), text);
     action.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!disabled) onClick();
@@ -610,30 +751,25 @@
     dropdown.className = "dropdown dropdown-end session-row-actions";
     const trigger = document.createElement("button");
     trigger.type = "button";
-    trigger.className =
-      "session-menu-trigger btn btn-sm h-[30px] w-[30px] min-h-0 bg-transparent";
+    trigger.className = "session-menu-trigger btn btn-sm h-[30px] w-[30px] min-h-0 bg-transparent";
     trigger.setAttribute("aria-label", `Opções para ${sessionLabel(session)}`);
     trigger.title = "Opções da sessão";
-    trigger.innerHTML = '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>';
+    trigger.append(icon("three-dots"));
     const menu = document.createElement("ul");
     menu.className = "dropdown-content menu z-[1] w-36 rounded-box bg-base-100 p-1 shadow";
     menu.tabIndex = 0;
 
     addSessionMenuAction(menu, {
       label: session.is_pinned ? "Desafixar" : "Fixar",
-      icon: session.is_pinned
-        ? '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>'
-        : '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>',
+      iconName: session.is_pinned ? "pin-angle" : "pin-angle-fill",
       onClick: () => {
         closeSessionMenu(trigger);
-        updateSessionMetadata(session, { is_pinned: !session.is_pinned }).catch((error) =>
-          showStatus(error.message, "error"),
-        );
+        updateSessionMetadata(session, { is_pinned: !session.is_pinned }).catch(reportError);
       },
     });
     addSessionMenuAction(menu, {
       label: "Renomear",
-      icon: '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+      iconName: "pencil",
       onClick: () => {
         closeSessionMenu(trigger);
         openRenameSession(session);
@@ -641,7 +777,7 @@
     });
     addSessionMenuAction(menu, {
       label: session.is_live ? "Excluir sessão ativa" : "Excluir",
-      icon: '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>',
+      iconName: "trash",
       className: "text-error",
       disabled: session.is_live,
       onClick: () => {
@@ -650,10 +786,9 @@
       },
     });
     if (session.is_live) {
-      menu.lastElementChild?.querySelector("button")?.setAttribute(
-        "title",
-        "Pare a captura antes de excluir esta sessão.",
-      );
+      menu.lastElementChild
+        ?.querySelector("button")
+        ?.setAttribute("title", "Pare a captura antes de excluir esta sessão.");
     }
 
     dropdown.append(trigger, menu);
@@ -665,35 +800,58 @@
     return dropdown;
   }
 
+  function sessionListPlaceholder({ iconName, title, description, spinner = false }) {
+    const item = document.createElement("li");
+    const block = document.createElement("div");
+    // `block` is load-bearing: DaisyUI lays out a `.menu li`'s direct child as a
+    // column-flow grid, which would put the icon beside the text instead of
+    // above it. The utility layer wins over the daisyui layer.
+    block.className = "block px-3 py-8 text-center";
+    if (spinner) {
+      const loading = document.createElement("span");
+      loading.className = "loading loading-spinner loading-md text-primary";
+      block.append(loading);
+    } else {
+      const badge = document.createElement("div");
+      badge.className =
+        "mx-auto flex h-14 w-14 items-center justify-center rounded-3xl bg-base-300 text-2xl text-base-content/30";
+      badge.append(icon(iconName));
+      block.append(badge);
+    }
+    const heading = document.createElement("p");
+    heading.className = "mt-3 text-sm font-semibold";
+    heading.textContent = title;
+    block.append(heading);
+    if (description) {
+      const hint = document.createElement("p");
+      hint.className = "mt-1 text-xs text-base-content/70";
+      hint.textContent = description;
+      block.append(hint);
+    }
+    item.append(block);
+    return item;
+  }
+
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
-    elements.loadMoreButton.disabled =
-      !state.capabilities.history || state.sessionsLoading || !state.nextCursor;
-    if (!state.capabilities.history) {
-      const item = document.createElement("li");
-      const unavailable = document.createElement("p");
-      unavailable.className = "py-8 text-center text-sm text-base-content/60";
-      unavailable.textContent = "Histórico não disponível neste backend.";
-      item.append(unavailable);
-      elements.sessionLibrary.append(item);
+    elements.loadMoreButton.disabled = state.sessionsLoading || !state.nextCursor;
+    elements.loadMoreButton.classList.toggle("hidden", !state.nextCursor);
+
+    if (!state.sessions.length) {
+      elements.sessionLibrary.append(
+        state.sessionsLoading
+          ? sessionListPlaceholder({ title: "Carregando sessões…", spinner: true })
+          : sessionListPlaceholder({
+              iconName: "mic",
+              title: state.searchQuery ? "Nenhum resultado" : "Nenhuma sessão ainda",
+              description: state.searchQuery
+                ? "Tente outro termo de busca."
+                : "Inicie uma captura para criar a primeira.",
+            }),
+      );
       return;
     }
-    if (!state.sessions.length) {
-      const item = document.createElement("li");
-      if (state.sessionsLoading) {
-        const loading = document.createElement("p");
-        loading.className = "py-8 text-center text-sm text-base-content/60";
-        loading.textContent = "Carregando sessões...";
-        item.append(loading);
-        elements.sessionLibrary.append(item);
-        return;
-      }
-      const empty = document.createElement("p");
-      empty.className = "py-8 text-center text-sm text-base-content/60";
-      empty.textContent = "Nenhuma sessão encontrada.";
-      item.append(empty);
-      elements.sessionLibrary.append(item);
-    }
+
     sortSessions();
     for (const session of state.sessions) {
       const item = document.createElement("li");
@@ -715,19 +873,19 @@
       title.className = "block min-w-0 whitespace-nowrap overflow-hidden text-ellipsis";
       title.title = label;
       title.textContent = label;
-      titleLine.append(title);
       if (session.is_pinned) titleLine.append(pinIcon());
+      titleLine.append(title);
       rowContent.append(titleLine);
       content.append(rowContent);
       content.addEventListener("click", () => {
-        selectSession(session).catch((error) => showStatus(error.message, "error"));
+        selectSession(session).catch(reportError);
       });
       content.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        selectSession(session).catch((error) => showStatus(error.message, "error"));
+        selectSession(session).catch(reportError);
       });
-      if (state.capabilities.session_actions) content.append(sessionActionMenu(session));
+      content.append(sessionActionMenu(session));
       item.append(content);
       elements.sessionLibrary.append(item);
     }
@@ -744,12 +902,14 @@
   }
 
   async function loadSessions({ reset = false } = {}) {
-    if (!state.capabilities.history || (!reset && !state.nextCursor)) return;
+    if (!reset && !state.nextCursor) return;
     const requestId = ++state.sessionsRequestId;
     const cursor = reset ? null : state.nextCursor;
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
+    if (state.searchQuery) params.set("q", state.searchQuery);
     state.sessionsLoading = true;
+    if (reset) state.sessions = [];
     renderSessions();
     try {
       const suffix = params.toString() ? `?${params.toString()}` : "";
@@ -787,6 +947,40 @@
     }
   }
 
+  function scheduleSessionSearch() {
+    window.clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(() => {
+      const query = elements.sessionSearchInput.value.trim();
+      if (query === state.searchQuery) return;
+      state.searchQuery = query;
+      state.nextCursor = null;
+      loadSessions({ reset: true }).catch(reportError);
+    }, 250);
+  }
+
+  // ---------------------------------------------------------------------- capture
+
+  const CONNECTION_LABELS = {
+    idle: "Pronto",
+    starting: "Iniciando",
+    streaming: "Transmitindo",
+    reconnecting: "Reconectando",
+    stopped: "Parado",
+    failed: "Falha",
+    device_selection_required: "Dispositivo necessário",
+  };
+  // Only the tone varies, so only the tone is swapped -- assigning a whole
+  // className here would silently drop whatever `hidden` renderView had put on
+  // the badge, and leave the two functions depending on their call order.
+  const CONNECTION_BADGE_TONES = {
+    streaming: "badge-success",
+    starting: "badge-success",
+    reconnecting: "badge-warning",
+    failed: "badge-error",
+    device_selection_required: "badge-error",
+  };
+  const BADGE_TONES = ["badge-success", "badge-warning", "badge-error"];
+
   function isCaptureActive() {
     return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
   }
@@ -796,47 +990,215 @@
     elements.captureDock.dataset.captureState = state.connectionState;
     elements.captureToggleButton.classList.toggle("btn-error", active);
     elements.captureToggleButton.classList.toggle("btn-primary", !active);
-    elements.captureToggleButton.setAttribute("aria-label", active ? "Parar captura" : "Iniciar captura");
+    elements.captureToggleButton.setAttribute(
+      "aria-label",
+      active ? "Parar captura" : "Iniciar captura",
+    );
     elements.captureToggleButton.title = active ? "Parar captura" : "Iniciar captura";
-    elements.captureToggleButton.innerHTML = active
-      ? '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>'
-      : '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6c0 .8.9 1.3 1.6.8l8.1-6.8a1 1 0 0 0 0-1.6L9.6 4.4A1 1 0 0 0 8 5.2Z"></path></svg>';
+    elements.captureToggleButton.replaceChildren(
+      icon(active ? "stop-fill" : "play-fill", "text-2xl"),
+    );
     captureMotion.setState(state.connectionState);
+  }
+
+  function renderConnectionState() {
+    elements.captureIndicatorLabel.textContent =
+      CONNECTION_LABELS[state.connectionState] || CONNECTION_LABELS.idle;
+    const tone = CONNECTION_BADGE_TONES[state.connectionState];
+    elements.captureIndicator.classList.remove(...BADGE_TONES);
+    if (tone) elements.captureIndicator.classList.add(tone);
+    if (state.connectionState === "reconnecting") {
+      showNotification("Reconectando à transcrição…", "warning");
+    }
+    if (state.connectionState === "device_selection_required") {
+      elements.deviceRequired.classList.remove("hidden");
+      showNotification("Selecione os dispositivos antes de continuar.", "error");
+    }
+    renderCaptureDock();
+    renderView();
+  }
+
+  // ------------------------------------------------------------------- transcript
+
+  function isNearTimelineBottom() {
+    const timeline = elements.transcriptTimeline;
+    return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 48;
+  }
+
+  function appendTimelineRow(row) {
+    const shouldFollow = isNearTimelineBottom();
+    elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
+    elements.transcriptTimeline.append(row);
+    if (shouldFollow) {
+      elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
+    }
+  }
+
+  function formatTranscriptTimestamp(offsetMs) {
+    const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const clock = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    return hours ? `${String(hours).padStart(2, "0")}:${clock}` : clock;
+  }
+
+  function transcriptRow(entry, isDelta) {
+    const row = document.createElement("article");
+    row.className = isDelta
+      ? "transcript-preview__entry transcript-preview__entry--provisional"
+      : "transcript-preview__entry";
+    row.dataset.utteranceId = entry.utterance_id;
+    const avatar = document.createElement("div");
+    avatar.className = "avatar avatar-placeholder shrink-0";
+    const avatarFace = document.createElement("div");
+    avatarFace.className =
+      entry.channel === "mic"
+        ? "w-9 rounded-full bg-primary/20 text-sm font-semibold text-primary"
+        : "w-9 rounded-full bg-secondary/20 text-sm font-semibold text-secondary";
+    avatarFace.textContent = entry.channel === "mic" ? "V" : "P";
+    avatar.append(avatarFace);
+    const content = document.createElement("div");
+    content.className = "min-w-0 flex-1";
+    const heading = document.createElement("div");
+    heading.className = "mb-1 flex items-center gap-2";
+    const speaker = document.createElement("strong");
+    speaker.className = "transcript-preview__speaker";
+    speaker.textContent = entry.channel === "mic" ? "Você" : "Participantes";
+    const timestamp = document.createElement("time");
+    timestamp.className = "text-xs text-base-content/50";
+    timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
+    const text = document.createElement("p");
+    text.className = "transcript-preview__text";
+    text.textContent = entry.text;
+    heading.append(speaker, timestamp);
+    content.append(heading, text);
+    row.append(avatar, content);
+    return row;
+  }
+
+  function renderDelta(delta) {
+    state.pendingDeltas.get(delta.utterance_id)?.remove();
+    const row = transcriptRow(delta, true);
+    state.pendingDeltas.set(delta.utterance_id, row);
+    appendTimelineRow(row);
+  }
+
+  function renderSegment(segment) {
+    const pending = state.pendingDeltas.get(segment.utterance_id);
+    const row = transcriptRow(segment, false);
+    if (pending) {
+      const shouldFollow = isNearTimelineBottom();
+      pending.replaceWith(row);
+      state.pendingDeltas.delete(segment.utterance_id);
+      if (shouldFollow) {
+        elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
+      }
+      return;
+    }
+    appendTimelineRow(row);
+  }
+
+  function clearTimeline() {
+    state.pendingDeltas.clear();
+    state.segments = { cursor: null, loading: false, requestId: 0 };
+    elements.transcriptTimeline.replaceChildren();
+    const empty = document.createElement("p");
+    empty.id = "emptyTimeline";
+    empty.className = "transcript-preview__empty";
+    empty.textContent = "A transcrição aparecerá aqui.";
+    elements.transcriptTimeline.append(empty);
+  }
+
+  function setTimelineLoading(message) {
+    elements.transcriptTimeline.replaceChildren();
+    const block = document.createElement("div");
+    block.className = "flex flex-col items-center justify-center gap-3 py-16";
+    const spinner = document.createElement("span");
+    spinner.className = "loading loading-spinner loading-lg text-primary";
+    const label = document.createElement("p");
+    label.className = "text-sm text-base-content/60";
+    label.textContent = message;
+    block.append(spinner, label);
+    elements.transcriptTimeline.append(block);
+  }
+
+  function renderSegmentLoadMore(session) {
+    document.querySelector("#loadMoreSegments")?.remove();
+    if (!state.segments.cursor) return;
+    const button = document.createElement("button");
+    button.id = "loadMoreSegments";
+    button.type = "button";
+    button.className = "btn btn-ghost btn-sm mx-auto my-2";
+    button.dataset.testid = "load-more-segments";
+    button.textContent = "Carregar mais da transcrição";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      loadSegments(session).catch((error) => {
+        button.disabled = false;
+        reportError(error);
+      });
+    });
+    elements.transcriptTimeline.append(button);
+  }
+
+  /**
+   * Fetch one page of a retained session's transcript.
+   *
+   * One page, not all of them: walking every page up front meant a long meeting
+   * fired dozens of sequential requests before the screen answered at all.
+   */
+  async function loadSegments(session, { first = false } = {}) {
+    if (state.segments.loading) return;
+    const requestId = ++state.segments.requestId;
+    state.segments.loading = true;
+    try {
+      const cursor = state.segments.cursor;
+      const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const page = await localFetch(
+        `/api/sessions/${encodeURIComponent(session.uuid_code)}/segments${suffix}`,
+      );
+      if (requestId !== state.segments.requestId) return;
+      if (state.selectedSession?.uuid_code !== session.uuid_code) return;
+      // The first page replaces the spinner; later pages append below the rows
+      // already on screen.
+      if (first) elements.transcriptTimeline.replaceChildren();
+      document.querySelector("#loadMoreSegments")?.remove();
+      elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
+      for (const segment of page.segments) {
+        elements.transcriptTimeline.append(transcriptRow(segment, false));
+      }
+      state.segments.cursor = page.next_cursor;
+      renderSegmentLoadMore(session);
+      if (!elements.transcriptTimeline.querySelector("article")) {
+        const empty = document.createElement("p");
+        empty.id = "emptyTimeline";
+        empty.className = "transcript-preview__empty";
+        empty.textContent = "Esta sessão não tem transcrição registrada.";
+        elements.transcriptTimeline.append(empty);
+      }
+    } finally {
+      if (requestId === state.segments.requestId) state.segments.loading = false;
+    }
   }
 
   async function selectSession(session) {
     if (isCaptureActive() && state.selectedSession?.uuid_code !== session.uuid_code) {
-      showStatus("Pare a captura antes de abrir outra sessao.", "warning");
+      showNotification("Pare a captura antes de abrir outra sessão.", "warning");
       return;
     }
     state.selectedSession = session;
     clearTimeline();
+    closeDrawer();
     renderSessions();
     renderSessionDetails();
-    if (!state.capabilities.segment_history) return;
-
-    state.segmentsLoading = true;
-    const empty = document.getElementById("emptyTimeline");
-    if (empty) empty.textContent = "Carregando transcricao...";
+    state.segments = { cursor: null, loading: false, requestId: 0 };
+    setTimelineLoading("Carregando transcrição…");
     try {
-      let cursor = null;
-      do {
-        const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-        const page = await localFetch(
-          `/api/sessions/${encodeURIComponent(session.uuid_code)}/segments${params}`,
-        );
-        if (state.selectedSession?.uuid_code !== session.uuid_code) return;
-        for (const segment of page.segments) renderSegment(segment);
-        cursor = page.next_cursor;
-      } while (cursor);
-    } finally {
-      if (state.selectedSession?.uuid_code === session.uuid_code) {
-        const empty = document.getElementById("emptyTimeline");
-        if (empty && !elements.transcriptTimeline.querySelector("article")) {
-          empty.textContent = "A transcrição aparecerá aqui.";
-        }
-      }
-      state.segmentsLoading = false;
+      await loadSegments(session, { first: true });
+    } catch (error) {
+      if (state.selectedSession?.uuid_code === session.uuid_code) clearTimeline();
+      throw error;
     }
   }
 
@@ -856,7 +1218,7 @@
         ? "Sessão fixada."
         : "Sessão desafixada."
       : "Sessão renomeada.";
-    showStatus(message, "success");
+    showNotification(message, "success");
     return updated;
   }
 
@@ -915,7 +1277,7 @@
     closeDeleteSession();
     renderSessions();
     renderSessionDetails();
-    showStatus("Sessão removida do histórico.", "success");
+    showNotification("Sessão removida do histórico.", "success");
   }
 
   function renderSessionDetails() {
@@ -924,127 +1286,18 @@
     elements.sessionMeta.textContent = session
       ? `Código ${session.uuid_code} · ${session.segment_count} segmentos`
       : "Inicie uma captura para gerar um código local.";
+    elements.sessionMeta.classList.toggle("hidden", !session);
     elements.sessionTitle.title = "";
     elements.copyCodeButton.disabled = !session;
   }
 
-  function renderConnectionState() {
-    const label = {
-      idle: "Pronto",
-      starting: "Iniciando",
-      streaming: "Transmitindo",
-      reconnecting: "Reconectando",
-      stopped: "Parado",
-      failed: "Falha",
-      device_selection_required: "Dispositivo necessário",
-    }[state.connectionState] || "Pronto";
-    if (state.connectionState === "reconnecting") {
-      showStatus("Reconectando à transcrição…", "warning");
-    }
-    if (state.connectionState === "device_selection_required") {
-      elements.deviceRequired.classList.remove("hidden");
-      showStatus("Selecione os dispositivos antes de continuar.", "error");
-    }
-    renderCaptureDock();
-  }
-
-  function isNearTimelineBottom() {
-    const timeline = elements.transcriptTimeline;
-    return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 48;
-  }
-
-  function appendTimelineRow(row) {
-    const shouldFollow = isNearTimelineBottom();
-    elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
-    elements.transcriptTimeline.append(row);
-    if (shouldFollow) {
-      elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
-    }
-  }
-
-  function formatTranscriptTimestamp(offsetMs) {
-    const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    const clock = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-    return hours ? `${String(hours).padStart(2, "0")}:${clock}` : clock;
-  }
-
-  function transcriptRow(entry, isDelta) {
-    const row = document.createElement("article");
-    row.className = isDelta
-      ? "mb-8 flex max-w-2xl items-start gap-3 rounded-box border border-dashed border-base-300 bg-base-100/30 p-3"
-      : "mb-8 flex max-w-2xl items-start gap-3";
-    row.dataset.utteranceId = entry.utterance_id;
-    const avatar = document.createElement("div");
-    avatar.className = "avatar placeholder shrink-0";
-    const avatarFace = document.createElement("div");
-    avatarFace.className = entry.channel === "mic"
-      ? "w-9 rounded-full bg-primary/20 text-sm font-semibold text-primary"
-      : "w-9 rounded-full bg-secondary/20 text-sm font-semibold text-secondary";
-    avatarFace.textContent = entry.channel === "mic" ? "V" : "P";
-    avatar.append(avatarFace);
-    const content = document.createElement("div");
-    content.className = "min-w-0 flex-1";
-    const heading = document.createElement("div");
-    heading.className = "mb-1 flex items-center gap-2";
-    const speaker = document.createElement("strong");
-    speaker.className = "text-sm font-semibold";
-    speaker.textContent = entry.channel === "mic" ? "Você" : "Participante";
-    const timestamp = document.createElement("time");
-    timestamp.className = "text-xs text-base-content/45";
-    timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
-    const text = document.createElement("p");
-    text.className = isDelta ? "text-sm italic leading-relaxed text-base-content/70" : "text-sm leading-relaxed";
-    text.textContent = entry.text;
-    heading.append(speaker, timestamp);
-    content.append(heading, text);
-    row.append(avatar, content);
-    return row;
-  }
-
-  function renderDelta(delta) {
-    state.pendingDeltas.get(delta.utterance_id)?.remove();
-    const row = transcriptRow(delta, true);
-    state.pendingDeltas.set(delta.utterance_id, row);
-    appendTimelineRow(row);
-  }
-
-  function renderSegment(segment) {
-    const pending = state.pendingDeltas.get(segment.utterance_id);
-    const row = transcriptRow(segment, false);
-    if (pending) {
-      const shouldFollow = isNearTimelineBottom();
-      pending.replaceWith(row);
-      state.pendingDeltas.delete(segment.utterance_id);
-      if (shouldFollow) {
-        elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
-      }
-      return;
-    }
-    appendTimelineRow(row);
-  }
-
-  function clearTimeline() {
-    state.pendingDeltas.clear();
-    elements.transcriptTimeline.replaceChildren();
-    const empty = document.createElement("p");
-    empty.id = "emptyTimeline";
-    empty.className = "flex min-h-48 items-center justify-center py-8 text-center text-sm text-base-content/60";
-    empty.textContent = state.capabilities.segment_history
-      ? "A transcrição aparecerá aqui."
-      : "A transcrição aparecerá aqui durante esta captura.";
-    elements.transcriptTimeline.append(empty);
-  }
-
   async function refreshDevices() {
-    await stopAudioTest("Dispositivos atualizados. Inicie um novo teste para verificar o sinal.");
+    stopAudioTest("Dispositivos atualizados. Inicie um novo teste para verificar o sinal.");
     try {
       const response = await localFetch("/api/devices");
       renderDevices(response.devices);
     } catch (error) {
-      showStatus(error.message, "error");
+      reportError(error);
     }
   }
 
@@ -1067,18 +1320,13 @@
     const path = currentSession
       ? `/api/sessions/${encodeURIComponent(currentSession.uuid_code)}/resume`
       : "/api/sessions";
-    const body = currentSession
-      ? devices
-      : { ...devices, title: elements.sessionTitle.value };
+    const body = currentSession ? devices : { ...devices, title: elements.sessionTitle.value };
     try {
-      await stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
+      stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
       state.connectionState = "starting";
       clearTimeline();
       renderConnectionState();
-      const session = await localFetch(path, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+      const session = await localFetch(path, { method: "POST", body: JSON.stringify(body) });
       state.selectedSession = session;
       mergeSession(session);
       renderSessions();
@@ -1086,7 +1334,7 @@
     } catch (error) {
       state.connectionState = previousConnectionState;
       renderConnectionState();
-      showStatus(error.message, "error");
+      reportError(error);
     }
   }
 
@@ -1095,9 +1343,9 @@
       await localFetch("/api/sessions/stop", { method: "POST" });
       state.connectionState = "stopped";
       renderConnectionState();
-      showStatus("Captura encerrada.", "success");
+      showNotification("Captura encerrada.", "success");
     } catch (error) {
-      showStatus(error.message, "error");
+      reportError(error);
     }
   }
 
@@ -1120,18 +1368,19 @@
     if (!state.selectedSession) return;
     try {
       await navigator.clipboard.writeText(state.selectedSession.uuid_code);
-      showStatus("Código copiado.", "success");
+      showNotification("Código copiado.", "success");
     } catch {
-      showStatus("Não foi possível copiar o código.", "error");
+      showNotification("Não foi possível copiar o código.", "error");
     }
   }
 
   function prepareNewSession() {
     if (isCaptureActive()) {
-      showStatus("Pare a captura antes de iniciar uma nova sessão.", "warning");
+      showNotification("Pare a captura antes de iniciar uma nova sessão.", "warning");
       return;
     }
     showTranscript();
+    closeDrawer();
     state.selectedSession = null;
     state.connectionState = "idle";
     clearTimeline();
@@ -1141,37 +1390,38 @@
     elements.sessionTitle.focus();
   }
 
-  function applyBootstrap(bootstrap, connectToEvents = true) {
+  // ---------------------------------------------------------------------- events
+
+  function applyBootstrap(bootstrap) {
+    const wasAuthenticated = state.authenticated;
     state.authenticated = bootstrap.authenticated;
     if (!state.authenticated) closeAudioLevelStream();
-    state.capabilities = bootstrap.capabilities;
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
-    if (connectToEvents || !state.authenticated) {
-      state.sessions = bootstrap.sessions.sessions;
-      state.nextCursor = bootstrap.sessions.next_cursor;
-    }
     if (state.selectedSession) mergeSession(state.selectedSession);
     elements.openBroccoliLink.href = bootstrap.official_broccoli_url;
+    renderDevices(bootstrap.devices || []);
     renderView();
     renderSessions();
     renderSessionDetails();
     renderConnectionState();
-    clearTimeline();
-    if (state.authenticated) {
-      refreshDevices();
-      connectAudioLevels();
-      if (connectToEvents) connectEvents();
-      if (connectToEvents) {
-        loadSessions({ reset: true }).catch((error) => showStatus(error.message, "error"));
-      }
+    if (!state.authenticated) {
+      clearTimeline();
+      return;
+    }
+    connectAudioLevels();
+    // A reconnect re-sends the bootstrap; reloading the list every time would
+    // throw away the user's place in it for nothing.
+    if (!wasAuthenticated || !state.sessions.length) {
+      if (!state.selectedSession) clearTimeline();
+      loadSessions({ reset: true }).catch(reportError);
     }
   }
 
   function handleEvent(event) {
     if (event.type === "bootstrap") {
-      applyBootstrap(event.bootstrap, false);
+      applyBootstrap(event.bootstrap);
     } else if (event.type === "delta" && event.delta) {
       renderDelta(event.delta);
     } else if (event.type === "segment" && event.segment) {
@@ -1191,56 +1441,81 @@
       renderSessions();
       renderSessionDetails();
     } else if ((event.type === "warning" || event.type === "error") && event.message) {
-      showStatus(event.message, event.type === "error" ? "error" : "warning");
+      showNotification(event.message, event.type === "error" ? "error" : "warning");
     }
   }
+
+  const EVENT_RETRY_BASE_MS = 500;
+  const EVENT_RETRY_MAX_MS = 15000;
 
   function connectEvents() {
     state.eventSocket?.close();
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${scheme}//${window.location.host}/api/events`);
     state.eventSocket = socket;
+    socket.addEventListener("open", () => {
+      state.eventRetryDelay = 0;
+    });
     socket.addEventListener("message", (message) => {
       try {
         handleEvent(JSON.parse(message.data));
       } catch {
-        showStatus("Não foi possível processar uma atualização local.", "error");
+        showNotification("Não foi possível processar uma atualização local.", "error");
       }
     });
     socket.addEventListener("close", () => {
-      if (state.authenticated && state.eventSocket === socket) {
-        state.connectionState = "reconnecting";
-        renderConnectionState();
-        window.setTimeout(() => {
-          if (state.authenticated && state.eventSocket === socket) connectEvents();
-        }, 1000);
-      }
+      if (state.eventSocket !== socket) return;
+      state.eventSocket = null;
+      // The server closes the socket right after an unauthenticated bootstrap;
+      // there is nothing to come back for until a login succeeds.
+      if (!state.authenticated) return;
+      state.connectionState = "reconnecting";
+      renderConnectionState();
+      // Backoff, not a fixed second: a server that is down should not be asked
+      // once a second for as long as the window stays open.
+      state.eventRetryDelay = Math.min(
+        state.eventRetryDelay ? state.eventRetryDelay * 2 : EVENT_RETRY_BASE_MS,
+        EVENT_RETRY_MAX_MS,
+      );
+      window.setTimeout(() => {
+        if (state.eventSocket === null) connectEvents();
+      }, state.eventRetryDelay);
     });
   }
 
   async function signOut() {
-    await stopAudioTest("Teste de áudio encerrado.");
+    stopAudioTest("Teste de áudio encerrado.");
     closeAudioLevelStream();
+    state.authenticated = false;
     state.eventSocket?.close();
     state.eventSocket = null;
-    await localFetch("/api/login", { method: "DELETE" });
-    state.sessionsRequestId += 1;
-    state.authenticated = false;
-    state.sessions = [];
-    state.nextCursor = null;
-    state.sessionsLoading = false;
-    state.segmentsLoading = false;
-    state.selectedSession = null;
-    state.selectedDevices = null;
-    state.connectionState = "idle";
-    state.activeView = "transcript";
-    clearTimeline();
-    renderView();
-    renderSessions();
-    renderSessionDetails();
-    renderConnectionState();
-    hideStatus();
+    try {
+      await localFetch("/api/login", { method: "DELETE" });
+    } finally {
+      state.sessionsRequestId += 1;
+      state.sessions = [];
+      state.nextCursor = null;
+      state.searchQuery = "";
+      elements.sessionSearchInput.value = "";
+      state.sessionsLoading = false;
+      state.selectedSession = null;
+      state.selectedDevices = null;
+      state.connectionState = "idle";
+      state.activeView = "transcript";
+      clearTimeline();
+      renderView();
+      renderSessions();
+      renderSessionDetails();
+      renderConnectionState();
+      closeNotifications();
+      // The socket is already gone; reopen it whatever happened. If the request
+      // failed and the credential survived, the fresh bootstrap says so instead
+      // of leaving the window with no feed at all.
+      connectEvents();
+    }
   }
+
+  // -------------------------------------------------------------------- listeners
 
   elements.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1249,31 +1524,36 @@
     setLoginError();
     try {
       await localFetch("/api/login", { method: "POST", body: JSON.stringify({ token }) });
-      const bootstrap = await localFetch("/api/bootstrap");
-      applyBootstrap(bootstrap);
-      hideStatus();
+      closeNotifications();
+      // The socket answers with the authenticated bootstrap; there is no second
+      // route to ask.
+      connectEvents();
     } catch (error) {
-      setLoginError(error.message === "Authentication is required." ? "Token inválido." : error.message);
+      setLoginError(
+        error.message === "Authentication is required." ? "Token inválido." : error.message,
+      );
     }
+  });
+  elements.themeToggleButton.addEventListener("click", () => {
+    setTheme(state.theme === "dark" ? "light" : "dark");
   });
   elements.settingsButton.addEventListener("click", showSettings);
   elements.backToTranscriptButton.addEventListener("click", showTranscript);
-  elements.logoutButton.addEventListener("click", () => signOut().catch((error) => showStatus(error.message, "error")));
+  elements.logoutButton.addEventListener("click", () => signOut().catch(reportError));
   elements.newSessionButton.addEventListener("click", prepareNewSession);
-  elements.loadMoreButton.addEventListener("click", () =>
-    loadSessions().catch((error) => showStatus(error.message, "error")),
-  );
+  elements.loadMoreButton.addEventListener("click", () => loadSessions().catch(reportError));
+  elements.sessionSearchInput.addEventListener("input", scheduleSessionSearch);
   elements.refreshDevicesButton.addEventListener("click", showSettings);
   elements.settingsRefreshDevicesButton.addEventListener("click", refreshDevices);
   elements.settingsForm.addEventListener("submit", (event) => {
-    saveSettings(event).catch((error) => showStatus(error.message, "error"));
+    saveSettings(event).catch(reportError);
   });
   elements.resetSettingsButton.addEventListener("click", () => {
-    resetSettings().catch((error) => showStatus(error.message, "error"));
+    resetSettings().catch(reportError);
   });
   elements.settingsAudioTestButton.addEventListener("click", () => {
     if (state.audioTestActive) {
-      stopAudioTest().catch(() => {});
+      stopAudioTest();
     } else {
       startAudioTest();
     }
@@ -1283,52 +1563,42 @@
     updateProxyFieldsVisibility();
   });
   elements.themeLightOption.addEventListener("change", () => {
-    if (elements.themeLightOption.checked) {
-      state.settings.theme = "light";
-      applyTheme("light");
-    }
+    if (elements.themeLightOption.checked) setTheme("light");
   });
   elements.themeDarkOption.addEventListener("change", () => {
-    if (elements.themeDarkOption.checked) {
-      state.settings.theme = "dark";
-      applyTheme("dark");
-    }
+    if (elements.themeDarkOption.checked) setTheme("dark");
   });
   elements.settingsMicrophoneSelect.addEventListener("change", () => {
-    state.settings.microphoneId = elements.settingsMicrophoneSelect.value;
+    state.pendingDevices.microphone_id = elements.settingsMicrophoneSelect.value;
     syncDeviceSelectTitle(elements.settingsMicrophoneSelect);
     if (state.audioTestActive) {
-      stopAudioTest("Microfone alterado. Inicie o teste novamente para verificar o novo sinal.").catch(
-        () => {},
-      );
+      stopAudioTest("Microfone alterado. Inicie o teste novamente para verificar o novo sinal.");
     }
   });
   elements.settingsSystemDeviceSelect.addEventListener("change", () => {
-    state.settings.systemDeviceId = elements.settingsSystemDeviceSelect.value;
+    state.pendingDevices.system_device_id = elements.settingsSystemDeviceSelect.value;
     syncDeviceSelectTitle(elements.settingsSystemDeviceSelect);
     if (state.audioTestActive) {
-      stopAudioTest("Saída alterada. Inicie o teste novamente para verificar o novo sinal.").catch(
-        () => {},
-      );
+      stopAudioTest("Saída alterada. Inicie o teste novamente para verificar o novo sinal.");
     }
   });
   elements.captureToggleButton.addEventListener("click", () => {
-    toggleCapture().catch((error) => showStatus(error.message, "error"));
+    toggleCapture().catch(reportError);
   });
   elements.sessionTitle.addEventListener("change", () => {
     saveSessionTitle().catch((error) => {
       renderSessionDetails();
-      showStatus(error.message, "error");
+      reportError(error);
     });
   });
   elements.renameSessionCancel.addEventListener("click", closeRenameSession);
   elements.renameSessionConfirm.addEventListener("click", () => {
-    confirmRenameSession().catch((error) => showStatus(error.message, "error"));
+    confirmRenameSession().catch(reportError);
   });
   elements.renameSessionInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      confirmRenameSession().catch((error) => showStatus(error.message, "error"));
+      confirmRenameSession().catch(reportError);
     }
   });
   elements.renameSessionModal.addEventListener("close", () => {
@@ -1336,21 +1606,19 @@
   });
   elements.deleteSessionCancel.addEventListener("click", closeDeleteSession);
   elements.deleteSessionConfirm.addEventListener("click", () => {
-    confirmDeleteSession().catch((error) => showStatus(error.message, "error"));
+    confirmDeleteSession().catch(reportError);
   });
   elements.deleteSessionModal.addEventListener("close", () => {
     state.deleteSession = null;
   });
   elements.copyCodeButton.addEventListener("click", copySessionCode);
-  window.addEventListener("pagehide", () => {
-    stopAudioTest().catch(() => {});
-    closeAudioLevelStream();
-  });
+  window.addEventListener("pagehide", closeAudioLevelStream);
   window.addEventListener("pageshow", () => {
-    if (state.authenticated) connectAudioLevels();
+    if (state.authenticated && !state.audioLevelSource) connectAudioLevels();
   });
 
-  localFetch("/api/bootstrap")
-    .then(applyBootstrap)
-    .catch((error) => showStatus(error.message, "error"));
+  clearTimeline();
+  renderView();
+  renderSessions();
+  connectEvents();
 })();
