@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import threading
+import time
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
@@ -447,6 +449,54 @@ def test_console_interrupt_runs_the_complete_runtime_teardown(
     assert fake_tray.stop_calls == 1
     assert fake_window.destroyed is True
     assert signal.getsignal(signal.SIGINT) is previous_handler
+
+
+def test_console_interrupt_does_not_wait_for_blocked_native_teardown(
+    fake_server: FakeServer,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+) -> None:
+    """Ctrl+C must release the foreground process even if cleanup stalls."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWindow(FakeWindow):
+        def destroy(self) -> None:
+            entered.set()
+            release.wait(timeout=5)
+            super().destroy()
+
+    window = BlockingWindow()
+    started = time.monotonic()
+
+    def interrupt() -> None:
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+
+    runtime = start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+        webview_start=interrupt,
+    )
+
+    assert runtime is not None
+    assert time.monotonic() - started < 1
+    assert entered.wait(timeout=1)
+    assert window.destroyed is False
+
+    release.set()
+    deadline = time.monotonic() + 2
+    while not window.destroyed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert window.destroyed is True
 
 
 def test_window_close_hides_instead_of_stopping_capture(

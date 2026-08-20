@@ -2,106 +2,71 @@
 @plugin "daisyui";
 @source "../broccoli_desktop/static";
 
+@theme {
+  --font-sans: "Aptos", "Segoe UI Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", ui-monospace, monospace;
+}
+
 @plugin "daisyui/theme" {
   name: "broccoli-light";
   default: true;
   prefersdark: false;
   color-scheme: light;
-  --color-base-100: oklch(98% 0.01 135);
-  --color-base-200: oklch(95% 0.02 135);
-  --color-base-300: oklch(89% 0.04 135);
-  --color-base-content: oklch(25% 0.04 145);
-  --color-primary: oklch(55% 0.16 145);
-  --color-primary-content: oklch(98% 0.01 135);
-  --color-secondary: oklch(64% 0.15 175);
-  --color-secondary-content: oklch(98% 0.01 175);
-  --color-accent: oklch(74% 0.14 95);
-  --color-accent-content: oklch(25% 0.04 95);
-  --color-neutral: oklch(35% 0.04 145);
-  --color-neutral-content: oklch(96% 0.01 135);
-  --color-info: oklch(62% 0.14 235);
-  --color-success: oklch(62% 0.15 145);
-  --color-warning: oklch(78% 0.15 85);
-  --color-error: oklch(60% 0.2 25);
+  --color-base-100: oklch(98% 0.012 112);
+  --color-base-200: oklch(94% 0.026 125);
+  --color-base-300: oklch(87% 0.045 128);
+  --color-base-content: oklch(24% 0.045 145);
+  --color-primary: oklch(52% 0.15 145);
+  --color-primary-content: oklch(98% 0.012 112);
+  --color-secondary: oklch(59% 0.13 178);
+  --color-secondary-content: oklch(98% 0.012 178);
+  --color-accent: oklch(76% 0.16 88);
+  --color-accent-content: oklch(25% 0.05 88);
+  --color-neutral: oklch(31% 0.045 145);
+  --color-neutral-content: oklch(96% 0.012 112);
+  --color-info: oklch(60% 0.14 235);
+  --color-success: oklch(58% 0.15 145);
+  --color-warning: oklch(78% 0.16 84);
+  --color-error: oklch(58% 0.19 25);
 }
 
 @plugin "daisyui/theme" {
   name: "broccoli-dark";
   prefersdark: true;
   color-scheme: dark;
-  --color-base-100: oklch(22% 0.03 145);
-  --color-base-200: oklch(18% 0.03 145);
-  --color-base-300: oklch(14% 0.03 145);
-  --color-base-content: oklch(94% 0.02 135);
-  --color-primary: oklch(72% 0.16 145);
-  --color-primary-content: oklch(20% 0.03 145);
-  --color-secondary: oklch(76% 0.14 175);
-  --color-secondary-content: oklch(20% 0.03 175);
-  --color-accent: oklch(82% 0.14 95);
-  --color-accent-content: oklch(22% 0.03 95);
-  --color-neutral: oklch(34% 0.03 145);
-  --color-neutral-content: oklch(94% 0.02 135);
-  --color-info: oklch(72% 0.14 235);
-  --color-success: oklch(72% 0.15 145);
-  --color-warning: oklch(84% 0.14 85);
-  --color-error: oklch(70% 0.19 25);
+  --color-base-100: oklch(22% 0.032 145);
+  --color-base-200: oklch(17% 0.034 145);
+  --color-base-300: oklch(12% 0.035 145);
+  --color-base-content: oklch(93% 0.022 112);
+  --color-primary: oklch(70% 0.16 145);
+  --color-primary-content: oklch(20% 0.04 145);
+  --color-secondary: oklch(72% 0.14 178);
+  --color-secondary-content: oklch(20% 0.04 178);
+  --color-accent: oklch(80% 0.16 88);
+  --color-accent-content: oklch(22% 0.05 88);
+  --color-neutral: oklch(34% 0.035 145);
+  --color-neutral-content: oklch(94% 0.022 112);
+  --color-info: oklch(70% 0.14 235);
+  --color-success: oklch(69% 0.15 145);
+  --color-warning: oklch(83% 0.15 84);
+  --color-error: oklch(68% 0.19 25);
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+  }
+
+  button,
+  input,
+  select {
+    font: inherit;
+  }
 }
 
 @layer components {
-  .session-row {
-    @apply flex w-full flex-col gap-1 rounded-box px-3 py-3 transition-colors hover:bg-base-200;
-  }
-
-  .session-row-active {
-    @apply bg-primary text-primary-content hover:bg-primary;
-  }
-
-  .session-row-active .text-xs {
-    color: var(--color-primary-content);
-  }
-
-  .timeline-panel {
+  #sessionLibrary,
+  #transcriptTimeline {
     scrollbar-gutter: stable;
-  }
-
-  .transcript-row {
-    @apply mb-3 rounded-box bg-base-100 p-3 shadow-sm;
-  }
-
-  .transcript-row-delta {
-    @apply border border-dashed border-base-300;
-  }
-
-  .channel-label {
-    @apply badge mb-2 text-xs;
-  }
-
-  .channel-label-mic {
-    @apply badge-primary;
-  }
-
-  .channel-label-system {
-    @apply badge-secondary;
-  }
-
-  .empty-history {
-    @apply py-8 text-center text-sm text-base-content/70;
-  }
-}
-
-@media (prefers-color-scheme: light) {
-  .text-primary {
-    color: oklch(45% 0.16 145);
-  }
-
-  .session-row-active {
-    background-color: oklch(50% 0.16 145);
-    color: oklch(98% 0.01 135);
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  .session-row-active .text-xs {
-    color: oklch(20% 0.03 145);
   }
 }

@@ -28,6 +28,7 @@ from broccoli_desktop.settings import LocalDeviceSettings
 
 HEALTH_PATH = "/health"
 STARTUP_TIMEOUT_SECONDS = 10
+CONSOLE_SHUTDOWN_JOIN_TIMEOUT_SECONDS = 0.25
 
 
 class WindowProtocol(Protocol):
@@ -223,6 +224,11 @@ class DesktopRuntime:
         self._tray_stopped = False
         self._window_destroyed = False
         self._destroying_window = False
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = threading.Event()
+        self._shutdown_in_progress = False
+        self._shutdown_owner: threading.Thread | None = None
+        self._shutdown_requested = False
 
     @property
     def session(self) -> SessionProtocol | None:
@@ -265,27 +271,91 @@ class DesktopRuntime:
                 return
         self.shutdown()
 
+    @property
+    def shutdown_requested(self) -> bool:
+        """Return whether a console interrupt already requested shutdown."""
+        with self._shutdown_lock:
+            return self._shutdown_requested
+
+    def request_shutdown(self) -> None:
+        """Start console teardown without blocking Python's signal handler."""
+        with self._shutdown_lock:
+            if self._shutdown_requested or self._shutdown_complete.is_set():
+                return
+            self._shutdown_requested = True
+        threading.Thread(
+            target=self._run_requested_shutdown,
+            name="broccoli-shutdown",
+            daemon=True,
+        ).start()
+
+    def _run_requested_shutdown(self) -> None:
+        try:
+            self.shutdown()
+        except Exception:
+            # The window is already being closed and the foreground process is
+            # leaving because of Ctrl+C. A remote cleanup failure must not turn
+            # a successful console exit into an unhandled background exception.
+            pass
+
     def shutdown(self) -> None:
         """Attempt every teardown step and retry only a step that previously failed."""
+        current_thread = threading.current_thread()
+        while True:
+            with self._shutdown_lock:
+                if self._shutdown_complete.is_set():
+                    return
+                owner = self._shutdown_owner
+                if not self._shutdown_in_progress:
+                    self._shutdown_in_progress = True
+                    self._shutdown_owner = current_thread
+                    break
+            if owner is current_thread:
+                return
+            if owner is None:
+                continue
+            timeout = (
+                CONSOLE_SHUTDOWN_JOIN_TIMEOUT_SECONDS
+                if self.shutdown_requested
+                else STARTUP_TIMEOUT_SECONDS
+            )
+            owner.join(timeout=timeout)
+            if owner.is_alive():
+                return
+
         failures: list[Exception] = []
-        session = self.session
-        if not self._capture_stopped:
-            if session is None or session.state not in _ACTIVE_CAPTURE_STATES:
-                self._local_capture_stopped = True
-                self._capture_stopped = True
-            else:
-                self._complete_teardown_step(
-                    "_local_capture_stopped", session.stop_local_capture, failures
-                )
-                self._complete_teardown_step(
-                    "_capture_stopped", lambda: self._stop_controller(session), failures
-                )
-        self._complete_teardown_step("_server_stopped", self._server.shutdown, failures)
-        self._complete_teardown_step("_tray_stopped", self._tray.stop, failures)
-        self._destroying_window = True
-        self._complete_teardown_step("_window_destroyed", self.window.destroy, failures)
-        if failures:
-            raise failures[0]
+        try:
+            # Close the native loop first. In particular, Ctrl+C must not keep
+            # the WebView's GUI loop open while a remote session is finalizing.
+            self._destroying_window = True
+            self._complete_teardown_step("_window_destroyed", self.window.destroy, failures)
+
+            session = self.session
+            if not self._capture_stopped:
+                if session is None or session.state not in _ACTIVE_CAPTURE_STATES:
+                    self._local_capture_stopped = True
+                    self._capture_stopped = True
+                else:
+                    self._complete_teardown_step(
+                        "_local_capture_stopped", session.stop_local_capture, failures
+                    )
+                    self._complete_teardown_step(
+                        "_capture_stopped", lambda: self._stop_controller(session), failures
+                    )
+            self._complete_teardown_step("_server_stopped", self._server.shutdown, failures)
+            self._complete_teardown_step("_tray_stopped", self._tray.stop, failures)
+            if failures:
+                raise failures[0]
+        except Exception:
+            with self._shutdown_lock:
+                self._shutdown_in_progress = False
+                self._shutdown_owner = None
+            raise
+        else:
+            with self._shutdown_lock:
+                self._shutdown_in_progress = False
+                self._shutdown_owner = None
+                self._shutdown_complete.set()
 
     def _stop_controller(self, session: SessionProtocol) -> None:
         """Run the normal controller shutdown path or retain it for a later retry."""
@@ -359,9 +429,17 @@ def start_runtime(
     previous_interrupt_handler = _install_interrupt_handler(runtime)
     try:
         (webview_start or _start_pywebview)()
+    except KeyboardInterrupt:
+        # The signal handler requests asynchronous teardown and raises here so
+        # the foreground process cannot remain trapped in the native event loop.
+        pass
     finally:
         _restore_interrupt_handler(previous_interrupt_handler)
-        runtime.shutdown()
+        try:
+            runtime.shutdown()
+        except Exception:
+            if not runtime.shutdown_requested:
+                raise
     return runtime
 
 
@@ -370,10 +448,11 @@ def _install_interrupt_handler(runtime: DesktopRuntime) -> dict[int, Any]:
     previous_handlers: dict[int, Any] = {}
 
     def handle_interrupt(_signum: int, _frame: Any) -> None:
-        # Ctrl+C must not open the active-capture confirmation dialog. It is an
-        # explicit console shutdown request, and DesktopRuntime.shutdown is
-        # already idempotent for repeated console signals.
-        runtime.shutdown()
+        # Do not run blocking capture, WebSocket, tray, or server cleanup from
+        # inside a Python signal handler. The shutdown worker closes the native
+        # window first, while this exception releases the foreground GUI loop.
+        runtime.request_shutdown()
+        raise KeyboardInterrupt
 
     for signum in _interrupt_signals():
         previous_handlers[signum] = signal.getsignal(signum)

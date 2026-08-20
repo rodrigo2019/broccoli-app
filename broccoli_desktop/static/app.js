@@ -108,6 +108,10 @@
       devices.filter((device) => device.kind === "system"),
       selected.system_device_id,
     );
+    updateDeviceRequirement();
+  }
+
+  function updateDeviceRequirement() {
     const required = !elements.microphoneSelect.value || !elements.systemDeviceSelect.value;
     elements.deviceRequired.classList.toggle("hidden", !required);
   }
@@ -133,43 +137,53 @@
     elements.loadMoreButton.disabled =
       !state.capabilities.history || state.sessionsLoading || !state.nextCursor;
     if (!state.capabilities.history) {
+      const item = document.createElement("li");
       const unavailable = document.createElement("p");
-      unavailable.className = "empty-history";
+      unavailable.className = "py-8 text-center text-sm text-base-content/60";
       unavailable.textContent = "Histórico não disponível neste backend.";
-      elements.sessionLibrary.append(unavailable);
+      item.append(unavailable);
+      elements.sessionLibrary.append(item);
       return;
     }
     if (!state.sessions.length) {
+      const item = document.createElement("li");
       if (state.sessionsLoading) {
         const loading = document.createElement("p");
-        loading.className = "empty-history";
-        loading.textContent = "Carregando sessoes...";
-        elements.sessionLibrary.append(loading);
+        loading.className = "py-8 text-center text-sm text-base-content/60";
+        loading.textContent = "Carregando sessões...";
+        item.append(loading);
+        elements.sessionLibrary.append(item);
         return;
       }
       const empty = document.createElement("p");
-      empty.className = "empty-history";
+      empty.className = "py-8 text-center text-sm text-base-content/60";
       empty.textContent = "Nenhuma sessão encontrada.";
-      elements.sessionLibrary.append(empty);
+      item.append(empty);
+      elements.sessionLibrary.append(item);
     }
     for (const session of state.sessions) {
+      const item = document.createElement("li");
       const row = document.createElement("button");
       row.type = "button";
-      row.className = "session-row text-left";
+      const active = state.selectedSession?.uuid_code === session.uuid_code;
+      row.className = active
+        ? "btn btn-primary h-auto min-h-0 w-full flex-col items-start justify-start gap-1 px-3 py-3 text-left normal-case"
+        : "btn btn-ghost h-auto min-h-0 w-full flex-col items-start justify-start gap-1 px-3 py-3 text-left normal-case";
       row.dataset.testid = `session-row-${session.uuid_code}`;
       const sessionLabel = session.title || session.device_label || session.uuid_code;
       row.setAttribute("aria-label", `Abrir sessão ${sessionLabel}`);
-      row.classList.toggle("session-row-active", state.selectedSession?.uuid_code === session.uuid_code);
-      const title = document.createElement("strong");
+      const title = document.createElement("span");
+      title.className = "w-full truncate text-left font-semibold";
       title.textContent = sessionLabel;
       const details = document.createElement("span");
-      details.className = "text-xs text-base-content/60";
+      details.className = active ? "text-xs text-primary-content/75" : "text-xs text-base-content/60";
       details.textContent = `${session.segment_count} segmentos`;
       row.append(title, details);
       row.addEventListener("click", () => {
         selectSession(session).catch((error) => showStatus(error.message, "error"));
       });
-      elements.sessionLibrary.append(row);
+      item.append(row);
+      elements.sessionLibrary.append(item);
     }
   }
 
@@ -341,16 +355,18 @@
 
   function transcriptRow(entry, isDelta) {
     const row = document.createElement("article");
-    row.className = isDelta ? "transcript-row transcript-row-delta" : "transcript-row";
+    row.className = isDelta
+      ? "card mb-3 border border-dashed border-base-300 bg-base-100/80 p-3 shadow-sm"
+      : "card mb-3 bg-base-100 p-3 shadow-sm";
     row.dataset.utteranceId = entry.utterance_id;
     const timestamp = document.createElement("time");
-    timestamp.className = "transcript-timestamp text-xs text-base-content/60";
+    timestamp.className = "text-xs text-base-content/60";
     timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
     const channel = document.createElement("span");
-    channel.className = entry.channel === "mic" ? "channel-label channel-label-mic" : "channel-label channel-label-system";
+    channel.className = entry.channel === "mic" ? "badge badge-primary badge-sm mb-2" : "badge badge-secondary badge-sm mb-2";
     channel.textContent = entry.channel === "mic" ? "Você" : "Participantes";
     const text = document.createElement("p");
-    text.className = isDelta ? "italic text-base-content/70" : "";
+    text.className = isDelta ? "text-sm italic leading-relaxed text-base-content/70" : "text-sm leading-relaxed";
     text.textContent = entry.text;
     row.append(timestamp, channel, text);
     return row;
@@ -383,7 +399,7 @@
     elements.transcriptTimeline.replaceChildren();
     const empty = document.createElement("p");
     empty.id = "emptyTimeline";
-    empty.className = "empty-history";
+    empty.className = "flex min-h-48 items-center justify-center py-8 text-center text-sm text-base-content/60";
     empty.textContent = state.capabilities.segment_history
       ? "A transcrição aparecerá aqui."
       : "A transcrição aparecerá aqui durante esta captura.";
@@ -605,6 +621,8 @@
     loadSessions().catch((error) => showStatus(error.message, "error")),
   );
   elements.refreshDevicesButton.addEventListener("click", refreshDevices);
+  elements.microphoneSelect.addEventListener("change", updateDeviceRequirement);
+  elements.systemDeviceSelect.addEventListener("change", updateDeviceRequirement);
   elements.startSessionButton.addEventListener("click", startSession);
   elements.resumeSessionButton.addEventListener("click", startSession);
   elements.stopSessionButton.addEventListener("click", stopSession);

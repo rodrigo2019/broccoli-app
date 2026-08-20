@@ -3,25 +3,35 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Broccoli Desktop</title>
     <link rel="stylesheet" href="/static/output.css" />
     <script src="/static/app.js" defer></script>
   </head>
   <body class="min-h-screen bg-base-200 text-base-content">
-    <div class="mx-auto flex min-h-screen max-w-screen-2xl flex-col p-4 lg:p-6">
-      <header class="mb-4 flex items-center justify-between gap-4">
-        <div>
-          <p class="text-sm font-semibold text-primary">Broccoli Desktop</p>
-          <h1 class="text-3xl font-bold tracking-tight">Caderno de reunião</h1>
+    <div class="mx-auto flex min-h-screen max-w-[90rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
+      <header class="flex items-start justify-between gap-4">
+        <div class="flex min-w-0 items-center gap-3">
+          <div class="avatar placeholder shrink-0">
+            <div class="w-11 rounded-2xl bg-primary text-lg font-black text-primary-content shadow-lg">
+              <span>Br</span>
+            </div>
+          </div>
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary">Broccoli Desktop</p>
+              <span class="badge badge-success badge-outline badge-sm">Local</span>
+            </div>
+            <h1 class="truncate text-2xl font-semibold tracking-tight sm:text-3xl">Caderno de reunião</h1>
+            <p class="hidden text-sm text-base-content/60 sm:block">Capture, acompanhe e retome sua transcrição ao vivo.</p>
+          </div>
         </div>
-        <button id="logoutButton" class="btn btn-ghost btn-sm hidden" type="button">
-          Sair
-        </button>
+        <button id="logoutButton" class="btn btn-ghost btn-sm hidden" type="button">Sair</button>
       </header>
 
       <div
         id="statusBanner"
-        class="alert alert-info mb-4 hidden shadow-sm"
+        class="alert alert-info mb-0 hidden shadow-sm"
         role="status"
         aria-live="polite"
         data-testid="status-banner"
@@ -29,56 +39,85 @@
         <span id="statusMessage">Pronto para começar.</span>
       </div>
 
-      <section id="loginView" class="mx-auto my-auto w-full max-w-md">
-        <div class="card bg-base-100 shadow-xl">
-          <div class="card-body">
-            <h2 class="card-title text-2xl">Entrar</h2>
-            <p class="text-sm text-base-content/70">
-              Cole seu token do Broccoli. Ele é guardado somente no Gerenciador de
-              Credenciais do Windows.
-            </p>
-            <form id="loginForm" class="mt-2 space-y-4">
-              <label class="form-control w-full" for="tokenInput">
-                <span class="label-text font-medium">Token de acesso</span>
-                <input
-                  id="tokenInput"
-                  class="input input-bordered w-full"
-                  type="password"
-                  autocomplete="off"
-                  aria-label="Broccoli access token"
-                  data-testid="token-input"
-                  required
-                />
-              </label>
-              <p
-                id="loginError"
-                class="text-error hidden"
-                role="alert"
-                data-testid="login-error"
-              ></p>
-              <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">
-                Entrar
-              </button>
-            </form>
+      <section id="loginView" class="hero flex-1 py-8 sm:py-12">
+        <div class="hero-content w-full max-w-3xl p-0">
+          <div class="card w-full overflow-hidden border border-base-300 bg-base-100 shadow-xl lg:card-side">
+            <div class="card-body gap-5 p-6 sm:p-8 lg:w-3/5">
+              <div class="badge badge-primary badge-outline w-fit">Acesso seguro</div>
+              <div>
+                <h2 class="card-title text-3xl tracking-tight">Comece seu caderno</h2>
+                <p class="mt-2 text-sm leading-6 text-base-content/70">
+                  Use seu token do Broccoli para conectar a captura local. A credencial fica somente no Gerenciador de
+                  Credenciais do Windows.
+                </p>
+              </div>
+              <form id="loginForm" class="space-y-4">
+                <label class="form-control w-full" for="tokenInput">
+                  <div class="label px-0">
+                    <span class="label-text font-medium">Token de acesso</span>
+                  </div>
+                  <input
+                    id="tokenInput"
+                    class="input input-bordered w-full"
+                    type="password"
+                    autocomplete="off"
+                    aria-label="Broccoli access token"
+                    data-testid="token-input"
+                    required
+                  />
+                  <div class="label px-0 pb-0">
+                    <span class="label-text-alt text-base-content/55">Necessário apenas na primeira conexão.</span>
+                  </div>
+                </label>
+                <p id="loginError" class="text-sm text-error hidden" role="alert" data-testid="login-error"></p>
+                <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">Entrar</button>
+              </form>
+            </div>
+            <div class="hidden w-2/5 flex-col justify-between bg-primary p-8 text-primary-content lg:flex">
+              <div>
+                <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary-content/70">Fluxo local</p>
+                <p class="mt-4 text-2xl font-semibold leading-tight">Seu áudio, suas notas, sua janela.</p>
+              </div>
+              <div class="space-y-3 text-sm text-primary-content/80">
+                <p class="flex items-center gap-2"><span class="badge badge-warning badge-xs"></span> Microfone e áudio do sistema</p>
+                <p class="flex items-center gap-2"><span class="badge badge-warning badge-xs"></span> Transcrição em tempo real</p>
+                <p class="flex items-center gap-2"><span class="badge badge-warning badge-xs"></span> Retomada por código local</p>
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
       <section id="mainView" class="hidden min-h-0 flex-1">
-        <div class="grid h-full gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
-          <aside class="card bg-base-100 min-h-0 shadow-sm">
-            <div class="card-body min-h-0 p-4">
-              <div class="flex items-center justify-between gap-2">
-                <h2 class="font-semibold">Sessões</h2>
+        <div class="grid h-full min-h-0 gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+          <aside class="card min-h-0 border border-base-300 bg-base-100 shadow-sm">
+            <div class="card-body min-h-0 gap-4 p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-xs font-bold uppercase tracking-[0.16em] text-base-content/55">Cadernos</p>
+                  <h2 class="mt-1 text-lg font-semibold">Sessões</h2>
+                </div>
                 <button id="newSessionButton" class="btn btn-primary btn-sm" type="button" data-testid="new-session">
-                  Nova sessão
+                  Nova
                 </button>
               </div>
-              <label class="form-control" for="sessionSearch">
-                <span class="label-text sr-only">Pesquisar sessões</span>
+
+              <div class="stats stats-horizontal overflow-hidden bg-base-200/70 shadow-sm">
+                <div class="stat px-3 py-2">
+                  <div class="stat-title text-xs">Modo</div>
+                  <div class="stat-value text-lg">Ao vivo</div>
+                </div>
+              </div>
+
+              <label class="input input-bordered input-sm flex w-full items-center gap-2" for="sessionSearch">
+                <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <path d="m20 20-4-4"></path>
+                </svg>
+                <span class="sr-only">Pesquisar sessões</span>
                 <input
                   id="sessionSearch"
-                  class="input input-bordered input-sm w-full disabled:cursor-not-allowed disabled:opacity-60"
+                  class="grow bg-transparent"
                   type="search"
                   placeholder="Pesquisar sessões"
                   aria-label="Search meeting sessions"
@@ -86,93 +125,90 @@
                   disabled
                 />
               </label>
-              <nav
+
+              <ul
                 id="sessionLibrary"
-                class="menu bg-base-100 min-h-0 flex-1 overflow-y-auto rounded-box p-0"
+                class="menu min-h-0 flex-1 gap-1 overflow-y-auto p-0"
                 aria-label="Biblioteca de sessões"
                 data-testid="session-library"
-              ><p class="empty-history">Histórico não disponível neste backend.</p></nav>
-              <button id="loadMoreButton" class="btn btn-ghost btn-sm" type="button" data-testid="load-more" disabled>
+              >
+                <li><p class="py-8 text-center text-sm text-base-content/60">Histórico não disponível neste backend.</p></li>
+              </ul>
+              <button id="loadMoreButton" class="btn btn-ghost btn-sm w-full" type="button" data-testid="load-more" disabled>
                 Carregar mais
               </button>
             </div>
           </aside>
 
-          <main class="card bg-base-100 min-h-0 shadow-sm">
-            <div class="card-body min-h-0 gap-4 p-4 lg:p-6">
-              <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <main class="card min-h-0 border border-base-300 bg-base-100 shadow-sm">
+            <div class="card-body min-h-0 gap-5 p-5 lg:p-6">
+              <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
                 <div class="min-w-0 flex-1">
                   <label class="form-control" for="sessionTitle">
-                    <span class="label-text font-medium">Título da reunião (somente local)</span>
+                    <span class="label-text text-xs font-bold uppercase tracking-[0.16em] text-base-content/55">Título da reunião · somente local</span>
                     <input
                       id="sessionTitle"
-                      class="input input-ghost px-0 text-2xl font-bold"
+                      class="input input-ghost -ml-3 mt-1 w-[calc(100%+0.75rem)] px-3 text-2xl font-semibold tracking-tight sm:text-3xl"
                       type="text"
                       maxlength="120"
                       placeholder="Sem título"
                       aria-label="Título da reunião"
                     />
                   </label>
-                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/70">Inicie uma captura para gerar um código local.</p>
+                  <p id="sessionMeta" class="mt-1 text-sm text-base-content/60">Inicie uma captura para gerar um código local.</p>
                 </div>
-                <div class="flex flex-wrap gap-2">
-                  <button id="copyCodeButton" class="btn btn-outline btn-sm" type="button" data-testid="copy-session-code">
-                    Copiar código
-                  </button>
-                  <a
-                    id="openBroccoliLink"
-                    class="btn btn-outline btn-sm"
-                    href=""
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    data-testid="open-broccoli"
-                  >Abrir Broccoli</a>
+                <div class="flex flex-wrap gap-2 sm:justify-end">
+                  <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code">Copiar código</button>
+                  <a id="openBroccoliLink" class="btn btn-outline btn-sm" href="" target="_blank" rel="noopener noreferrer" data-testid="open-broccoli">Abrir Broccoli</a>
                 </div>
               </div>
 
               <div id="recordingNotice" class="alert alert-warning hidden" role="status">
-                <span>Gravação e transcrição em andamento. Avise todos os participantes.</span>
+                <span class="font-medium">Gravação e transcrição em andamento.</span>
+                <span class="text-sm">Avise todos os participantes.</span>
               </div>
 
-              <section class="grid gap-3 md:grid-cols-2" aria-label="Dispositivos de captura">
-                <label class="form-control" for="microphoneSelect">
-                  <span class="label-text font-medium">Microfone</span>
-                  <select id="microphoneSelect" class="select select-bordered w-full" aria-label="Microphone"></select>
-                </label>
-                <label class="form-control" for="systemDeviceSelect">
-                  <span class="label-text font-medium">Áudio do sistema</span>
-                  <select id="systemDeviceSelect" class="select select-bordered w-full" aria-label="System audio"></select>
-                </label>
-              </section>
+              <fieldset class="rounded-box border border-base-300 bg-base-200/40 p-4">
+                <legend class="fieldset-legend px-2 text-xs font-bold uppercase tracking-[0.14em] text-base-content/55">Fontes de áudio</legend>
+                <div class="grid gap-4 md:grid-cols-2">
+                  <label class="form-control" for="microphoneSelect">
+                    <div class="label px-0 pt-0"><span class="label-text font-medium">Microfone</span></div>
+                    <select id="microphoneSelect" class="select select-bordered w-full" aria-label="Microphone"></select>
+                  </label>
+                  <label class="form-control" for="systemDeviceSelect">
+                    <div class="label px-0 pt-0"><span class="label-text font-medium">Áudio do sistema</span></div>
+                    <select id="systemDeviceSelect" class="select select-bordered w-full" aria-label="System audio"></select>
+                  </label>
+                </div>
+              </fieldset>
 
               <div id="deviceRequired" class="alert alert-error hidden" role="alert">
                 <span>Selecione um microfone e um dispositivo de áudio do sistema para continuar.</span>
                 <button id="refreshDevicesButton" class="btn btn-sm" type="button">Atualizar dispositivos</button>
               </div>
 
-              <div class="flex flex-wrap items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2 border-y border-base-300 py-4">
                 <button id="startSessionButton" class="btn btn-primary" type="button">Iniciar captura</button>
-                <button id="resumeSessionButton" class="btn btn-secondary" type="button" data-testid="resume-session" disabled title="Retomar a sessão atual">
-                  Retomar sessão
-                </button>
-                <button id="stopSessionButton" class="btn btn-error btn-outline" type="button" data-testid="stop-session">
-                  Parar captura
-                </button>
-                <span id="connectionBadge" class="badge badge-neutral">Parado</span>
+                <button id="resumeSessionButton" class="btn btn-secondary" type="button" data-testid="resume-session" disabled title="Retomar a sessão atual">Retomar sessão</button>
+                <button id="stopSessionButton" class="btn btn-error btn-outline" type="button" data-testid="stop-session">Parar captura</button>
+                <span id="connectionBadge" class="badge badge-neutral ml-auto">Parado</span>
               </div>
 
-              <section class="min-h-0 flex-1" aria-label="Transcrição">
-                <div class="mb-2 flex items-center justify-between">
-                  <h2 class="font-semibold">Transcrição</h2>
-                  <span class="text-sm text-base-content/70">Ao vivo</span>
+              <section class="flex min-h-0 flex-1 flex-col" aria-label="Transcrição">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p class="text-xs font-bold uppercase tracking-[0.16em] text-base-content/55">Registro</p>
+                    <h2 class="mt-1 text-lg font-semibold">Transcrição</h2>
+                  </div>
+                  <span class="badge badge-success badge-outline">Ao vivo</span>
                 </div>
                 <div
                   id="transcriptTimeline"
-                  class="timeline-panel min-h-64 h-[28rem] overflow-y-auto rounded-box bg-base-200 p-4"
+                  class="min-h-64 h-[28rem] overflow-y-auto rounded-box border border-base-300 bg-base-200/55 p-3 sm:p-4"
                   aria-live="polite"
                   data-testid="transcript-timeline"
                 >
-                  <p id="emptyTimeline" class="empty-history">A transcrição aparecerá aqui.</p>
+                  <p id="emptyTimeline" class="flex min-h-48 items-center justify-center py-8 text-center text-sm text-base-content/60">A transcrição aparecerá aqui.</p>
                 </div>
               </section>
             </div>
