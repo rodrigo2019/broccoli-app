@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 
@@ -11,12 +11,8 @@ def pcm_20ms() -> bytes:
     return b"\x01\x00" * 960
 
 
-@dataclass
-class FakeVad:
-    decisions: list[bool] = field(default_factory=list)
-
-    def is_speech(self, pcm: bytes, sample_rate: int) -> bool:
-        return self.decisions.pop(0) if self.decisions else True
+def silent_pcm_20ms() -> bytes:
+    return bytes(1_920)
 
 
 @dataclass
@@ -28,19 +24,14 @@ class FakeResampler:
 
 
 @pytest.fixture
-def fake_vad() -> FakeVad:
-    return FakeVad()
-
-
-@pytest.fixture
 def fake_resampler() -> FakeResampler:
     return FakeResampler()
 
 
-def test_pipeline_emits_one_100ms_24khz_frame_after_five_speech_blocks(
-    fake_vad: FakeVad, fake_resampler: FakeResampler
+def test_pipeline_emits_one_100ms_24khz_frame_after_five_capture_blocks(
+    fake_resampler: FakeResampler,
 ) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler)
+    pipeline = AudioPipeline(resampler=fake_resampler)
 
     frames = [frame for _ in range(5) for frame in pipeline.feed("system", pcm_20ms())]
 
@@ -50,23 +41,21 @@ def test_pipeline_emits_one_100ms_24khz_frame_after_five_speech_blocks(
     assert frames[0].offset_ms == 0
 
 
-def test_silence_emits_no_frame_and_does_not_shift_the_speech_buffer(
+def test_pipeline_forwards_silence_to_the_remote_vad_without_creating_a_gap(
     fake_resampler: FakeResampler,
 ) -> None:
-    pipeline = AudioPipeline(vad=FakeVad([False] * 5 + [True] * 5), resampler=fake_resampler)
+    pipeline = AudioPipeline(resampler=fake_resampler)
 
-    silent_frames = [frame for _ in range(5) for frame in pipeline.feed("mic", pcm_20ms())]
-    speech_frames = [frame for _ in range(5) for frame in pipeline.feed("mic", pcm_20ms())]
+    frames = [frame for _ in range(5) for frame in pipeline.feed("mic", silent_pcm_20ms())]
 
-    assert silent_frames == []
-    assert len(speech_frames) == 1
-    assert speech_frames[0].offset_ms == 100
+    assert len(frames) == 1
+    assert frames[0].offset_ms == 0
 
 
 def test_pipeline_keeps_mic_and_system_accumulation_independent(
-    fake_vad: FakeVad, fake_resampler: FakeResampler
+    fake_resampler: FakeResampler,
 ) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler)
+    pipeline = AudioPipeline(resampler=fake_resampler)
 
     mic_before = [frame for _ in range(4) for frame in pipeline.feed("mic", pcm_20ms())]
     system_frames = [frame for _ in range(5) for frame in pipeline.feed("system", pcm_20ms())]
@@ -78,9 +67,9 @@ def test_pipeline_keeps_mic_and_system_accumulation_independent(
 
 
 def test_interleaved_sources_share_the_same_capture_period_offsets(
-    fake_vad: FakeVad, fake_resampler: FakeResampler
+    fake_resampler: FakeResampler,
 ) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler, base_offset_ms=12_345)
+    pipeline = AudioPipeline(resampler=fake_resampler, base_offset_ms=12_345)
 
     frames = [
         frame
@@ -95,8 +84,8 @@ def test_interleaved_sources_share_the_same_capture_period_offsets(
     }
 
 
-def test_pipeline_preserves_resampled_carry_over_between_frames(fake_vad: FakeVad) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=FakeResampler(output_bytes=1_000))
+def test_pipeline_preserves_resampled_carry_over_between_frames() -> None:
+    pipeline = AudioPipeline(resampler=FakeResampler(output_bytes=1_000))
 
     first = [frame for _ in range(5) for frame in pipeline.feed("mic", pcm_20ms())]
     before_next_frame = [frame for _ in range(4) for frame in pipeline.feed("mic", pcm_20ms())]
@@ -111,9 +100,9 @@ def test_pipeline_preserves_resampled_carry_over_between_frames(fake_vad: FakeVa
 
 
 def test_resumed_pipeline_offsets_frames_after_the_remote_base(
-    fake_vad: FakeVad, fake_resampler: FakeResampler
+    fake_resampler: FakeResampler,
 ) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler, base_offset_ms=12_345)
+    pipeline = AudioPipeline(resampler=fake_resampler, base_offset_ms=12_345)
 
     frames = [frame for _ in range(5) for frame in pipeline.feed("mic", pcm_20ms())]
 
@@ -121,10 +110,8 @@ def test_resumed_pipeline_offsets_frames_after_the_remote_base(
     assert frames[0].offset_ms == 12_345
 
 
-def test_pipeline_rejects_non_20ms_pcm_blocks(
-    fake_vad: FakeVad, fake_resampler: FakeResampler
-) -> None:
-    pipeline = AudioPipeline(vad=fake_vad, resampler=fake_resampler)
+def test_pipeline_rejects_non_20ms_pcm_blocks(fake_resampler: FakeResampler) -> None:
+    pipeline = AudioPipeline(resampler=fake_resampler)
 
     with pytest.raises(ValueError, match="20 ms"):
         pipeline.feed("mic", b"\x00\x00")

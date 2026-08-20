@@ -33,8 +33,6 @@ WINDOWS_RUNTIME_IMPORTS = (
     "keyring.backends.Windows",
     "pystray._win32",
     "PIL.Image",
-    "webrtcvad",
-    "_webrtcvad",
 )
 
 datas = [(str(PROJECT_ROOT / "broccoli_desktop" / "static"), "broccoli_desktop/static")]

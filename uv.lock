@@ -65,7 +65,6 @@ dependencies = [
     { name = "pywebview" },
     { name = "soxr" },
     { name = "uvicorn" },
-    { name = "webrtcvad-wheels" },
     { name = "websockets" },
 ]
 
@@ -87,7 +86,6 @@ requires-dist = [
     { name = "pywebview", specifier = "==6.2.1" },
     { name = "soxr", specifier = "==1.1.0" },
     { name = "uvicorn", specifier = "==0.52.4" },
-    { name = "webrtcvad-wheels", specifier = "==2.0.14" },
     { name = "websockets", specifier = "==17.0.1" },
 ]
 
@@ -827,26 +825,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f2/0f/3f86e61397dd33bf2ccf28188c40db6a740658aeebbbf6e7dbc101a1f487/uvicorn-0.52.4.tar.gz", hash = "sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86", size = 100627, upload-time = "2026-08-19T06:27:41.821Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/79/4a20b54ab0491485ccd8c077db2d39187c7f12b3e15485d38a7be37c81b4/uvicorn-0.52.4-py3-none-any.whl", hash = "sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1", size = 79871, upload-time = "2026-08-19T06:27:40.36Z" },
-]
-
-[[package]]
-name = "webrtcvad-wheels"
-version = "2.0.14"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/28/ba/3a8ce2cff3eee72a39ed190e5f9dac792da1526909c97a11589590b21739/webrtcvad_wheels-2.0.14.tar.gz", hash = "sha256:5f59c8e291c6ef102d9f39532982fbf26a52ce2de6328382e2654b0960fea397", size = 70607, upload-time = "2024-09-05T10:17:02.471Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/1f/af4af5d30228d46bbc3ad85cd12aac670b930d94107d8c755c191e5454f3/webrtcvad_wheels-2.0.14-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:fc5d5a5bb13e5f25e095859d7a0018101a6563434781f27965f38ee75da45f9e", size = 31016, upload-time = "2024-09-05T10:15:08.799Z" },
-    { url = "https://files.pythonhosted.org/packages/df/7f/8ff8af528b0a8db20d28356dc5486ecf779a7d1bd9ff379d8b3d921a2ab3/webrtcvad_wheels-2.0.14-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:323aa89df721377f053923fe1ea5c14e748c85314a977e2fcc3c920c4f474d40", size = 29515, upload-time = "2024-09-05T10:15:09.829Z" },
-    { url = "https://files.pythonhosted.org/packages/24/16/8e21cfabd0cd9b9d01231e3b65716ab0cf1a6bd0b9115e2ed038996fe2c1/webrtcvad_wheels-2.0.14-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:42310d3bb6cdb46a79a219d14fe97ae272b8af629d84321e5cfa0764556109a6", size = 86036, upload-time = "2024-09-05T10:15:11.122Z" },
-    { url = "https://files.pythonhosted.org/packages/8a/c3/51e1f87610b55823367f08253fba50659beda2807e2ec4cf08360aff6c25/webrtcvad_wheels-2.0.14-cp312-cp312-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:09fdc138ce3519e2f4ba2f74640bc6f72aff162fa0c9ae2941da8068f3d22ba6", size = 95471, upload-time = "2024-09-05T10:15:12.652Z" },
-    { url = "https://files.pythonhosted.org/packages/84/59/a6cd0eeae17640e43215843ea6176645b65f58dd6d15a38c77c253116e87/webrtcvad_wheels-2.0.14-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:63fdad42c0ca6248b9a5c8ca34ff17a5c43bb63ffd8997a5902ad7237a05ca68", size = 82895, upload-time = "2024-09-05T10:15:13.738Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/cd/fd784f552a32d1b44be9ffe8b8f243c8c9a9eb69a61ef92a8b6611d38349/webrtcvad_wheels-2.0.14-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:c7aa4cfbf0c816d2b9ee3100d3008f5acf8bd1a634d6058fa6c1604a1e2ba264", size = 80808, upload-time = "2024-09-05T10:15:15.166Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/0c/28846038f5de2872b91a5b91925792d056477cd42a6d639b6a3ba84bd0e8/webrtcvad_wheels-2.0.14-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:6056a2559d83836bf4b6af4993448202bfd080efd5e799d2153118e4a91d3fd1", size = 86266, upload-time = "2024-09-05T10:15:16.382Z" },
-    { url = "https://files.pythonhosted.org/packages/17/38/8b20fb52c14bc316089a7486b559412c785968b17f97b5486ad17e115b0e/webrtcvad_wheels-2.0.14-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:db9d5e6ae07cc82277eacac2b747afa7db53e9effab0259055116f5f77a28bf3", size = 82609, upload-time = "2024-09-05T10:15:17.707Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/7c/3a8abe5cc3d2b65072b24c4122ceae29de0ac5d4d5df45ebf7f3f101ef74/webrtcvad_wheels-2.0.14-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:407c29a1d577dff8c2ef746bbd78151688f23ca763d97f3334d6e310ffa68aaa", size = 93359, upload-time = "2024-09-05T10:15:19.021Z" },
-    { url = "https://files.pythonhosted.org/packages/7a/e6/14069e350e5cbd78f7c16add5613f03378d2ee36c43d5dc96d20ce9bc8e6/webrtcvad_wheels-2.0.14-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fe2ced612732a41aefa14ea2ea52f84de5afd43665ebed092e1d6df93641e239", size = 86940, upload-time = "2024-09-05T10:15:20.301Z" },
-    { url = "https://files.pythonhosted.org/packages/ec/7c/ac5a40ca80a09e978968b7065528ce340295115d1af2b1e0a98aa0ac0244/webrtcvad_wheels-2.0.14-cp312-cp312-win32.whl", hash = "sha256:68e2041d1a30dc619a0e7ff5adaa948a6b862fa6e6d4d85337f235240707eab5", size = 17364, upload-time = "2024-09-05T10:15:21.162Z" },
-    { url = "https://files.pythonhosted.org/packages/24/1d/9a8f4c842ca880253821acf165080077b245577719e5e03b13e3c45853c5/webrtcvad_wheels-2.0.14-cp312-cp312-win_amd64.whl", hash = "sha256:4010b95b31b9b360fd1bf47a8344b06b946ec866cf3d14fb39fc692307ddf312", size = 19901, upload-time = "2024-09-05T10:15:21.96Z" },
 ]
 
 [[package]]

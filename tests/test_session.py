@@ -117,6 +117,19 @@ async def test_start_new_opens_without_resume_code_and_updates_the_requested_tit
 
 
 @pytest.mark.asyncio
+async def test_start_new_leaves_transcription_language_for_the_remote_service_to_detect(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    assert fake_remote.stream_languages == [""]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_update_title_changes_only_the_active_local_summary(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

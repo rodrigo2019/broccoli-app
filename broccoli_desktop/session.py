@@ -39,6 +39,7 @@ from broccoli_desktop.remote import (
 MAX_BUFFERED_AUDIO_MS = 10_000
 FRAME_DURATION_MS = 100
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 15)
+AUTO_DETECT_LANGUAGE = ""
 
 
 class SleepClock(Protocol):
@@ -175,7 +176,9 @@ class DesktopSessionController:
         remote_period_started = False
         try:
             stream = await self._remote.connect_stream(
-                resume_code=resume_code, device_label=self._device_label, language="en"
+                resume_code=resume_code,
+                device_label=self._device_label,
+                language=AUTO_DETECT_LANGUAGE,
             )
             iterator = stream.events()
             started = await anext(iterator)
@@ -306,7 +309,7 @@ class DesktopSessionController:
                     stream = await self._remote.connect_stream(
                         resume_code=self._session_uuid,
                         device_label=self._device_label or "",
-                        language="en",
+                        language=AUTO_DETECT_LANGUAGE,
                     )
                     previous_stream = self._recovery_stream
                     self._recovery_stream = stream
@@ -521,7 +524,7 @@ class DesktopSessionController:
             return await self._remote.connect_stream(
                 resume_code=self._session_uuid,
                 device_label=self._device_label or "",
-                language="en",
+                language=AUTO_DETECT_LANGUAGE,
             )
         except Exception:
             return None

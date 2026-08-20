@@ -1,4 +1,4 @@
-"""VAD-gated 48 kHz capture conversion and Listening frame batching."""
+"""Continuous 48 kHz capture conversion and Listening frame batching."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from array import array
 from typing import Literal, Protocol
 
 import soxr
-import webrtcvad
 
 from broccoli_desktop.models import AudioFrame
 
@@ -16,10 +15,6 @@ INPUT_BLOCK_MS = 20
 INPUT_BLOCK_BYTES = INPUT_SAMPLE_RATE * INPUT_BLOCK_MS // 1_000 * 2
 OUTPUT_FRAME_MS = 100
 OUTPUT_FRAME_BYTES = OUTPUT_SAMPLE_RATE * OUTPUT_FRAME_MS // 1_000 * 2
-
-
-class Vad(Protocol):
-    def is_speech(self, pcm: bytes, sample_rate: int) -> bool: ...
 
 
 class Resampler(Protocol):
@@ -37,18 +32,16 @@ class SoxrResampler:
 
 
 class AudioPipeline:
-    """Build per-channel remote frames from fixed 20 ms capture blocks."""
+    """Build per-channel remote frames from every fixed 20 ms capture block."""
 
     def __init__(
         self,
         *,
-        vad: Vad | None = None,
         resampler: Resampler | None = None,
         base_offset_ms: int = 0,
     ) -> None:
         if base_offset_ms < 0:
             raise ValueError("base_offset_ms must be non-negative")
-        self._vad = vad or webrtcvad.Vad(2)
         self._resampler = resampler or SoxrResampler()
         self._base_offset_ms = base_offset_ms
         self._capture_offsets_ms: dict[Literal["mic", "system"], int] = {
@@ -70,8 +63,6 @@ class AudioPipeline:
 
         capture_offset_ms = self._capture_offsets_ms[channel]
         self._capture_offsets_ms[channel] += INPUT_BLOCK_MS
-        if not self._vad.is_speech(pcm_48k, INPUT_SAMPLE_RATE):
-            return []
 
         pcm_24k = self._resampler.resample(pcm_48k, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
         if len(pcm_24k) % 2:

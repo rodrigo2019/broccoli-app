@@ -111,6 +111,7 @@ class FakeSessionRemote:
     stream_event_scripts: list[list[RemoteEvent | Exception | None]] = field(default_factory=list)
     streams: list[FakeLiveRemoteStream] = field(default_factory=list)
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
+    stream_languages: list[str] = field(default_factory=list)
     fail_send_stream_indexes: set[int] = field(default_factory=set)
     fail_control_stream_indexes: set[int] = field(default_factory=set)
     fail_close_stream_indexes: set[int] = field(default_factory=set)
@@ -147,7 +148,6 @@ class FakeSessionRemote:
     async def connect_stream(
         self, *, resume_code: str | None, device_label: str, language: str
     ) -> FakeLiveRemoteStream:
-        del language
         self._assert_authorized()
         uuid_code = resume_code or "session-1"
         if uuid_code not in self.sessions:
@@ -170,6 +170,7 @@ class FakeSessionRemote:
         )
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
+        self.stream_languages.append(language)
         await stream.emit(SessionStarted(uuid_code, next_sequences, 14_400))
         if stream_index < len(self.stream_event_scripts):
             for event in self.stream_event_scripts[stream_index]:
