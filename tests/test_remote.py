@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 import httpx
 import pytest
 
-from broccoli_desktop.remote import HttpListeningRemote, SessionStarted, TranscriptSegmentEvent
+from broccoli_desktop.remote import (
+    HttpListeningRemote,
+    SessionStarted,
+    TranscriptDeltaEvent,
+    TranscriptSegmentEvent,
+)
 
 
 @dataclass
@@ -130,6 +135,64 @@ async def test_stream_uses_handshake_query_and_derives_segment_id(
     assert events == [
         SessionStarted("live-1", {"mic": 4, "system": 2}, 14_400),
         TranscriptSegmentEvent("mic", "mic:4", "hello", 100, 900),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
+    fake_socket_factory: FakeSocketFactory,
+) -> None:
+    fake_socket_factory.socket.received = [
+        json.dumps(
+            {
+                "type": "session.started",
+                "uuid_code": "live-1",
+                "resumed": False,
+                "next_seq": {"mic": 4, "system": 2},
+                "max_duration_s": 14_400,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "transcript.delta",
+                "channel": "mic",
+                "text": "hello ",
+                "started_offset_ms": 100,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "transcript.delta",
+                "channel": "mic",
+                "text": "hello world",
+                "started_offset_ms": 100,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "transcript.segment",
+                "channel": "mic",
+                "text": "hello world",
+                "started_offset_ms": 100,
+                "ended_offset_ms": 900,
+            }
+        ),
+    ]
+    remote = HttpListeningRemote(
+        "http://127.0.0.1:8000",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=fake_socket_factory,
+    )
+
+    stream = await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+    events = [event async for event in stream.events()]
+
+    assert events == [
+        SessionStarted("live-1", {"mic": 4, "system": 2}, 14_400),
+        TranscriptDeltaEvent("mic", "mic:4", "hello ", 100),
+        TranscriptDeltaEvent("mic", "mic:4", "hello world", 100),
+        TranscriptSegmentEvent("mic", "mic:4", "hello world", 100, 900),
     ]
 
 

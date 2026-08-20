@@ -252,6 +252,15 @@ class _WebSocketRemoteStream:
                 started_offset_ms=_required_integer(values, "started_offset_ms"),
                 ended_offset_ms=_required_integer(values, "ended_offset_ms"),
             )
+        if event_type == "transcript.delta":
+            channel = _channel(values)
+            sequence = self._current_sequence_for(channel)
+            return TranscriptDeltaEvent(
+                channel=channel,
+                utterance_id=f"{channel}:{sequence}",
+                text=_required_string(values, "text"),
+                started_offset_ms=_required_integer(values, "started_offset_ms"),
+            )
         if event_type == "credit.warning":
             return CreditWarning()
         if event_type == "session.ended":
@@ -263,12 +272,16 @@ class _WebSocketRemoteStream:
         raise RemoteProtocolError(f"Unexpected remote event type: {event_type}")
 
     def _sequence_for(self, channel: str) -> int:
+        sequence = self._current_sequence_for(channel)
+        assert self._next_sequence_by_channel is not None  # noqa: S101 - guarded above
+        self._next_sequence_by_channel[channel] = sequence + 1
+        return sequence
+
+    def _current_sequence_for(self, channel: str) -> int:
         sequences = self._next_sequence_by_channel
         if sequences is None or channel not in sequences:
             raise RemoteProtocolError("Remote segment arrived before a session started.")
-        sequence = sequences[channel]
-        sequences[channel] = sequence + 1
-        return sequence
+        return sequences[channel]
 
 
 def _authorization_header(token: str) -> str:
