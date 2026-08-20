@@ -165,7 +165,7 @@ async def test_update_title_changes_only_the_active_local_summary(
 
     assert summary.title == "Renamed"
     assert controller.session == summary
-    assert fake_remote.sessions[started.uuid_code].title == "Existing session"
+    assert fake_remote.sessions[started.uuid_code].title == "Daily"
 
     await controller.stop()
 
@@ -541,11 +541,13 @@ async def test_recovery_exhaustion_discards_buffered_frames_before_a_later_recon
     choices = CaptureChoices("mic-1", "system-1")
     original_connect = fake_remote.connect_stream
 
-    async def fail_reconnects(*, resume_code: str | None, device_label: str, language: str):
+    async def fail_reconnects(
+        *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+    ):
         if resume_code is not None:
             raise RemoteRequestError()
         return await original_connect(
-            resume_code=resume_code, device_label=device_label, language=language
+            resume_code=resume_code, device_label=device_label, language=language, title=title
         )
 
     fake_remote.connect_stream = fail_reconnects  # type: ignore[method-assign]

@@ -429,7 +429,10 @@ def start_runtime(
 
     previous_interrupt_handler = _install_interrupt_handler(runtime)
     try:
-        (webview_start or _start_pywebview)()
+        if webview_start is None:
+            _start_pywebview(runtime)
+        else:
+            webview_start()
     except KeyboardInterrupt:
         # The signal handler requests asynchronous teardown and raises here so
         # the foreground process cannot remain trapped in the native event loop.
@@ -597,10 +600,31 @@ def _create_pywebview_window(title: str, url: str) -> PyWebViewWindow:
     return PyWebViewWindow(webview.create_window(title, url, js_api=None))
 
 
-def _start_pywebview() -> None:
+def _start_pywebview(runtime: DesktopRuntime) -> None:
+    """Start PyWebView without letting its SIGINT handler bypass runtime teardown."""
     import webview
 
-    webview.start()
+    # PyWebView installs its own SIGINT handler while starting its Windows GUI
+    # backend.  Without this hook, that replacement bypasses
+    # ``_install_interrupt_handler`` above: the backend repeatedly asks the
+    # native window to close, while our normal close callback keeps it alive
+    # for the tray.  Marking shutdown requested first lets the existing
+    # teardown worker destroy the window and its dependencies normally.
+    gui = webview.initialize()
+    original_interrupt_handler = getattr(gui, "_sigint_handler", None)
+    if not callable(original_interrupt_handler):
+        webview.start()
+        return
+
+    def handle_interrupt(signum: int, frame: Any) -> None:
+        runtime.request_shutdown()
+        original_interrupt_handler(signum, frame)
+
+    gui._sigint_handler = handle_interrupt
+    try:
+        webview.start()
+    finally:
+        gui._sigint_handler = original_interrupt_handler
 
 
 def _create_system_tray(runtime: DesktopRuntime) -> TrayProtocol:

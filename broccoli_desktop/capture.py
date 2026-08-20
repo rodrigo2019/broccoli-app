@@ -248,15 +248,16 @@ class AudioLevelSnapshot:
 
 
 class AudioLevelMonitor:
-    """Read selected sources only long enough to show their local signal levels.
+    """Publish transient local signal levels for the settings check and capture UI.
 
     The monitor never retains PCM. It exposes normalized current and peak values
-    so the loopback UI can verify a microphone and an output device before a
-    transcription session begins.
+    so the settings UI can verify devices and the capture footer can render the
+    live microphone and system excitation.
     """
 
     _LEVEL_DECAY_PER_SECOND = 4.0
     _PEAK_DECAY_PER_SECOND = 1.25
+    _PUBLISH_INTERVAL_SECONDS = 0.05
 
     def __init__(self, backend: CaptureBackend) -> None:
         self._backend = backend
@@ -269,6 +270,9 @@ class AudioLevelMonitor:
             "system": monotonic(),
         }
         self._selection: tuple[str, str] | None = None
+        self._capture_active = False
+        self._last_published_at = 0.0
+        self._listeners: set[Callable[[AudioLevelSnapshot], None]] = set()
         self._starting = False
         self._startup_error: Exception | None = None
 
@@ -319,6 +323,9 @@ class AudioLevelMonitor:
             if isinstance(startup_error, DeviceUnavailableError):
                 raise startup_error
             raise DeviceUnavailableError("capture device") from startup_error
+        with self._lock:
+            snapshot = self._snapshot_locked(monotonic())
+        self._publish(snapshot)
 
     def stop(self) -> None:
         """Release both temporary capture sources and reset the visible levels."""
@@ -326,37 +333,89 @@ class AudioLevelMonitor:
             handles = tuple(self._handles.values())
             self._handles.clear()
             self._selection = None
+            self._capture_active = False
             self._levels = {"mic": 0.0, "system": 0.0}
             self._peaks = {"mic": 0.0, "system": 0.0}
             now = monotonic()
             self._updated_at = {"mic": now, "system": now}
+            self._last_published_at = 0.0
+            snapshot = self._snapshot_locked(now)
         self._close_handles(handles)
+        self._publish(snapshot)
+
+    def set_capture_active(self, active: bool) -> None:
+        """Mark the shared capture session as the source of level events."""
+        with self._lock:
+            if active and not self._capture_active:
+                now = monotonic()
+                self._levels = {"mic": 0.0, "system": 0.0}
+                self._peaks = {"mic": 0.0, "system": 0.0}
+                self._updated_at = {"mic": now, "system": now}
+            self._capture_active = bool(active)
+            snapshot = self._snapshot_locked(monotonic())
+        self._publish(snapshot)
+
+    def subscribe(self, listener: Callable[[AudioLevelSnapshot], None]) -> None:
+        """Subscribe to coalesced level snapshots for the local SSE endpoint."""
+        with self._lock:
+            self._listeners.add(listener)
+
+    def unsubscribe(self, listener: Callable[[AudioLevelSnapshot], None]) -> None:
+        with self._lock:
+            self._listeners.discard(listener)
 
     def snapshot(self) -> AudioLevelSnapshot:
         """Return decayed display values without exposing any captured samples."""
         with self._lock:
-            now = monotonic()
-            microphone, microphone_peak = self._decayed_values("mic", now)
-            system, system_peak = self._decayed_values("system", now)
-            return AudioLevelSnapshot(
-                microphone=microphone,
-                microphone_peak=microphone_peak,
-                system=system,
-                system_peak=system_peak,
-                active=bool(self._handles),
-            )
+            return self._snapshot_locked(monotonic())
+
+    def _snapshot_locked(self, now: float, *, grace: bool = True) -> AudioLevelSnapshot:
+        microphone, microphone_peak = self._decayed_values("mic", now, grace=grace)
+        system, system_peak = self._decayed_values("system", now, grace=grace)
+        return AudioLevelSnapshot(
+            microphone=microphone,
+            microphone_peak=microphone_peak,
+            system=system,
+            system_peak=system_peak,
+            active=bool(self._handles) or self._capture_active,
+        )
 
     def _record_level(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
         level = _pcm_level(pcm)
+        snapshot: AudioLevelSnapshot | None = None
         with self._lock:
             now = monotonic()
             current, peak = self._decayed_values(channel, now)
             self._levels[channel] = max(level, current)
             self._peaks[channel] = max(level, peak)
             self._updated_at[channel] = now
+            if now - self._last_published_at >= self._PUBLISH_INTERVAL_SECONDS:
+                self._last_published_at = now
+                snapshot = self._snapshot_locked(now, grace=False)
+        if snapshot is not None:
+            self._publish(snapshot)
 
-    def _decayed_values(self, channel: Literal["mic", "system"], now: float) -> tuple[float, float]:
+    def record(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
+        """Record one transient block delivered by the active transcription capture."""
+        self._record_level(channel, pcm)
+
+    def _publish(self, snapshot: AudioLevelSnapshot) -> None:
+        with self._lock:
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            try:
+                listener(snapshot)
+            except Exception:
+                continue
+
+    def _decayed_values(
+        self, channel: Literal["mic", "system"], now: float, *, grace: bool = False
+    ) -> tuple[float, float]:
         elapsed = max(0.0, now - self._updated_at[channel])
+        if grace:
+            # Keep one coalescing window stable so an SSE/API read immediately
+            # after a PCM block reports the received excitation at full strength.
+            elapsed = max(0.0, elapsed - self._PUBLISH_INTERVAL_SECONDS)
         level = self._levels[channel] * max(0.0, 1.0 - elapsed * self._LEVEL_DECAY_PER_SECOND)
         peak = self._peaks[channel] * max(0.0, 1.0 - elapsed * self._PEAK_DECAY_PER_SECOND)
         return level, peak
@@ -395,12 +454,16 @@ class CaptureSession:
         on_pcm: PcmCallback,
         *,
         on_event: CaptureEventCallback | None = None,
+        on_audio_level: PcmCallback | None = None,
+        on_capture_state: Callable[[bool], None] | None = None,
     ) -> None:
         self._backend = backend
         self._microphone_id = microphone_id
         self._system_device_id = system_device_id
         self._on_pcm = on_pcm
         self._on_event = on_event
+        self._on_audio_level = on_audio_level
+        self._on_capture_state = on_capture_state
         selected_ids = {microphone_id, system_device_id}
         self._selected_labels = {
             device.device_id: device.label
@@ -409,6 +472,7 @@ class CaptureSession:
         }
         self._lock = RLock()
         self._handles: dict[str, CaptureHandle] = {}
+        self._capture_active = False
         self._starting = False
         self._startup_error: Exception | None = None
         self._selection_invalid = False
@@ -428,16 +492,19 @@ class CaptureSession:
             self._startup_error = None
             try:
                 microphone = self._backend.open_microphone(
-                    self._microphone_id, lambda pcm: self._on_pcm("mic", pcm)
+                    self._microphone_id, lambda pcm: self._on_source_pcm("mic", pcm)
                 )
                 self._install_handle(self._microphone_id, microphone)
                 self._raise_startup_error()
                 opening_device_id = self._system_device_id
                 loopback = self._backend.open_loopback(
-                    self._system_device_id, lambda pcm: self._on_pcm("system", pcm)
+                    self._system_device_id, lambda pcm: self._on_source_pcm("system", pcm)
                 )
                 self._install_handle(self._system_device_id, loopback)
                 self._raise_startup_error()
+                self._capture_active = True
+                if self._on_capture_state is not None:
+                    self._on_capture_state(True)
             except DeviceUnavailableError as error:
                 self._selection_invalid = True
                 self.stop()
@@ -460,9 +527,18 @@ class CaptureSession:
         with self._lock:
             handles = tuple(self._handles.values())
             self._handles.clear()
+            was_active = self._capture_active
+            self._capture_active = False
+        if was_active and self._on_capture_state is not None:
+            self._on_capture_state(False)
         for handle in reversed(handles):
             handle.drain()
             handle.close()
+
+    def _on_source_pcm(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
+        if self._on_audio_level is not None:
+            self._on_audio_level(channel, pcm)
+        self._on_pcm(channel, pcm)
 
     def _install_handle(self, device_id: str, handle: CaptureHandle) -> None:
         self._handles[device_id] = handle

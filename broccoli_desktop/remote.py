@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -48,6 +48,18 @@ class RemoteRequestError(RemoteError):
 
     def __init__(self) -> None:
         super().__init__("Remote request failed.")
+
+
+class RemoteNotFoundError(RemoteRequestError):
+    """The requested remote session is not visible to this desktop user."""
+
+
+class RemoteConflictError(RemoteRequestError):
+    """The requested remote state transition is currently unsafe."""
+
+
+class RemoteValidationError(RemoteRequestError):
+    """The remote rejected a session metadata update."""
 
 
 class RemoteProtocolError(RemoteError):
@@ -130,8 +142,14 @@ class ListeningRemote(Protocol):
 
     async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage: ...
 
+    async def update_session(
+        self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
+    ) -> SessionSummary: ...
+
+    async def delete_session(self, uuid_code: str) -> None: ...
+
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str
+        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
     ) -> RemoteStream: ...
 
 
@@ -185,8 +203,29 @@ class HttpListeningRemote:
             await self._request_json("GET", _with_query(path, {"cursor": cursor}))
         )
 
+    async def update_session(
+        self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
+    ) -> SessionSummary:
+        payload: dict[str, str | bool] = {}
+        if title is not None:
+            payload["title"] = title
+        if is_pinned is not None:
+            payload["is_pinned"] = is_pinned
+        if not payload:
+            raise ValueError("A session update requires metadata.")
+        return _parse_session(
+            await self._request_json(
+                "PATCH",
+                f"{SESSION_LIST_PATH}{quote(uuid_code, safe='')}/",
+                json_body=payload,
+            )
+        )
+
+    async def delete_session(self, uuid_code: str) -> None:
+        await self._request("DELETE", f"{SESSION_LIST_PATH}{quote(uuid_code, safe='')}/")
+
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str
+        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
     ) -> RemoteStream:
         try:
             socket = await self._socket_factory(
@@ -196,6 +235,7 @@ class HttpListeningRemote:
                     resume_code=resume_code,
                     device_label=device_label,
                     language=language,
+                    title=title,
                 ),
                 additional_headers={"Authorization": _authorization_header(self._token)},
             )
@@ -205,20 +245,34 @@ class HttpListeningRemote:
             raise RemoteRequestError from None
         return _WebSocketRemoteStream(socket)
 
-    async def _request_json(self, method: str, path: str) -> object:
+    async def _request(
+        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+    ) -> httpx.Response:
         try:
             async with httpx.AsyncClient(
                 base_url=self._base_url,
                 headers={"Authorization": _authorization_header(self._token)},
                 transport=self._transport,
             ) as client:
-                response = await client.request(method, path)
+                response = await client.request(method, path, json=json_body)
         except httpx.HTTPError:
             raise RemoteRequestError from None
         if response.status_code in {401, 403}:
             raise RemoteUnauthorizedError
+        if response.status_code == 404:
+            raise RemoteNotFoundError
+        if response.status_code == 409:
+            raise RemoteConflictError
+        if 400 <= response.status_code < 500:
+            raise RemoteValidationError
         if response.is_error:
             raise RemoteRequestError
+        return response
+
+    async def _request_json(
+        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+    ) -> object:
+        response = await self._request(method, path, json_body=json_body)
         try:
             return response.json()
         except (json.JSONDecodeError, ValueError):
@@ -342,7 +396,13 @@ def _parse_session(payload: object) -> SessionSummary:
         raise RemoteProtocolError("Remote session payload was invalid.")
     title = values.get("title", "")
     device_label = values.get("device_label", "")
-    if not isinstance(title, str) or not isinstance(device_label, str):
+    is_pinned = values.get("is_pinned", False)
+    pinned_at = _optional_string(values, "pinned_at")
+    if (
+        not isinstance(title, str)
+        or not isinstance(device_label, str)
+        or not isinstance(is_pinned, bool)
+    ):
         raise RemoteProtocolError("Remote session payload was invalid.")
     return SessionSummary(
         uuid_code=_required_string(values, "uuid_code"),
@@ -353,6 +413,8 @@ def _parse_session(payload: object) -> SessionSummary:
         device_label=device_label,
         segment_count=segment_count,
         is_live=is_live,
+        is_pinned=is_pinned,
+        pinned_at=pinned_at,
     )
 
 
@@ -385,6 +447,7 @@ def _stream_url(
     resume_code: str | None,
     device_label: str,
     language: str,
+    title: str | None,
 ) -> str:
     parts = urlsplit(base_url)
     scheme = {"https": "wss", "http": "ws"}.get(parts.scheme)
@@ -397,6 +460,7 @@ def _stream_url(
                 "resume": resume_code,
                 "device": device_label,
                 "language": language,
+                "title": title,
             }.items()
             if value
         }

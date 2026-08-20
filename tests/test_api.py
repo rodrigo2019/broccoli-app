@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from broccoli_desktop.api import Services, create_app
+from broccoli_desktop.api import Services, _audio_level_events, create_app
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
@@ -148,7 +148,8 @@ def test_fake_bootstrap_exposes_the_same_capability_shape() -> None:
 
     assert client.get("/api/bootstrap").json()["capabilities"] == {
         "history": True,
-        "remote_title": False,
+        "remote_title": True,
+        "session_actions": True,
         "user_resume": True,
         "segment_history": True,
     }
@@ -185,6 +186,8 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="capture-toggle"' in response.text
     assert 'data-testid="copy-session-code"' in response.text
     assert 'data-testid="open-broccoli"' in response.text
+    assert 'id="renameSessionModal"' in response.text
+    assert 'id="deleteSessionModal"' in response.text
     assert 'data-testid="status-banner"' in response.text
     assert 'data-testid="transcript-timeline"' in response.text
     assert 'aria-label="Broccoli access token"' in response.text
@@ -243,7 +246,8 @@ def test_bootstrap_exposes_history_features(
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
             "history": True,
-            "remote_title": False,
+            "remote_title": True,
+            "session_actions": True,
             "user_resume": True,
             "segment_history": True,
         },
@@ -265,7 +269,8 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
             "history": True,
-            "remote_title": False,
+            "remote_title": True,
+            "session_actions": True,
             "user_resume": True,
             "segment_history": True,
         },
@@ -311,6 +316,8 @@ def test_history_routes_proxy_session_and_segment_pages(
                 "device_label": "Meeting speakers",
                 "segment_count": 1,
                 "is_live": False,
+                "is_pinned": False,
+                "pinned_at": None,
             }
         ],
         "next_cursor": "20",
@@ -332,15 +339,22 @@ def test_history_routes_proxy_session_and_segment_pages(
     }
 
 
-def test_title_update_remains_unavailable_until_the_backend_persists_titles(
-    client: TestClient,
+def test_session_actions_proxy_metadata_updates_and_delete(
+    client: TestClient, fake_remote_factory: FakeRemoteFactory
 ) -> None:
     login(client)
 
-    response = client.patch("/api/sessions/session-1", json={"title": "Renamed"})
+    renamed = client.patch("/api/sessions/session-1", json={"title": "Renamed"})
+    pinned = client.patch("/api/sessions/session-1", json={"is_pinned": True})
+    deleted = client.delete("/api/sessions/session-1")
 
-    assert response.status_code == 409
-    assert response.json() == {"detail": "This backend does not provide session history."}
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Renamed"
+    assert pinned.status_code == 200
+    assert pinned.json()["is_pinned"] is True
+    assert pinned.json()["pinned_at"] is not None
+    assert deleted.status_code == 204
+    assert "session-1" not in fake_remote_factory.remote.sessions
 
 
 def test_resume_route_reuses_the_current_session_after_a_client_stop(
@@ -458,6 +472,29 @@ def test_audio_level_routes_read_selected_devices_without_returning_pcm(
     assert b"\xff\x7f" not in levels.content
     assert stopped.status_code == 204
     assert fake_capture.closed_sources == {"mic-1", "system-1"}
+
+
+@pytest.mark.asyncio
+async def test_audio_level_stream_sends_initial_and_live_snapshots(
+    client: TestClient,
+    services: Services,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    assert client.get("/api/audio-levels/stream").status_code == 401
+    login(client)
+    services.start_audio_level_monitor(CaptureChoices("mic-1", "system-1"))
+
+    events = _audio_level_events(services.audio_levels)
+    initial = await anext(events)
+    assert initial.startswith("data: {")
+    assert '"active":true' in initial
+
+    fake_capture.handles["mic-1"].emit(b"\xff\x7f")
+    update = await asyncio.wait_for(anext(events), timeout=1)
+    assert update.startswith("data: {")
+    assert '"active":true' in update
+    await events.aclose()
+    services.stop_audio_level_monitor()
 
 
 def test_audio_level_check_stops_before_a_capture_uses_the_devices(
@@ -662,6 +699,16 @@ def test_notebook_contains_history_loading_and_selection_workflow() -> None:
     assert "capabilities.segment_history" in source
 
 
+def test_notebook_contains_session_action_menu_and_safe_live_delete_gate() -> None:
+    source = Path("broccoli_desktop/static/app.js").read_text(encoding="utf-8")
+
+    assert "function sessionActionMenu(session)" in source
+    assert "function openRenameSession(session)" in source
+    assert "function confirmDeleteSession()" in source
+    assert "disabled: session.is_live" in source
+    assert 'method: "DELETE"' in source
+
+
 def test_keyring_outage_is_reported_without_exposing_credential_details(
     fake_capture: FakeCaptureBackend,
     fake_remote_factory: FakeRemoteFactory,
@@ -708,7 +755,8 @@ def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
     assert bootstrap["bootstrap"]["sessions"] == {"sessions": [], "next_cursor": None}
     assert bootstrap["bootstrap"]["capabilities"] == {
         "history": True,
-        "remote_title": False,
+        "remote_title": True,
+        "session_actions": True,
         "user_resume": True,
         "segment_history": True,
     }

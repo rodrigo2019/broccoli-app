@@ -20,10 +20,12 @@ class FakeTransport(httpx.AsyncBaseTransport):
     responses: list[object] = field(default_factory=list)
     requests: list[tuple[str, str, str]] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
+    json_bodies: list[object | None] = field(default_factory=list)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append((request.method, request.url.path, request.headers["Authorization"]))
         self.urls.append(str(request.url))
+        self.json_bodies.append(json.loads(request.content) if request.content else None)
         return httpx.Response(200, json=self.responses.pop(0), request=request)
 
 
@@ -208,11 +210,14 @@ async def test_stream_uses_handshake_query_and_derives_segment_id(
         socket_factory=fake_socket_factory,
     )
 
-    stream = await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+    stream = await remote.connect_stream(
+        resume_code=None, device_label="Speakers", language="en", title="Daily review"
+    )
     events = [event async for event in stream.events()]
 
     assert (
-        fake_socket_factory.url == "ws://127.0.0.1:8000/ws/listening/?device=Speakers&language=en"
+        fake_socket_factory.url
+        == "ws://127.0.0.1:8000/ws/listening/?device=Speakers&language=en&title=Daily+review"
     )
     assert fake_socket_factory.socket.sent == []
     assert events == [
@@ -297,6 +302,40 @@ async def test_stream_includes_nonempty_resume_in_the_handshake_query(
         == "wss://broccoli.example/ws/listening/?resume=live+1&device=Laptop+speakers&language=en"
     )
     assert fake_socket_factory.headers == {"Authorization": "Token secret"}
+
+
+@pytest.mark.asyncio
+async def test_session_actions_send_persisted_metadata_and_delete_requests() -> None:
+    summary = {
+        "uuid_code": "session-2",
+        "title": "Renamed",
+        "status": "ended",
+        "started_at": "2026-08-19T11:00:00Z",
+        "ended_at": "2026-08-19T12:00:00Z",
+        "device_label": "Speakers",
+        "segment_count": 1,
+        "is_live": False,
+        "is_pinned": True,
+        "pinned_at": "2026-08-20T10:00:00Z",
+    }
+    transport = FakeTransport(responses=[summary, {}])
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        transport,
+        websocket_path="/ws/listening/",
+    )
+
+    updated = await remote.update_session("session-2", title="Renamed", is_pinned=True)
+    await remote.delete_session("session-2")
+
+    assert updated.title == "Renamed"
+    assert updated.is_pinned is True
+    assert transport.requests == [
+        ("PATCH", "/api/listening/desktop/sessions/session-2/", "Token secret"),
+        ("DELETE", "/api/listening/desktop/sessions/session-2/", "Token secret"),
+    ]
+    assert transport.json_bodies == [{"title": "Renamed", "is_pinned": True}, None]
 
 
 @pytest.mark.asyncio

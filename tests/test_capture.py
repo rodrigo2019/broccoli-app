@@ -203,6 +203,29 @@ def test_capture_session_attributes_pcm_to_its_source_channel(
     assert captured == [("mic", b"mic"), ("system", b"system")]
 
 
+def test_capture_session_reports_audio_levels_and_lifecycle(
+    fake_capture_backend: FakeCaptureBackend,
+) -> None:
+    levels: list[tuple[str, bytes]] = []
+    states: list[bool] = []
+    session = CaptureSession(
+        fake_capture_backend,
+        "mic-1",
+        "system-1",
+        lambda _, __: None,
+        on_audio_level=lambda channel, pcm: levels.append((channel, pcm)),
+        on_capture_state=states.append,
+    )
+
+    session.start()
+    fake_capture_backend.handles["mic-1"].emit(b"mic")
+    fake_capture_backend.handles["system-1"].emit(b"system")
+    session.stop()
+
+    assert levels == [("mic", b"mic"), ("system", b"system")]
+    assert states == [True, False]
+
+
 def test_stop_is_idempotent_and_drains_both_sources(
     fake_capture_backend: FakeCaptureBackend,
 ) -> None:

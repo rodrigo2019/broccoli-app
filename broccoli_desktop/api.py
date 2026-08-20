@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import json
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -11,7 +12,7 @@ from typing import Any, Protocol
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,9 +37,12 @@ from broccoli_desktop.models import (
 )
 from broccoli_desktop.remote import (
     ListeningRemote,
+    RemoteConflictError,
+    RemoteNotFoundError,
     RemoteProtocolError,
     RemoteRequestError,
     RemoteUnauthorizedError,
+    RemoteValidationError,
 )
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from broccoli_desktop.settings import DeviceSettings, InMemoryDeviceSettings
@@ -124,6 +128,10 @@ class Services:
     def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
         controller.set_authentication_failure_handler(self._on_background_authentication_failure)
+        controller.set_audio_level_callbacks(
+            self.audio_levels.record,
+            self.audio_levels.set_capture_active,
+        )
         selection = self.device_settings.load()
         if selection is not None:
             if _choices_are_available(self.capture_backend, selection):
@@ -161,6 +169,11 @@ class SessionRequest(BaseModel):
 
 class StartSessionRequest(SessionRequest):
     title: str = ""
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    is_pinned: bool | None = None
 
 
 class LoopbackHostMiddleware:
@@ -286,7 +299,7 @@ def create_app(services: Services) -> FastAPI:
     @app.put("/api/devices/selection", status_code=204)
     async def save_device_selection(request: SessionRequest) -> Response:
         choices = _validated_choices(services.capture_backend, request)
-        controller, _remote = _require_authenticated(services)
+        controller, remote = _require_authenticated(services)
         if _capture_is_active(controller):
             raise ApiError(409, "Stop the active capture before changing audio devices.")
         services.save_selected_devices(choices)
@@ -317,6 +330,20 @@ def create_app(services: Services) -> FastAPI:
     async def audio_levels() -> dict[str, object]:
         _require_authenticated(services)
         return _audio_level_payload(services.audio_levels.snapshot())
+
+    @app.get("/api/audio-levels/stream")
+    async def audio_levels_stream() -> StreamingResponse:
+        """Stream coalesced microphone/system levels to the capture footer."""
+        _require_authenticated(services)
+        return StreamingResponse(
+            _audio_level_events(services.audio_levels),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.delete("/api/audio-levels", status_code=204)
     async def stop_audio_levels() -> Response:
@@ -365,8 +392,55 @@ def create_app(services: Services) -> FastAPI:
         return _segment_page_payload(page)
 
     @app.patch("/api/sessions/{uuid_code}")
-    async def update_title(uuid_code: str) -> None:
-        raise ApiError(409, "This backend does not provide session history.")
+    async def update_session(uuid_code: str, request: SessionUpdateRequest) -> dict[str, object]:
+        controller, remote = _require_authenticated(services)
+        changes = request.model_dump(exclude_unset=True)
+        if not changes:
+            raise ApiError(422, "Choose a session property to update.")
+
+        title: str | None = None
+        is_pinned: bool | None = None
+        if "title" in changes:
+            raw_title = changes["title"]
+            if raw_title is None:
+                raise ApiError(422, "The session title is invalid.")
+            title = _validate_title(raw_title)
+        if "is_pinned" in changes:
+            raw_is_pinned = changes["is_pinned"]
+            if raw_is_pinned is None:
+                raise ApiError(422, "The pin state is invalid.")
+            is_pinned = raw_is_pinned
+
+        try:
+            session = await remote.update_session(uuid_code, title=title, is_pinned=is_pinned)
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except RemoteNotFoundError:
+            raise ApiError(404, "The requested session was not found.") from None
+        except RemoteValidationError:
+            raise ApiError(422, "The session changes are invalid.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+
+        controller.apply_session_metadata(session)
+        return _session_payload(session)
+
+    @app.delete("/api/sessions/{uuid_code}", status_code=204)
+    async def delete_session(uuid_code: str) -> Response:
+        _controller, remote = _require_authenticated(services)
+        try:
+            await remote.delete_session(uuid_code)
+        except RemoteUnauthorizedError:
+            _delete_invalid_credential(services)
+            raise ApiError(401, "Authentication is required.") from None
+        except RemoteNotFoundError:
+            raise ApiError(404, "The requested session was not found.") from None
+        except RemoteConflictError:
+            raise ApiError(409, "Stop the live capture before deleting this session.") from None
+        except (RemoteRequestError, RemoteProtocolError):
+            raise ApiError(503, "The remote service is unavailable.") from None
+        return Response(status_code=204)
 
     @app.post("/api/sessions", status_code=201)
     async def start_session(request: StartSessionRequest) -> dict[str, object]:
@@ -391,10 +465,11 @@ def create_app(services: Services) -> FastAPI:
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
     async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
         choices = _validated_choices(services.capture_backend, request)
-        controller, _remote = _require_authenticated(services)
+        controller, remote = _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
-            session = await controller.resume(uuid_code, choices)
+            existing = await remote.get_session(uuid_code)
+            session = await controller.resume(uuid_code, choices, title=existing.title)
         except RuntimeError:
             raise ApiError(409, "The current session cannot be changed.") from None
         except DeviceUnavailableError:
@@ -402,6 +477,8 @@ def create_app(services: Services) -> FastAPI:
         except RemoteUnauthorizedError:
             _delete_invalid_credential(services)
             raise ApiError(401, "Authentication is required.") from None
+        except RemoteNotFoundError:
+            raise ApiError(404, "The requested session was not found.") from None
         except (RemoteRequestError, RemoteProtocolError):
             raise ApiError(503, "The remote service is unavailable.") from None
         services.save_selected_devices(choices)
@@ -536,7 +613,8 @@ def _bootstrap_payload(
         "sessions": {"sessions": [], "next_cursor": None},
         "capabilities": {
             "history": True,
-            "remote_title": False,
+            "remote_title": True,
+            "session_actions": True,
             "user_resume": True,
             "segment_history": True,
         },
@@ -545,6 +623,45 @@ def _bootstrap_payload(
 
 def _device_payload(device: DeviceDescriptor) -> dict[str, str]:
     return {"device_id": device.device_id, "label": device.label, "kind": device.kind}
+
+
+async def _audio_level_events(monitor: AudioLevelMonitor) -> AsyncIterator[str]:
+    """Bridge capture-thread level snapshots into one bounded async SSE queue."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[AudioLevelSnapshot] = asyncio.Queue(maxsize=8)
+
+    def enqueue(snapshot: AudioLevelSnapshot) -> None:
+        def put() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(snapshot)
+            except asyncio.QueueFull:
+                pass
+
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(put)
+
+    monitor.subscribe(enqueue)
+    try:
+        yield _audio_level_sse_payload(monitor.snapshot())
+        while True:
+            try:
+                snapshot = await asyncio.wait_for(queue.get(), timeout=15)
+            except TimeoutError:
+                yield ": heartbeat\n\n"
+            else:
+                yield _audio_level_sse_payload(snapshot)
+    finally:
+        monitor.unsubscribe(enqueue)
+
+
+def _audio_level_sse_payload(snapshot: AudioLevelSnapshot) -> str:
+    payload = json.dumps(_audio_level_payload(snapshot), separators=(",", ":"))
+    return f"data: {payload}\n\n"
 
 
 def _audio_level_payload(snapshot: AudioLevelSnapshot) -> dict[str, object]:
@@ -565,6 +682,8 @@ def _session_payload(session: SessionSummary) -> dict[str, object]:
         "device_label": session.device_label,
         "segment_count": session.segment_count,
         "is_live": session.is_live,
+        "is_pinned": session.is_pinned,
+        "pinned_at": session.pinned_at,
     }
 
 

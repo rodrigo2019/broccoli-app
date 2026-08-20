@@ -16,6 +16,13 @@
     newSessionButton: document.querySelector("#newSessionButton"),
     loadMoreButton: document.querySelector("#loadMoreButton"),
     sessionLibrary: document.querySelector("#sessionLibrary"),
+    renameSessionModal: document.querySelector("#renameSessionModal"),
+    renameSessionInput: document.querySelector("#renameSessionInput"),
+    renameSessionCancel: document.querySelector("#renameSessionCancel"),
+    renameSessionConfirm: document.querySelector("#renameSessionConfirm"),
+    deleteSessionModal: document.querySelector("#deleteSessionModal"),
+    deleteSessionCancel: document.querySelector("#deleteSessionCancel"),
+    deleteSessionConfirm: document.querySelector("#deleteSessionConfirm"),
     backToTranscriptButton: document.querySelector("#backToTranscriptButton"),
     transcriptHeaderContext: document.querySelector("#transcriptHeaderContext"),
     settingsHeaderTitle: document.querySelector("#settingsHeaderTitle"),
@@ -99,6 +106,7 @@
     capabilities: {
       history: false,
       remote_title: false,
+      session_actions: false,
       user_resume: true,
       segment_history: false,
     },
@@ -116,8 +124,10 @@
     devices: [],
     settings: loadSettings(),
     audioTestActive: false,
-    audioTestTimer: null,
     audioMeterBars: { microphone: [], system: [] },
+    audioLevelSource: null,
+    renameSession: null,
+    deleteSession: null,
   };
 
   class CaptureMotion {
@@ -125,9 +135,9 @@
       this.microphoneHistogram = microphoneHistogram;
       this.systemHistogram = systemHistogram;
       this.histogramBars = { microphone: [], system: [] };
+      this.samples = { microphone: [], system: [] };
       this.captureState = "idle";
-      this.animationFrame = null;
-      this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      this.signalActive = false;
     }
 
     mount() {
@@ -141,7 +151,9 @@
         30,
         "capture-histogram__bar",
       );
-      this.paint(0);
+      this.samples.microphone = Array(this.histogramBars.microphone.length).fill(0);
+      this.samples.system = Array(this.histogramBars.system.length).fill(0);
+      this.paint();
     }
 
     createBars(container, count, className) {
@@ -160,49 +172,47 @@
 
     setState(connectionState) {
       this.captureState = connectionState;
-      if (this.isActive() && !this.reducedMotion) {
-        this.start();
-      } else {
-        this.stop();
-        this.paint(0);
-      }
+      this.paint();
     }
 
     isActive() {
       return ["starting", "streaming", "reconnecting"].includes(this.captureState);
     }
 
-    start() {
-      if (this.animationFrame !== null) return;
-      this.animationFrame = window.requestAnimationFrame((time) => this.tick(time));
+    setLevels(snapshot = {}) {
+      const channels = { microphone: snapshot.microphone, system: snapshot.system };
+      this.signalActive = Boolean(snapshot.active);
+      Object.entries(channels).forEach(([channel, measurement]) => {
+        const level = Math.max(0, Math.min(1, Number(measurement?.level) || 0));
+        const peak = Math.max(level, Math.min(1, Number(measurement?.peak) || 0));
+        const samples = this.samples[channel];
+        const bars = this.histogramBars[channel];
+        if (!bars.length) return;
+        samples.push({ level, peak });
+        while (samples.length > bars.length) samples.shift();
+      });
+      this.paint();
     }
 
-    stop() {
-      if (this.animationFrame === null) return;
-      window.cancelAnimationFrame(this.animationFrame);
-      this.animationFrame = null;
-    }
-
-    tick(time) {
-      this.animationFrame = null;
-      if (!this.isActive()) return;
-      this.paint(time);
-      this.start();
-    }
-
-    paint(time) {
-      const active = this.isActive();
-      const intensity = active && this.captureState === "streaming" ? 1 : 0.5;
+    paint() {
+      const active = this.signalActive && this.isActive();
       Object.entries(this.histogramBars).forEach(([channel, bars]) => {
-        const channelOffset = channel === "microphone" ? 0 : 2.4;
+        const samples = this.samples[channel];
+        const channelOffset = channel === "microphone" ? 0 : 1.8;
+        const peakIndex = samples.reduce(
+          (best, sample, index) => (sample.peak > (samples[best]?.peak || 0) ? index : best),
+          0,
+        );
         bars.forEach((bar, index) => {
-          const center = 1 - Math.abs(index / Math.max(bars.length - 1, 1) - 0.5) * 1.35;
-          const movement = 0.5 + 0.5 * Math.sin(time * 0.009 + index * 1.57 + channelOffset);
-          const pulse = 0.5 + 0.5 * Math.sin(time * 0.0043 + index * 0.61 + channelOffset);
-          const height = active
-            ? 16 + (movement * 0.64 + pulse * 0.36) * 68 * center * intensity
-            : 20 + (index % 4) * 5;
+          const sample = samples[index] || { level: 0, peak: 0 };
+          const envelope = Math.min(1, Math.sqrt(sample.level) * 1.6);
+          const profile = 0.82 + 0.18 * Math.sin(index * 1.37 + channelOffset);
+          const height = active ? 4 + envelope * 88 * profile : 4;
           bar.style.setProperty("--histogram-height", `${height.toFixed(1)}%`);
+          bar.classList.toggle(
+            "is-peak",
+            active && index === peakIndex && sample.peak > 0.04,
+          );
         });
       });
     }
@@ -273,10 +283,6 @@
   }
 
   function finishAudioTest(message = "Escolha os dispositivos e inicie o teste.") {
-    if (state.audioTestTimer !== null) {
-      window.clearInterval(state.audioTestTimer);
-      state.audioTestTimer = null;
-    }
     state.audioTestActive = false;
     renderAudioMeter("microphone");
     renderAudioMeter("system");
@@ -284,20 +290,44 @@
     renderAudioTestControls();
   }
 
-  async function refreshAudioTestLevels() {
+  function handleAudioLevelSnapshot(levels) {
+    if (!levels || typeof levels !== "object") return;
+    captureMotion.setLevels(levels);
     if (!state.audioTestActive) return;
-    try {
-      const levels = await localFetch("/api/audio-levels");
-      if (!state.audioTestActive) return;
-      if (!levels.active) {
-        finishAudioTest("O teste foi interrompido. Selecione os dispositivos novamente para tentar de novo.");
-        return;
-      }
-      renderAudioMeter("microphone", levels.microphone, true);
-      renderAudioMeter("system", levels.system, true);
-    } catch (error) {
-      finishAudioTest(error.message);
+    if (!levels.active) {
+      finishAudioTest(
+        "O teste foi interrompido. Selecione os dispositivos novamente para tentar de novo.",
+      );
+      return;
     }
+    renderAudioMeter("microphone", levels.microphone, true);
+    renderAudioMeter("system", levels.system, true);
+  }
+
+  function closeAudioLevelStream() {
+    const source = state.audioLevelSource;
+    state.audioLevelSource = null;
+    source?.close();
+  }
+
+  function connectAudioLevels() {
+    if (!state.authenticated || !("EventSource" in window)) return;
+    if (state.audioLevelSource && state.audioLevelSource.readyState !== EventSource.CLOSED) return;
+    closeAudioLevelStream();
+    const source = new EventSource("/api/audio-levels/stream");
+    state.audioLevelSource = source;
+    source.addEventListener("message", (event) => {
+      try {
+        handleAudioLevelSnapshot(JSON.parse(event.data));
+      } catch {
+        showStatus("Não foi possível processar o nível de áudio.", "error");
+      }
+    });
+    source.addEventListener("error", () => {
+      if (source.readyState === EventSource.CLOSED && state.audioLevelSource === source) {
+        state.audioLevelSource = null;
+      }
+    });
   }
 
   async function startAudioTest() {
@@ -322,9 +352,6 @@
       }
       elements.settingsAudioTestStatus.textContent = "Teste em execução. Fale no microfone e reproduza um som no computador.";
       renderAudioTestControls();
-      state.audioTestTimer = window.setInterval(() => {
-        refreshAudioTestLevels();
-      }, 120);
     } catch (error) {
       finishAudioTest(error.message);
     } finally {
@@ -357,6 +384,7 @@
     if (response.ok) {
       return response.status === 204 ? null : response.json();
     }
+    if (response.status === 401) closeAudioLevelStream();
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Não foi possível concluir esta ação.");
   }
@@ -530,6 +558,113 @@
     showStatus("Configurações restauradas.", "info");
   }
 
+  function sessionLabel(session) {
+    return session.title || session.device_label || session.uuid_code;
+  }
+
+  function sortSessions() {
+    state.sessions.sort((left, right) => {
+      if (Boolean(left.is_pinned) !== Boolean(right.is_pinned)) {
+        return left.is_pinned ? -1 : 1;
+      }
+      if (left.is_pinned && left.pinned_at !== right.pinned_at) {
+        return String(right.pinned_at || "").localeCompare(String(left.pinned_at || ""));
+      }
+      if (left.started_at !== right.started_at) {
+        return String(right.started_at || "").localeCompare(String(left.started_at || ""));
+      }
+      return String(left.uuid_code).localeCompare(String(right.uuid_code));
+    });
+  }
+
+  function pinIcon() {
+    const icon = document.createElement("span");
+    icon.className = "session-row-pin shrink-0 text-primary";
+    icon.setAttribute("aria-label", "Sessão fixada");
+    icon.title = "Sessão fixada";
+    icon.innerHTML = '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>';
+    return icon;
+  }
+
+  function closeSessionMenu(trigger) {
+    trigger?.blur();
+  }
+
+  function addSessionMenuAction(menu, { label, icon, className = "", disabled = false, onClick }) {
+    const item = document.createElement("li");
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = `session-menu-action ${className}`.trim();
+    action.disabled = disabled;
+    action.innerHTML = `${icon}<span>${label}</span>`;
+    action.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!disabled) onClick();
+    });
+    item.append(action);
+    menu.append(item);
+  }
+
+  function sessionActionMenu(session) {
+    const dropdown = document.createElement("div");
+    dropdown.className = "dropdown dropdown-end session-row-actions";
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className =
+      "session-menu-trigger btn btn-sm h-[30px] w-[30px] min-h-0 bg-transparent";
+    trigger.setAttribute("aria-label", `Opções para ${sessionLabel(session)}`);
+    trigger.title = "Opções da sessão";
+    trigger.innerHTML = '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>';
+    const menu = document.createElement("ul");
+    menu.className = "dropdown-content menu z-[1] w-36 rounded-box bg-base-100 p-1 shadow";
+    menu.tabIndex = 0;
+
+    addSessionMenuAction(menu, {
+      label: session.is_pinned ? "Desafixar" : "Fixar",
+      icon: session.is_pinned
+        ? '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>'
+        : '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m14 4 6 6-4 1-3 7-2-2-3 3-1-1 3-3-2-2 7-3Z"/></svg>',
+      onClick: () => {
+        closeSessionMenu(trigger);
+        updateSessionMetadata(session, { is_pinned: !session.is_pinned }).catch((error) =>
+          showStatus(error.message, "error"),
+        );
+      },
+    });
+    addSessionMenuAction(menu, {
+      label: "Renomear",
+      icon: '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+      onClick: () => {
+        closeSessionMenu(trigger);
+        openRenameSession(session);
+      },
+    });
+    addSessionMenuAction(menu, {
+      label: session.is_live ? "Excluir sessão ativa" : "Excluir",
+      icon: '<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>',
+      className: "text-error",
+      disabled: session.is_live,
+      onClick: () => {
+        closeSessionMenu(trigger);
+        openDeleteSession(session);
+      },
+    });
+    if (session.is_live) {
+      menu.lastElementChild?.querySelector("button")?.setAttribute(
+        "title",
+        "Pare a captura antes de excluir esta sessão.",
+      );
+    }
+
+    dropdown.append(trigger, menu);
+    const preventSessionSelection = (event) => event.stopPropagation();
+    dropdown.addEventListener("pointerdown", preventSessionSelection);
+    dropdown.addEventListener("mousedown", preventSessionSelection);
+    dropdown.addEventListener("mouseup", preventSessionSelection);
+    dropdown.addEventListener("click", preventSessionSelection);
+    return dropdown;
+  }
+
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
     elements.loadMoreButton.disabled =
@@ -559,28 +694,41 @@
       item.append(empty);
       elements.sessionLibrary.append(item);
     }
+    sortSessions();
     for (const session of state.sessions) {
       const item = document.createElement("li");
-      item.className = "min-w-0 max-w-full shrink-0 overflow-hidden rounded-md";
-      const row = document.createElement("button");
-      row.type = "button";
-      const active = state.selectedSession?.uuid_code === session.uuid_code;
-      row.className = active
-        ? "btn h-10 min-h-0 w-full min-w-0 max-w-full justify-start overflow-hidden rounded-md border-0 bg-primary/15 px-3 text-left text-base font-medium normal-case text-base-content hover:bg-primary/20"
-        : "btn btn-ghost h-10 min-h-0 w-full min-w-0 max-w-full justify-start overflow-hidden rounded-md px-3 text-left text-base font-medium normal-case";
-      row.dataset.testid = `session-row-${session.uuid_code}`;
-      const sessionLabel = session.title || session.device_label || session.uuid_code;
-      row.setAttribute("aria-label", `Abrir sessão ${sessionLabel}`);
-      row.title = sessionLabel;
+      item.className =
+        "session-library-item flex min-w-0 items-center rounded-md text-md transition-all duration-200 hover:bg-base-300/50";
+      item.classList.toggle("is-active", state.selectedSession?.uuid_code === session.uuid_code);
+      const content = document.createElement("div");
+      content.className = "session-row-content flex w-full min-w-0 items-center";
+      content.dataset.testid = `session-row-${session.uuid_code}`;
+      content.setAttribute("role", "button");
+      content.tabIndex = 0;
+      const label = sessionLabel(session);
+      content.setAttribute("aria-label", `Abrir sessão ${label}`);
+      const rowContent = document.createElement("span");
+      rowContent.className = "session-title-wrap flex min-w-0 grow flex-col overflow-hidden";
+      const titleLine = document.createElement("span");
+      titleLine.className = "flex min-w-0 items-center gap-1";
       const title = document.createElement("span");
-      title.className = "block min-w-0 flex-1 truncate text-left";
-      title.title = sessionLabel;
-      title.textContent = sessionLabel;
-      row.append(title);
-      row.addEventListener("click", () => {
+      title.className = "block min-w-0 whitespace-nowrap overflow-hidden text-ellipsis";
+      title.title = label;
+      title.textContent = label;
+      titleLine.append(title);
+      if (session.is_pinned) titleLine.append(pinIcon());
+      rowContent.append(titleLine);
+      content.append(rowContent);
+      content.addEventListener("click", () => {
         selectSession(session).catch((error) => showStatus(error.message, "error"));
       });
-      item.append(row);
+      content.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectSession(session).catch((error) => showStatus(error.message, "error"));
+      });
+      if (state.capabilities.session_actions) content.append(sessionActionMenu(session));
+      item.append(content);
       elements.sessionLibrary.append(item);
     }
   }
@@ -590,15 +738,9 @@
     if (index === -1) {
       state.sessions.unshift(session);
     } else {
-      const existing = state.sessions[index];
-      state.sessions[index] = {
-        ...existing,
-        ...session,
-        // Titles are local until the backend stores them. Do not let a remote
-        // history refresh erase the title already shown for the live row.
-        title: session.title || existing.title,
-      };
+      state.sessions[index] = { ...state.sessions[index], ...session };
     }
+    sortSessions();
   }
 
   async function loadSessions({ reset = false } = {}) {
@@ -623,6 +765,7 @@
       } else {
         state.sessions = sessions;
       }
+      sortSessions();
       state.nextCursor = page.next_cursor;
       if (state.selectedSession) {
         const refreshed = state.sessions.find(
@@ -697,15 +840,91 @@
     }
   }
 
+  async function updateSessionMetadata(session, changes) {
+    const updated = await localFetch(`/api/sessions/${encodeURIComponent(session.uuid_code)}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    });
+    mergeSession(updated);
+    if (state.selectedSession?.uuid_code === updated.uuid_code) {
+      state.selectedSession = { ...state.selectedSession, ...updated };
+    }
+    renderSessions();
+    renderSessionDetails();
+    const message = Object.hasOwn(changes, "is_pinned")
+      ? updated.is_pinned
+        ? "Sessão fixada."
+        : "Sessão desafixada."
+      : "Sessão renomeada.";
+    showStatus(message, "success");
+    return updated;
+  }
+
+  function openRenameSession(session) {
+    if (!elements.renameSessionModal || !elements.renameSessionInput) return;
+    state.renameSession = session;
+    elements.renameSessionInput.value = session.title || "";
+    elements.renameSessionInput.classList.remove("input-error");
+    elements.renameSessionModal.showModal();
+    window.setTimeout(() => {
+      elements.renameSessionInput.focus();
+      elements.renameSessionInput.select();
+    }, 0);
+  }
+
+  function closeRenameSession() {
+    state.renameSession = null;
+    elements.renameSessionModal?.close();
+  }
+
+  async function confirmRenameSession() {
+    const session = state.renameSession;
+    const input = elements.renameSessionInput;
+    if (!session || !input) return;
+    const title = input.value.trim();
+    if (!title) {
+      input.classList.add("input-error");
+      input.focus();
+      return;
+    }
+    input.classList.remove("input-error");
+    await updateSessionMetadata(session, { title });
+    closeRenameSession();
+  }
+
+  function openDeleteSession(session) {
+    if (session.is_live || !elements.deleteSessionModal) return;
+    state.deleteSession = session;
+    elements.deleteSessionModal.showModal();
+  }
+
+  function closeDeleteSession() {
+    state.deleteSession = null;
+    elements.deleteSessionModal?.close();
+  }
+
+  async function confirmDeleteSession() {
+    const session = state.deleteSession;
+    if (!session) return;
+    await localFetch(`/api/sessions/${encodeURIComponent(session.uuid_code)}`, { method: "DELETE" });
+    state.sessions = state.sessions.filter((item) => item.uuid_code !== session.uuid_code);
+    if (state.selectedSession?.uuid_code === session.uuid_code) {
+      state.selectedSession = null;
+      clearTimeline();
+    }
+    closeDeleteSession();
+    renderSessions();
+    renderSessionDetails();
+    showStatus("Sessão removida do histórico.", "success");
+  }
+
   function renderSessionDetails() {
     const session = state.selectedSession;
     elements.sessionTitle.value = session?.title || "";
     elements.sessionMeta.textContent = session
-      ? `Código ${session.uuid_code} · ${session.segment_count} segmentos · título somente local`
+      ? `Código ${session.uuid_code} · ${session.segment_count} segmentos`
       : "Inicie uma captura para gerar um código local.";
-    elements.sessionTitle.title = state.capabilities.remote_title
-      ? ""
-      : "Este título é mantido somente durante esta captura.";
+    elements.sessionTitle.title = "";
     elements.copyCodeButton.disabled = !session;
   }
 
@@ -889,11 +1108,12 @@
     return startSession();
   }
 
-  function saveLocalTitle() {
+  async function saveSessionTitle() {
     const session = state.selectedSession;
     if (!session) return;
-    state.selectedSession = { ...session, title: elements.sessionTitle.value.trim() };
-    renderSessionDetails();
+    const title = elements.sessionTitle.value.trim();
+    if (title === session.title) return;
+    await updateSessionMetadata(session, { title });
   }
 
   async function copySessionCode() {
@@ -923,6 +1143,7 @@
 
   function applyBootstrap(bootstrap, connectToEvents = true) {
     state.authenticated = bootstrap.authenticated;
+    if (!state.authenticated) closeAudioLevelStream();
     state.capabilities = bootstrap.capabilities;
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
@@ -940,6 +1161,7 @@
     clearTimeline();
     if (state.authenticated) {
       refreshDevices();
+      connectAudioLevels();
       if (connectToEvents) connectEvents();
       if (connectToEvents) {
         loadSessions({ reset: true }).catch((error) => showStatus(error.message, "error"));
@@ -998,6 +1220,7 @@
 
   async function signOut() {
     await stopAudioTest("Teste de áudio encerrado.");
+    closeAudioLevelStream();
     state.eventSocket?.close();
     state.eventSocket = null;
     await localFetch("/api/login", { method: "DELETE" });
@@ -1092,10 +1315,39 @@
   elements.captureToggleButton.addEventListener("click", () => {
     toggleCapture().catch((error) => showStatus(error.message, "error"));
   });
-  elements.sessionTitle.addEventListener("change", saveLocalTitle);
+  elements.sessionTitle.addEventListener("change", () => {
+    saveSessionTitle().catch((error) => {
+      renderSessionDetails();
+      showStatus(error.message, "error");
+    });
+  });
+  elements.renameSessionCancel.addEventListener("click", closeRenameSession);
+  elements.renameSessionConfirm.addEventListener("click", () => {
+    confirmRenameSession().catch((error) => showStatus(error.message, "error"));
+  });
+  elements.renameSessionInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmRenameSession().catch((error) => showStatus(error.message, "error"));
+    }
+  });
+  elements.renameSessionModal.addEventListener("close", () => {
+    state.renameSession = null;
+  });
+  elements.deleteSessionCancel.addEventListener("click", closeDeleteSession);
+  elements.deleteSessionConfirm.addEventListener("click", () => {
+    confirmDeleteSession().catch((error) => showStatus(error.message, "error"));
+  });
+  elements.deleteSessionModal.addEventListener("close", () => {
+    state.deleteSession = null;
+  });
   elements.copyCodeButton.addEventListener("click", copySessionCode);
   window.addEventListener("pagehide", () => {
     stopAudioTest().catch(() => {});
+    closeAudioLevelStream();
+  });
+  window.addEventListener("pageshow", () => {
+    if (state.authenticated) connectAudioLevels();
   });
 
   localFetch("/api/bootstrap")

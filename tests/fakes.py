@@ -139,21 +139,41 @@ class FakeSessionRemote:
         return SegmentPage((), None)
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
+        return await self.update_session(uuid_code, title=title)
+
+    async def update_session(
+        self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
+    ) -> SessionSummary:
         self._assert_authorized()
         summary = self.sessions[uuid_code]
-        updated = replace(summary, title=title)
+        updated = replace(
+            summary,
+            title=summary.title if title is None else title,
+            is_pinned=summary.is_pinned if is_pinned is None else is_pinned,
+            pinned_at=(
+                summary.pinned_at
+                if is_pinned is None
+                else "2026-08-20T10:00:00Z"
+                if is_pinned
+                else None
+            ),
+        )
         self.sessions[uuid_code] = updated
         return updated
 
+    async def delete_session(self, uuid_code: str) -> None:
+        self._assert_authorized()
+        del self.sessions[uuid_code]
+
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str
+        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
     ) -> FakeLiveRemoteStream:
         self._assert_authorized()
         uuid_code = resume_code or "session-1"
         if uuid_code not in self.sessions:
             self.sessions[uuid_code] = SessionSummary(
                 uuid_code=uuid_code,
-                title="",
+                title=title or "",
                 status="live",
                 started_at="2026-08-19T10:00:00Z",
                 ended_at=None,
@@ -161,6 +181,8 @@ class FakeSessionRemote:
                 segment_count=0,
                 is_live=True,
             )
+        elif resume_code is None and title is not None:
+            self.sessions[uuid_code] = replace(self.sessions[uuid_code], title=title)
         stream_index = len(self.streams)
         next_sequences = self.next_sequences[min(stream_index, len(self.next_sequences) - 1)]
         stream = FakeLiveRemoteStream(
@@ -267,15 +289,38 @@ class FakeListeningRemote:
         return self.segment_pages.get((uuid_code, cursor), SegmentPage((), None))
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
+        return await self.update_session(uuid_code, title=title)
+
+    async def update_session(
+        self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
+    ) -> SessionSummary:
         session = await self.get_session(uuid_code)
-        updated = replace(session, title=title)
+        updated = replace(
+            session,
+            title=session.title if title is None else title,
+            is_pinned=session.is_pinned if is_pinned is None else is_pinned,
+            pinned_at=(
+                session.pinned_at
+                if is_pinned is None
+                else "2026-08-20T10:00:00Z"
+                if is_pinned
+                else None
+            ),
+        )
         self.sessions[uuid_code] = updated
         return updated
 
+    async def delete_session(self, uuid_code: str) -> None:
+        self._assert_authorized()
+        try:
+            del self.sessions[uuid_code]
+        except KeyError:
+            raise RemoteProtocolError("Fake session was not configured.") from None
+
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str
+        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
     ) -> FakeRemoteStream:
-        del language
+        del language, title
         self._assert_authorized()
         self.stream_requests.append((resume_code, device_label))
         return self.stream

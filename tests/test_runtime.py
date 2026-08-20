@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -497,6 +498,60 @@ def test_console_interrupt_does_not_wait_for_blocked_native_teardown(
     while not window.destroyed and time.monotonic() < deadline:
         time.sleep(0.01)
     assert window.destroyed is True
+
+
+def test_console_interrupt_routes_pywebviews_replaced_handler_to_runtime_teardown(
+    fake_server: FakeServer,
+    fake_window: FakeWindow,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+    monkeypatch: Any,
+) -> None:
+    """PyWebView replacing SIGINT must still start the app's normal teardown."""
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    class FakeGui:
+        interrupt_calls = 0
+
+        def _sigint_handler(self, _signum: int, _frame: Any) -> None:
+            self.interrupt_calls += 1
+
+    gui = FakeGui()
+    original_interrupt_handler = gui._sigint_handler
+
+    class FakeWebView:
+        def initialize(self) -> FakeGui:
+            return gui
+
+        def start(self) -> None:
+            # This matches PyWebView's Windows backend, which replaces the
+            # application's handler after the runtime has installed it.
+            signal.signal(signal.SIGINT, gui._sigint_handler)
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            handler(signal.SIGINT, None)
+
+    monkeypatch.setitem(sys.modules, "webview", FakeWebView())
+
+    runtime = start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: fake_window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+    )
+
+    assert runtime is not None
+    assert gui.interrupt_calls == 1
+    assert gui._sigint_handler == original_interrupt_handler
+    assert fake_server.shutdown_calls == 1
+    assert fake_tray.stop_calls == 1
+    assert fake_window.destroyed is True
+    assert signal.getsignal(signal.SIGINT) is previous_handler
 
 
 def test_window_close_hides_instead_of_stopping_capture(

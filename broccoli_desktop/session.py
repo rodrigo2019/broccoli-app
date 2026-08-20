@@ -8,7 +8,12 @@ from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from broccoli_desktop.audio import AudioPipeline
-from broccoli_desktop.capture import CaptureBackend, CaptureSession, DeviceUnavailableError
+from broccoli_desktop.capture import (
+    CaptureBackend,
+    CaptureSession,
+    DeviceUnavailableError,
+    PcmCallback,
+)
 from broccoli_desktop.events import EventHub
 from broccoli_desktop.models import (
     AudioFrame,
@@ -62,11 +67,15 @@ class DesktopSessionController:
         *,
         clock: SleepClock | Callable[[float], Awaitable[None]] | None = None,
         on_authentication_failure: Callable[[], None] | None = None,
+        on_audio_level: PcmCallback | None = None,
+        on_capture_state: Callable[[bool], None] | None = None,
     ) -> None:
         self._remote = remote
         self._capture_backend = capture_backend
         self._clock = clock
         self._on_authentication_failure = on_authentication_failure
+        self._on_audio_level = on_audio_level
+        self._on_capture_state = on_capture_state
         self.events = EventHub()
         self.state = ConnectionState.IDLE
         self.pending_deltas: dict[str, TranscriptDelta] = {}
@@ -107,9 +116,11 @@ class DesktopSessionController:
         """Open a new remote session with a local capture title."""
         return await self._open(choices, resume_code=None, title=title)
 
-    async def resume(self, uuid_code: str, choices: CaptureChoices) -> SessionSummary:
+    async def resume(
+        self, uuid_code: str, choices: CaptureChoices, *, title: str | None = None
+    ) -> SessionSummary:
         """Resume the selected remote session with a fresh local capture lifecycle."""
-        return await self._open(choices, resume_code=uuid_code, title=None)
+        return await self._open(choices, resume_code=uuid_code, title=title)
 
     async def stop(self) -> None:
         """Stop capture before ending the remote session and publishing stopped."""
@@ -151,11 +162,34 @@ class DesktopSessionController:
         """Set the narrow local notification used when background recovery loses auth."""
         self._on_authentication_failure = callback
 
+    def set_audio_level_callbacks(
+        self,
+        on_audio_level: PcmCallback | None,
+        on_capture_state: Callable[[bool], None] | None,
+    ) -> None:
+        """Attach transient level reporting without retaining or forwarding PCM."""
+        self._on_audio_level = on_audio_level
+        self._on_capture_state = on_capture_state
+
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
-        """Update the active capture label without calling an unavailable remote endpoint."""
+        """Apply a remotely persisted title to the active local capture summary."""
         if self._session is None or self._session_uuid != uuid_code:
             raise RemoteProtocolError("The requested local session is not active.")
         summary = replace(self._session, title=title)
+        self._session = summary
+        self.events.publish(UiEvent(type="session", session=summary))
+        return summary
+
+    def apply_session_metadata(self, session: SessionSummary) -> SessionSummary:
+        """Synchronize metadata returned by the remote API without replacing live state."""
+        if self._session is None or self._session_uuid != session.uuid_code:
+            return session
+        summary = replace(
+            self._session,
+            title=session.title,
+            is_pinned=session.is_pinned,
+            pinned_at=session.pinned_at,
+        )
         self._session = summary
         self.events.publish(UiEvent(type="session", session=summary))
         return summary
@@ -196,6 +230,7 @@ class DesktopSessionController:
                 resume_code=resume_code,
                 device_label=self._device_label,
                 language=AUTO_DETECT_LANGUAGE,
+                title=title,
             )
             iterator = stream.events()
             started = await anext(iterator)
@@ -226,6 +261,8 @@ class DesktopSessionController:
                 choices.system_device_id,
                 self._on_pcm,
                 on_event=self._on_capture_event,
+                on_audio_level=self._on_audio_level,
+                on_capture_state=self._on_capture_state,
             )
             self._capture.start()
         except DeviceUnavailableError:
@@ -329,6 +366,7 @@ class DesktopSessionController:
                         resume_code=self._session_uuid,
                         device_label=self._device_label or "",
                         language=AUTO_DETECT_LANGUAGE,
+                        title=None,
                     )
                     previous_stream = self._recovery_stream
                     self._recovery_stream = stream
@@ -544,6 +582,7 @@ class DesktopSessionController:
                 resume_code=self._session_uuid,
                 device_label=self._device_label or "",
                 language=AUTO_DETECT_LANGUAGE,
+                title=None,
             )
         except Exception:
             return None
