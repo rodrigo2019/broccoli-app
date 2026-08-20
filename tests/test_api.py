@@ -181,9 +181,9 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="status-banner"' in response.text
     assert 'data-testid="transcript-timeline"' in response.text
     assert 'aria-label="Broccoli access token"' in response.text
-    assert 'aria-label="Search meeting sessions"' in response.text
-    assert 'aria-label="Microphone"' in response.text
-    assert 'aria-label="System audio"' in response.text
+    assert 'data-testid="session-search"' not in response.text
+    assert 'aria-label="Microfone"' in response.text
+    assert 'aria-label="Áudio do sistema"' in response.text
 
 
 def test_login_verifies_before_storing_the_token(

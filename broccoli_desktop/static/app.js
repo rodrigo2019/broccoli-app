@@ -7,10 +7,10 @@
     loginForm: document.querySelector("#loginForm"),
     tokenInput: document.querySelector("#tokenInput"),
     loginError: document.querySelector("#loginError"),
+    sidebarFooter: document.querySelector("#sidebarFooter"),
     logoutButton: document.querySelector("#logoutButton"),
     statusBanner: document.querySelector("#statusBanner"),
     statusMessage: document.querySelector("#statusMessage"),
-    sessionSearch: document.querySelector("#sessionSearch"),
     newSessionButton: document.querySelector("#newSessionButton"),
     loadMoreButton: document.querySelector("#loadMoreButton"),
     sessionLibrary: document.querySelector("#sessionLibrary"),
@@ -26,7 +26,13 @@
     copyCodeButton: document.querySelector("#copyCodeButton"),
     openBroccoliLink: document.querySelector("#openBroccoliLink"),
     recordingNotice: document.querySelector("#recordingNotice"),
+    recordingIdleNotice: document.querySelector("#recordingIdleNotice"),
+    recordingTime: document.querySelector("#recordingTime"),
     connectionBadge: document.querySelector("#connectionBadge"),
+    captureDock: document.querySelector("#captureDock"),
+    waveformBars: document.querySelector("#waveformBars"),
+    microphoneMeter: document.querySelector("#microphoneMeter"),
+    systemMeter: document.querySelector("#systemMeter"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
     emptyTimeline: document.querySelector("#emptyTimeline"),
   };
@@ -49,17 +55,106 @@
     sessionsLoading: false,
     sessionsRequestId: 0,
     segmentsLoading: false,
+    captureStartedAt: null,
+    captureTimer: null,
   };
 
   const badgeClasses = {
-    idle: "badge badge-neutral",
-    starting: "badge badge-info",
-    streaming: "badge badge-success",
-    reconnecting: "badge badge-warning",
-    stopped: "badge badge-neutral",
-    failed: "badge badge-error",
-    device_selection_required: "badge badge-error",
+    idle: "badge badge-neutral hidden sm:inline-flex",
+    starting: "badge badge-info hidden sm:inline-flex",
+    streaming: "badge badge-success hidden sm:inline-flex",
+    reconnecting: "badge badge-warning hidden sm:inline-flex",
+    stopped: "badge badge-neutral hidden sm:inline-flex",
+    failed: "badge badge-error hidden sm:inline-flex",
+    device_selection_required: "badge badge-error hidden sm:inline-flex",
   };
+
+  class CaptureMotion {
+    constructor({ waveformBars, microphoneMeter, systemMeter }) {
+      this.waveformBars = waveformBars;
+      this.microphoneMeter = microphoneMeter;
+      this.systemMeter = systemMeter;
+      this.waveBars = [];
+      this.meterBars = [];
+      this.captureState = "idle";
+      this.animationFrame = null;
+      this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+
+    mount() {
+      this.waveBars = this.createBars(this.waveformBars, 48, "wave-bar");
+      this.meterBars = [
+        ...this.createBars(this.microphoneMeter, 8, "meter-bar"),
+        ...this.createBars(this.systemMeter, 8, "meter-bar"),
+      ];
+      this.paint(0);
+    }
+
+    createBars(container, count, className) {
+      if (!container) return [];
+      container.replaceChildren();
+      const bars = [];
+      for (let index = 0; index < count; index += 1) {
+        const bar = document.createElement("span");
+        bar.className = className;
+        bar.setAttribute("aria-hidden", "true");
+        container.append(bar);
+        bars.push(bar);
+      }
+      return bars;
+    }
+
+    setState(connectionState) {
+      this.captureState = connectionState;
+      if (this.isActive() && !this.reducedMotion) {
+        this.start();
+      } else {
+        this.stop();
+        this.paint(0);
+      }
+    }
+
+    isActive() {
+      return ["starting", "streaming", "reconnecting"].includes(this.captureState);
+    }
+
+    start() {
+      if (this.animationFrame !== null) return;
+      this.animationFrame = window.requestAnimationFrame((time) => this.tick(time));
+    }
+
+    stop() {
+      if (this.animationFrame === null) return;
+      window.cancelAnimationFrame(this.animationFrame);
+      this.animationFrame = null;
+    }
+
+    tick(time) {
+      this.animationFrame = null;
+      if (!this.isActive()) return;
+      this.paint(time);
+      this.start();
+    }
+
+    paint(time) {
+      const active = this.isActive();
+      const intensity = active && this.captureState === "streaming" ? 1 : 0.5;
+      this.waveBars.forEach((bar, index) => {
+        const center = 1 - Math.abs(index / Math.max(this.waveBars.length - 1, 1) - 0.5) * 1.55;
+        const movement = 0.5 + 0.5 * Math.sin(time * 0.008 + index * 1.63);
+        const secondary = 0.5 + 0.5 * Math.sin(time * 0.0037 + index * 0.73 + 1.2);
+        const height = active ? 12 + (movement * 0.58 + secondary * 0.42) * 64 * center * intensity : 16 + (index % 3) * 4;
+        bar.style.setProperty("--wave-height", `${height.toFixed(1)}%`);
+      });
+      this.meterBars.forEach((bar, index) => {
+        const movement = 0.45 + 0.55 * Math.sin(time * 0.01 + index * 1.8);
+        bar.style.opacity = active ? `${0.55 + movement * 0.45 * intensity}` : "0.45";
+      });
+    }
+  }
+
+  const captureMotion = new CaptureMotion(elements);
+  captureMotion.mount();
 
   async function localFetch(path, options = {}) {
     const response = await fetch(path, {
@@ -97,7 +192,8 @@
   function renderView() {
     elements.loginView.classList.toggle("hidden", state.authenticated);
     elements.mainView.classList.toggle("hidden", !state.authenticated);
-    elements.logoutButton.classList.toggle("hidden", !state.authenticated);
+    elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
+    elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
   }
 
   function renderDevices(devices) {
@@ -121,19 +217,25 @@
     const empty = document.createElement("option");
     empty.value = "";
     empty.textContent = "Selecionar dispositivo";
+    empty.title = empty.textContent;
     select.append(empty);
     for (const device of devices) {
       const option = document.createElement("option");
       option.value = device.device_id;
       option.textContent = device.label;
+      option.title = device.label;
       option.selected = device.device_id === selectedDeviceId;
       select.append(option);
     }
+    syncDeviceSelectTitle(select);
+  }
+
+  function syncDeviceSelectTitle(select) {
+    select.title = select.selectedOptions[0]?.textContent || "";
   }
 
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
-    elements.sessionSearch.disabled = !state.capabilities.history;
     elements.loadMoreButton.disabled =
       !state.capabilities.history || state.sessionsLoading || !state.nextCursor;
     if (!state.capabilities.history) {
@@ -163,20 +265,25 @@
     }
     for (const session of state.sessions) {
       const item = document.createElement("li");
+      item.className = "min-w-0 max-w-full shrink-0 overflow-hidden";
       const row = document.createElement("button");
       row.type = "button";
       const active = state.selectedSession?.uuid_code === session.uuid_code;
       row.className = active
-        ? "btn btn-primary h-auto min-h-0 w-full flex-col items-start justify-start gap-1 px-3 py-3 text-left normal-case"
-        : "btn btn-ghost h-auto min-h-0 w-full flex-col items-start justify-start gap-1 px-3 py-3 text-left normal-case";
+        ? "btn h-auto min-h-0 w-full min-w-0 max-w-full flex-col items-start justify-start gap-1 overflow-hidden whitespace-normal border border-primary/20 bg-primary/15 px-3 py-3 text-left normal-case text-base-content hover:bg-primary/20"
+        : "btn btn-ghost h-auto min-h-0 w-full min-w-0 max-w-full flex-col items-start justify-start gap-1 overflow-hidden whitespace-normal px-3 py-3 text-left normal-case";
       row.dataset.testid = `session-row-${session.uuid_code}`;
       const sessionLabel = session.title || session.device_label || session.uuid_code;
       row.setAttribute("aria-label", `Abrir sessão ${sessionLabel}`);
+      row.title = sessionLabel;
       const title = document.createElement("span");
-      title.className = "w-full truncate text-left font-semibold";
+      title.className = "block w-full min-w-0 max-w-full truncate text-left font-semibold";
+      title.title = sessionLabel;
       title.textContent = sessionLabel;
       const details = document.createElement("span");
-      details.className = active ? "text-xs text-primary-content/75" : "text-xs text-base-content/60";
+      details.className = active
+        ? "block max-w-full truncate text-xs text-primary"
+        : "block max-w-full truncate text-xs text-base-content/60";
       details.textContent = `${session.segment_count} segmentos`;
       row.append(title, details);
       row.addEventListener("click", () => {
@@ -207,10 +314,8 @@
     if (!state.capabilities.history || (!reset && !state.nextCursor)) return;
     const requestId = ++state.sessionsRequestId;
     const cursor = reset ? null : state.nextCursor;
-    const query = elements.sessionSearch.value.trim();
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
-    if (query) params.set("q", query);
     state.sessionsLoading = true;
     renderSessions();
     try {
@@ -250,6 +355,39 @@
 
   function isCaptureActive() {
     return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
+  }
+
+  function formatCaptureTime(milliseconds) {
+    const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function updateCaptureTimer() {
+    if (isCaptureActive() && !state.captureStartedAt) {
+      state.captureStartedAt = Date.now();
+    }
+    if (state.captureStartedAt) {
+      elements.recordingTime.textContent = formatCaptureTime(Date.now() - state.captureStartedAt);
+    } else {
+      elements.recordingTime.textContent = "00:00";
+    }
+    if (isCaptureActive() && state.captureTimer === null) {
+      state.captureTimer = window.setInterval(updateCaptureTimer, 1000);
+    } else if (!isCaptureActive() && state.captureTimer !== null) {
+      window.clearInterval(state.captureTimer);
+      state.captureTimer = null;
+    }
+  }
+
+  function renderCaptureDock() {
+    const active = isCaptureActive();
+    elements.captureDock.dataset.captureState = state.connectionState;
+    elements.recordingNotice.classList.toggle("hidden", !active);
+    elements.recordingIdleNotice.classList.toggle("hidden", active);
+    captureMotion.setState(state.connectionState);
+    updateCaptureTimer();
   }
 
   async function selectSession(session) {
@@ -315,7 +453,6 @@
     elements.connectionBadge.className = badgeClasses[state.connectionState] || "badge badge-neutral";
     elements.connectionBadge.textContent = label;
     const active = state.connectionState === "starting" || state.connectionState === "streaming" || state.connectionState === "reconnecting";
-    elements.recordingNotice.classList.toggle("hidden", !active);
     elements.stopSessionButton.disabled = !active;
     elements.startSessionButton.disabled = active;
     elements.startSessionButton.textContent = state.selectedSession
@@ -328,6 +465,7 @@
       elements.deviceRequired.classList.remove("hidden");
       showStatus("Selecione os dispositivos antes de continuar.", "error");
     }
+    renderCaptureDock();
   }
 
   function isNearTimelineBottom() {
@@ -356,19 +494,33 @@
   function transcriptRow(entry, isDelta) {
     const row = document.createElement("article");
     row.className = isDelta
-      ? "card mb-3 border border-dashed border-base-300 bg-base-100/80 p-3 shadow-sm"
-      : "card mb-3 bg-base-100 p-3 shadow-sm";
+      ? "mb-8 flex max-w-2xl items-start gap-3 rounded-box border border-dashed border-base-300 bg-base-100/30 p-3"
+      : "mb-8 flex max-w-2xl items-start gap-3";
     row.dataset.utteranceId = entry.utterance_id;
+    const avatar = document.createElement("div");
+    avatar.className = "avatar placeholder shrink-0";
+    const avatarFace = document.createElement("div");
+    avatarFace.className = entry.channel === "mic"
+      ? "w-9 rounded-full bg-primary/20 text-sm font-semibold text-primary"
+      : "w-9 rounded-full bg-secondary/20 text-sm font-semibold text-secondary";
+    avatarFace.textContent = entry.channel === "mic" ? "V" : "P";
+    avatar.append(avatarFace);
+    const content = document.createElement("div");
+    content.className = "min-w-0 flex-1";
+    const heading = document.createElement("div");
+    heading.className = "mb-1 flex items-center gap-2";
+    const speaker = document.createElement("strong");
+    speaker.className = "text-sm font-semibold";
+    speaker.textContent = entry.channel === "mic" ? "Você" : "Participante";
     const timestamp = document.createElement("time");
-    timestamp.className = "text-xs text-base-content/60";
+    timestamp.className = "text-xs text-base-content/45";
     timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
-    const channel = document.createElement("span");
-    channel.className = entry.channel === "mic" ? "badge badge-primary badge-sm mb-2" : "badge badge-secondary badge-sm mb-2";
-    channel.textContent = entry.channel === "mic" ? "Você" : "Participantes";
     const text = document.createElement("p");
     text.className = isDelta ? "text-sm italic leading-relaxed text-base-content/70" : "text-sm leading-relaxed";
     text.textContent = entry.text;
-    row.append(timestamp, channel, text);
+    heading.append(speaker, timestamp);
+    content.append(heading, text);
+    row.append(avatar, content);
     return row;
   }
 
@@ -429,6 +581,7 @@
       return;
     }
     const previousConnectionState = state.connectionState;
+    const previousCaptureStartedAt = state.captureStartedAt;
     const currentSession = state.selectedSession;
     const path = currentSession
       ? `/api/sessions/${encodeURIComponent(currentSession.uuid_code)}/resume`
@@ -438,6 +591,7 @@
       : { ...devices, title: elements.sessionTitle.value };
     try {
       state.connectionState = "starting";
+      state.captureStartedAt = Date.now();
       clearTimeline();
       renderConnectionState();
       const session = await localFetch(path, {
@@ -450,6 +604,7 @@
       renderSessionDetails();
     } catch (error) {
       state.connectionState = previousConnectionState;
+      state.captureStartedAt = previousCaptureStartedAt;
       renderConnectionState();
       showStatus(error.message, "error");
     }
@@ -490,6 +645,7 @@
     }
     state.selectedSession = null;
     state.connectionState = "idle";
+    state.captureStartedAt = null;
     clearTimeline();
     renderSessions();
     renderSessionDetails();
@@ -503,6 +659,7 @@
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
+    state.captureStartedAt = isCaptureActive() ? state.captureStartedAt || Date.now() : null;
     if (connectToEvents || !state.authenticated) {
       state.sessions = bootstrap.sessions.sessions;
       state.nextCursor = bootstrap.sessions.next_cursor;
@@ -585,6 +742,7 @@
     state.selectedSession = null;
     state.selectedDevices = null;
     state.connectionState = "idle";
+    state.captureStartedAt = null;
     clearTimeline();
     renderView();
     renderSessions();
@@ -609,20 +767,18 @@
   });
   elements.logoutButton.addEventListener("click", () => signOut().catch((error) => showStatus(error.message, "error")));
   elements.newSessionButton.addEventListener("click", prepareNewSession);
-  let sessionSearchTimer = null;
-  elements.sessionSearch.addEventListener("input", () => {
-    window.clearTimeout(sessionSearchTimer);
-    sessionSearchTimer = window.setTimeout(
-      () => loadSessions({ reset: true }).catch((error) => showStatus(error.message, "error")),
-      250,
-    );
-  });
   elements.loadMoreButton.addEventListener("click", () =>
     loadSessions().catch((error) => showStatus(error.message, "error")),
   );
   elements.refreshDevicesButton.addEventListener("click", refreshDevices);
-  elements.microphoneSelect.addEventListener("change", updateDeviceRequirement);
-  elements.systemDeviceSelect.addEventListener("change", updateDeviceRequirement);
+  elements.microphoneSelect.addEventListener("change", () => {
+    syncDeviceSelectTitle(elements.microphoneSelect);
+    updateDeviceRequirement();
+  });
+  elements.systemDeviceSelect.addEventListener("change", () => {
+    syncDeviceSelectTitle(elements.systemDeviceSelect);
+    updateDeviceRequirement();
+  });
   elements.startSessionButton.addEventListener("click", startSession);
   elements.resumeSessionButton.addEventListener("click", startSession);
   elements.stopSessionButton.addEventListener("click", stopSession);
