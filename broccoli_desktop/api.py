@@ -197,38 +197,58 @@ class LoopbackHostMiddleware:
     def __init__(self, app: Any, *, port: int | None) -> None:
         self.app = app
         self._allowed_hosts = {"localhost", LOOPBACK_HOST}
+        self._allowed_origins: set[str] = set()
         if port is not None:
             self._allowed_hosts.update({f"localhost:{port}", f"{LOOPBACK_HOST}:{port}"})
+            self._allowed_origins.update(
+                {f"http://localhost:{port}", f"http://{LOOPBACK_HOST}:{port}"}
+            )
+
+    @staticmethod
+    def _header(scope: dict[str, Any], name: bytes) -> str:
+        return next(
+            (
+                value.decode("latin-1")
+                for key, value in scope.get("headers", [])
+                if key.lower() == name
+            ),
+            "",
+        )
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
-        host = next(
-            (
-                value.decode("latin-1")
-                for key, value in scope.get("headers", [])
-                if key.lower() == b"host"
-            ),
-            "",
-        )
-        if host.lower() in self._allowed_hosts:
-            await self.app(scope, receive, send)
+        host = self._header(scope, b"host")
+        if host.lower() not in self._allowed_hosts:
+            await self._reject(scope, send, status=400, detail="Local host required.")
             return
+        # A browser always sends Origin on a WebSocket handshake and on any
+        # cross-origin fetch, and WebSockets are not covered by the same-origin
+        # policy -- so this, not the Host header, is what separates the app's own
+        # window from a page the user happens to be visiting. A request with no
+        # Origin is a local non-browser caller and is left alone.
+        origin = self._header(scope, b"origin")
+        if origin and origin.lower() not in self._allowed_origins:
+            await self._reject(scope, send, status=403, detail="Local origin required.")
+            return
+        await self.app(scope, receive, send)
+
+    async def _reject(self, scope: dict[str, Any], send: Any, *, status: int, detail: str) -> None:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
         await send(
             {
                 "type": "http.response.start",
-                "status": 400,
+                "status": status,
                 "headers": [(b"content-type", b"application/json")],
             }
         )
         await send(
             {
                 "type": "http.response.body",
-                "body": b'{"detail":"Local host required."}',
+                "body": json.dumps({"detail": detail}).encode("utf-8"),
             }
         )
 

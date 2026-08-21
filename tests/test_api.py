@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from broccoli_desktop.api import Services, _audio_level_events, create_app
 from broccoli_desktop.credentials import CredentialStorageError
@@ -811,6 +812,47 @@ def test_host_header_must_name_the_local_loopback_service(client: TestClient) ->
     assert allowed.status_code == 200
     assert response.status_code == 400
     assert response.json() == {"detail": "Local host required."}
+
+
+def test_a_foreign_origin_cannot_open_the_event_socket(client: TestClient) -> None:
+    """A page on any other origin can reach ws://127.0.0.1:PORT because
+    WebSockets are not subject to the same-origin policy. Only the Origin
+    header separates the app's own window from that page."""
+    login(client)
+
+    with pytest.raises(WebSocketDisconnect) as rejection:
+        with client.websocket_connect(
+            "/api/events", headers={"origin": "http://evil.example"}
+        ) as websocket:
+            websocket.receive_json()
+
+    assert rejection.value.code == 1008
+
+
+def test_the_window_origin_still_opens_the_event_socket(client: TestClient) -> None:
+    login(client)
+
+    with client.websocket_connect(
+        "/api/events", headers={"origin": "http://127.0.0.1:8765"}
+    ) as websocket:
+        assert websocket.receive_json()["type"] == "bootstrap"
+
+
+def test_a_foreign_origin_cannot_reach_the_http_api(client: TestClient) -> None:
+    login(client)
+
+    response = client.get("/api/devices", headers={"origin": "http://evil.example"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Local origin required."}
+
+
+def test_a_request_without_an_origin_is_allowed(client: TestClient) -> None:
+    """Non-browser local callers -- the app's own httpx, a developer's curl --
+    send no Origin at all."""
+    login(client)
+
+    assert client.get("/api/devices").status_code == 200
 
 
 def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
