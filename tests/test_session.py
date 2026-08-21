@@ -657,12 +657,20 @@ async def test_capture_teardown_from_a_remote_end_does_not_freeze_the_event_loop
         await asyncio.sleep(0)
         turns += 1
 
-    # Reached at all only because the loop was never the thread doing the join.
+    # Reached at all only because the loop was never the thread doing the join,
+    # and the join really is still in progress: the parked close has not
+    # returned, so the handle it belongs to is not closed yet.
     assert turns == 5
-    assert release.is_set() is False
+    assert handle.closed is False
 
     release.set()
-    await settle()
+    # The reader task is what runs _end_from_remote, and it returns once the
+    # state has moved. Awaiting it is the exact barrier here; settle() is not,
+    # because this test widened the executor and a to_thread hop through a
+    # four-worker pool no longer orders behind the teardown job.
+    reader = controller._reader_task
+    assert reader is not None
+    await reader
 
     assert controller.state is ConnectionState.STOPPED
     assert fake_capture.closed_sources == {"mic-1", "system-1"}

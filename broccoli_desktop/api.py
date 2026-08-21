@@ -917,9 +917,40 @@ async def _send_events(
                     return
                 receive_task = asyncio.create_task(websocket.receive())
     finally:
+        # Cancel and hand off, rather than awaiting the two tasks here. This
+        # `finally` runs while the endpoint task is itself being cancelled --
+        # a browser closing the socket, a server shutdown, a test client
+        # leaving its `with` block -- and an `await` in that state raises
+        # CancelledError a second time, which anyio does not absorb: it came
+        # back out of WebSocketTestSession.__exit__ and turned the standard
+        # suite red about one run in ten. Nothing here needs the tasks to have
+        # finished before the endpoint returns; they hold a receive and a queue
+        # get, and the subscriber is removed by the caller. _reap_socket_task
+        # keeps a strong reference until each one really is done and retrieves
+        # its result so nothing is reported as never retrieved.
         for task in (receive_task, event_task):
             task.cancel()
-        await asyncio.gather(receive_task, event_task, return_exceptions=True)
+            _reap_socket_task(task)
+
+
+#: Strong references to the cancelled event-socket tasks, held until each one
+#: finishes. CPython keeps only a weak reference to a running task, so a task
+#: cancelled and then dropped can be collected before the cancellation has been
+#: delivered.
+_SOCKET_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _reap_socket_task(task: asyncio.Task[Any]) -> None:
+    """Hold a cancelled socket task until it finishes, then retrieve its result."""
+
+    def done(finished: asyncio.Task[Any]) -> None:
+        _SOCKET_TASKS.discard(finished)
+        if not finished.cancelled():
+            # Marks any exception retrieved; a normal result is simply dropped.
+            finished.exception()
+
+    _SOCKET_TASKS.add(task)
+    task.add_done_callback(done)
 
 
 #: Strong references to the closers below, held until each one finishes.
