@@ -208,7 +208,20 @@ class Services:
             # window's feed would go quiet with no visible cause.
             remote = self.remote_factory(token)
             self._remote = remote
-            self.controller.set_remote(remote)
+            try:
+                self.controller.set_remote(remote)
+            except RuntimeError:
+                # A run started between the settings save and this rebuild.
+                # save_settings refuses while a capture is active, but nothing
+                # holds that state still between the two, and set_remote
+                # refuses to swap the transport a live stream was opened
+                # through. Keeping the live run on its own transport is the
+                # right answer -- the alternative is the two disagreeing about
+                # where the audio goes -- so this run finishes on the old one
+                # and the next idle rebuild brings the two back together. The
+                # superseded remote stays usable: aclose only returns its
+                # pooled connections, and its client is rebuilt on demand.
+                pass
         return self.controller, self._remote
 
     def invalidate_remote(self) -> None:

@@ -1499,6 +1499,27 @@ def test_clearing_the_proxy_after_login_reaches_the_next_remote(
     assert built_with[-1] is None
 
 
+def test_a_capture_that_starts_after_a_proxy_save_keeps_its_own_transport(
+    client: TestClient, services: Services
+) -> None:
+    """save_settings refuses while a capture is active, but nothing holds that
+    state still between the check and the rebuild the next request performs.
+    A run that started in between must not turn that rebuild into a 500 -- and
+    must keep the transport its stream was opened through, since swapping it
+    underneath is what set_remote exists to refuse."""
+    login(client)
+    start_capture(client)
+    live_remote = services.controller._remote  # type: ignore[union-attr]
+    # The state save_settings' check cannot rule out: it passed while the
+    # controller was idle, and the run began before the invalidation landed.
+    services.invalidate_remote()
+
+    response = client.get("/api/session-name")
+
+    assert response.status_code == 200
+    assert services.controller._remote is live_remote  # type: ignore[union-attr]
+
+
 def test_a_proxy_change_is_refused_while_a_capture_is_running(
     client: TestClient, services: Services
 ) -> None:
