@@ -709,8 +709,14 @@ async def test_a_resumed_run_gets_one_sender_and_none_of_the_previous_audio(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
     """A second sender against the same queue would put ordering back in the
-    hands of whichever task wins the drain, and audio queued under the previous
-    run's offsets belongs to a session that is over."""
+    hands of whichever task wins the drain, and audio captured under the
+    previous run's offsets belongs to a session that is over.
+
+    The stale frame is posted with no await before the resume, which is the
+    only interesting way to post it: that leaves the capture thread's callback
+    still sitting in the loop's ready queue when the new run swaps the queue
+    out, so it lands in the new run's queue instead of the old one's.
+    """
     controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
     choices = CaptureChoices("mic-1", "system-1")
     await controller.start_new(choices, title="")
@@ -722,10 +728,13 @@ async def test_a_resumed_run_gets_one_sender_and_none_of_the_previous_audio(
     await settle()
     assert controller.state is ConnectionState.FAILED
 
+    controller._schedule_forward(frame_at(9_999))
     await controller.resume("session-1", choices)
     await settle()
 
-    assert first_sender is not None and first_sender.done()
+    # cancelled(), not done(): a sender that unwound into an exception is done
+    # too, and gather(return_exceptions=True) would swallow it.
+    assert first_sender is not None and first_sender.cancelled()
     assert controller._sender_task is not first_sender
     assert fake_remote.streams[-1].frames == []
 
@@ -754,3 +763,27 @@ def test_a_controller_reopened_on_a_second_event_loop_still_sends_audio(
         100,
         200,
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_frame_the_previous_run_handed_over_late_never_reaches_the_new_one(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """A capture thread can hand a frame over after its own run is finished:
+    CaptureSession.close() joins its worker with a timeout, so the join can
+    return before the last callback has been posted. Nothing here waits for the
+    loop between the hand-over and the next run streaming, which is the case a
+    state check cannot catch -- by the time the frame is read, the state is the
+    new run's and looks perfectly live."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    choices = CaptureChoices("mic-1", "system-1")
+    await controller.start_new(choices, title="")
+    await controller.stop()
+
+    controller._schedule_forward(frame_at(9_999))
+    await controller.start_new(choices, title="")
+    await settle()
+
+    assert fake_remote.streams[-1].frames == []
+
+    await controller.stop()

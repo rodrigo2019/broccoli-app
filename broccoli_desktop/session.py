@@ -101,6 +101,7 @@ class DesktopSessionController:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._dropped_frames = 0
         self._reported_dropping = False
+        self._run_generation = 0
         self._recovery_active = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -229,7 +230,6 @@ class DesktopSessionController:
             self._pipeline.next_offset_ms if previous_session and self._pipeline else 0
         )
         self._clear_buffered_frames()
-        self._reset_audio_queue()
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
@@ -239,8 +239,11 @@ class DesktopSessionController:
         # a window for a second caller to walk past the guard above. A run that
         # ended without stop() -- a device loss, a failed reconnect -- still owns
         # a sender, and two senders on one queue would put ordering back in the
-        # hands of whichever task wins the drain.
+        # hands of whichever task wins the drain. Cancel before resetting, the
+        # order stop() uses: the old sender has to finish with the queue it read
+        # from before that queue is replaced.
         await self._cancel_tasks()
+        self._reset_audio_queue()
         stream = None
         remote_period_started = False
         try:
@@ -472,9 +475,9 @@ class DesktopSessionController:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._enqueue_frame, frame)
+        loop.call_soon_threadsafe(self._enqueue_frame, frame, self._run_generation)
 
-    def _enqueue_frame(self, frame: AudioFrame) -> None:
+    def _enqueue_frame(self, frame: AudioFrame, generation: int) -> None:
         """Hand one frame to the sender, dropping the oldest when the socket is
         not keeping up.
 
@@ -482,7 +485,18 @@ class DesktopSessionController:
         queue that pins ~4.8 KB per frame at 20 frames/second/channel until the
         process dies. The user is told, because silent audio loss in a
         transcription product is worse than a visible gap.
+
+        The frame carries the run it was captured in, because a frame and the
+        state it is judged against no longer meet at the same moment: the
+        capture thread hands it over here, and _forward_frame does not see it
+        until the sender reads it back. A frame handed over late by a finished
+        run -- CaptureSession.close() joins its worker with a timeout, so the
+        join can return first -- would otherwise arrive when the next run is
+        streaming, look perfectly live to any state check, and be transmitted
+        under a finished session's offsets.
         """
+        if generation != self._run_generation:
+            return
         while True:
             try:
                 self._audio_queue.put_nowait(frame)
@@ -511,7 +525,12 @@ class DesktopSessionController:
         single place to apply backpressure.
         """
         while True:
-            frame = await self._audio_queue.get()
+            # Bound once per iteration: _reset_audio_queue re-binds the attribute
+            # between runs, and a get() and a task_done() that disagree about
+            # which queue they belong to corrupt the other one's counter -- or
+            # raise, on the way out of a cancel, where the error is swallowed.
+            queue = self._audio_queue
+            frame = await queue.get()
             try:
                 await self._forward_frame(frame)
             except asyncio.CancelledError:
@@ -519,7 +538,7 @@ class DesktopSessionController:
             except Exception:
                 logger.exception("[session] Failed to forward an audio frame")
             finally:
-                self._audio_queue.task_done()
+                queue.task_done()
 
     async def _forward_frame(self, frame: AudioFrame) -> None:
         stream = self._stream or self._recovery_stream
@@ -577,9 +596,11 @@ class DesktopSessionController:
         asyncio.Queue binds to the first event loop that waits on it, so a
         queue kept across runs would tie the controller to whichever loop
         opened the first one. The drop bookkeeping goes with it, so the next
-        stall is reported as its own.
+        stall is reported as its own, and the run generation moves on so that
+        frames captured for the run that just ended are refused on arrival.
         """
         self._audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
+        self._run_generation += 1
         self._dropped_frames = 0
         self._reported_dropping = False
 
