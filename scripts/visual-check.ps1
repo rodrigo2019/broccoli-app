@@ -129,6 +129,23 @@ try {
     if ($focused -eq "BODY#") {
         throw "Focus was left on the body after entering the capture screen."
     }
+
+    # The skip link is intentionally off-screen (`transform: translateY(-120%)`)
+    # except while focused, so `find ... click` -- which expects an actionable,
+    # in-viewport target -- is the wrong tool here; a synthetic click exercises
+    # the same click handler a real activation (mouse or Enter-on-link) fires.
+    # Focus starts outside #mainView on purpose, so landing inside it proves
+    # the skip link moved focus rather than merely finding it already there.
+    Invoke-Browser -BrowserArguments @("eval", "document.getElementById('sessionSearchInput').focus()") | Out-Null
+    Invoke-Browser -BrowserArguments @("eval", "document.querySelector('[data-testid=skip-to-main]').click()") | Out-Null
+    $skipLanded = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.getElementById('mainView').contains(document.activeElement)"
+    ) | ConvertFrom-Json)
+    if ($skipLanded -ne $true) {
+        throw "Activating the skip link did not move focus into #mainView."
+    }
+
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-ready.png"))
 
@@ -199,6 +216,30 @@ try {
         "--fn",
         "document.getElementById('sessionsSentinel').classList.contains('hidden')"
     )
+
+    # Reconciliation treats a row that arrived via infinite scroll the same as
+    # one from the initial page, but the suite should still exercise that path
+    # rather than only ever clicking a row that was there from the start.
+    # Scrolled fully into view first (`block: center`), not just "the list is
+    # scrolled somewhere" -- a target hugging the viewport edge is what made
+    # the click on this exact row unreliable earlier, not the app.
+    Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.querySelector('[data-testid=session-row-history-00]').scrollIntoView({ block: 'center' })"
+    ) | Out-Null
+    Invoke-Browser -BrowserArguments @("find", "testid", "session-row-history-00", "click")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#sessionTitle').value === 'Reuni$([char]0x00E3)o arquivada 00'"
+    )
+    $focused = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.activeElement.tagName + '#' + document.activeElement.id"
+    ) | ConvertFrom-Json)
+    if ($focused -eq "BODY#") {
+        throw "Focus was left on the body after opening a paginated sidebar session."
+    }
     # The search box shares the scroll container with the list, so a history
     # long enough to scroll is exactly what used to carry it out of view.
     $searchOffset = (Invoke-Browser -BrowserArguments @(

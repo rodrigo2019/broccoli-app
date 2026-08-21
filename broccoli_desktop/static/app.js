@@ -26,6 +26,7 @@
   }
 
   const elements = {
+    skipLink: document.querySelector("#skipLink"),
     loginView: document.querySelector("#loginView"),
     mainView: document.querySelector("#mainView"),
     settingsView: document.querySelector("#settingsView"),
@@ -912,6 +913,21 @@
     return element;
   }
 
+  /**
+   * Swap an existing icon's glyph in place, the same base ("bi") plus variant
+   * ("bi-<name>") composition icon() uses to build one from scratch. A plain
+   * `element.className = ...` reassignment would work today, but it silently
+   * drops any other class a future caller adds to that element on the next
+   * reconciliation pass -- the same failure mode the disabled-state fix
+   * elsewhere in this file exists to avoid.
+   */
+  function setIconName(element, name) {
+    for (const token of Array.from(element.classList)) {
+      if (token === "bi" || token.startsWith("bi-")) element.classList.remove(token);
+    }
+    element.classList.add("bi", `bi-${name}`);
+  }
+
   function pinIcon() {
     const element = icon("pin-angle-fill", "session-row-pin shrink-0 text-primary text-xs");
     element.removeAttribute("aria-hidden");
@@ -1011,7 +1027,7 @@
     const label = sessionLabel(session);
     menuRefs.trigger.setAttribute("aria-label", `Opções para ${label}`);
     menuRefs.pinRefs.text.textContent = session.is_pinned ? "Desafixar" : "Fixar";
-    menuRefs.pinRefs.iconElement.className = `bi bi-${session.is_pinned ? "pin-angle" : "pin-angle-fill"}`;
+    setIconName(menuRefs.pinRefs.iconElement, session.is_pinned ? "pin-angle" : "pin-angle-fill");
     menuRefs.deleteRefs.text.textContent = session.is_live ? "Excluir sessão ativa" : "Excluir";
     menuRefs.deleteRefs.action.disabled = session.is_live;
     if (session.is_live) {
@@ -1957,6 +1973,16 @@
       );
       elements.tokenInput.focus();
     }
+  });
+  // A same-page anchor click into a non-focusable target moves neither
+  // document.activeElement nor a screen reader's cursor -- the exact silence
+  // focusScreen exists to close everywhere else. #mainView carries no
+  // tabindex of its own, so the jump is done here instead of left to native
+  // anchor navigation, reusing the same focusScreen entry point as every
+  // other transition.
+  elements.skipLink?.addEventListener("click", (event) => {
+    event.preventDefault();
+    focusScreen(elements.mainView);
   });
   elements.settingsButton.addEventListener("click", showSettings);
   elements.backToTranscriptButton.addEventListener("click", showTranscript);
