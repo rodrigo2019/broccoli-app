@@ -9,11 +9,17 @@ from broccoli_desktop.events import EventHub
 from broccoli_desktop.models import AudioFrame, ConnectionState, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
 from broccoli_desktop.remote import RemoteFailure, RemoteProtocolError, RemoteRequestError
-from broccoli_desktop.session import CaptureChoices, DesktopSessionController
+from broccoli_desktop.session import (
+    AUDIO_QUEUE_MAX_FRAMES,
+    FRAME_DURATION_MS,
+    CaptureChoices,
+    DesktopSessionController,
+)
 from tests.fakes import (
     FakeCaptureBackend,
     FakeClock,
     FakeListeningRemote,
+    FakeLiveRemoteStream,
     FakeRemoteStream,
     FakeSessionRemote,
 )
@@ -43,6 +49,34 @@ def make_frames(milliseconds: int) -> list[AudioFrame]:
 async def settle() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+def frame_at(index: int) -> AudioFrame:
+    return AudioFrame(channel="mic", offset_ms=index * FRAME_DURATION_MS, pcm=b"\x00\x01" * 1200)
+
+
+async def capture_frames(controller: DesktopSessionController, count: int) -> None:
+    """Hand frames over the way the capture thread does.
+
+    Going through ``_schedule_forward`` keeps the loop hop under test instead of
+    reaching past it into whatever the controller keeps them in.
+    """
+    for index in range(count):
+        controller._schedule_forward(frame_at(index))
+    await settle()
+
+
+async def drain(stream: FakeLiveRemoteStream, *, expected: int) -> None:
+    """Give the loop room until the socket has been handed every frame.
+
+    Waiting on what the fake stream received, rather than on controller
+    internals, is what keeps the ordering assertion about the real path.
+    """
+    for _ in range(2_000):
+        if len(stream.frames) >= expected:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"Only {len(stream.frames)} of {expected} frames reached the remote.")
 
 
 class BlockingClock:
@@ -568,4 +602,155 @@ async def test_recovery_exhaustion_discards_buffered_frames_before_a_later_recon
 
     assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
         900
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_socket_bounds_the_queue_instead_of_growing(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Capture produces 20 frames/second/channel in real time. A socket that is
+    slow rather than broken never reaches RECONNECTING, so the reconnect buffer
+    never applies -- without a bound here, the frames just accumulate."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    fake_remote.streams[-1].block_sends()
+
+    await capture_frames(controller, AUDIO_QUEUE_MAX_FRAMES * 3)
+
+    assert controller._audio_queue.qsize() <= AUDIO_QUEUE_MAX_FRAMES
+    assert controller._dropped_frames > 0
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_dropping_audio_tells_the_user_once_per_stall(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Silent audio loss in a transcription product is worse than a visible gap,
+    but one warning per dropped frame would bury the rest of the UI."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    fake_remote.streams[-1].block_sends()
+
+    await capture_frames(controller, AUDIO_QUEUE_MAX_FRAMES * 2)
+
+    warnings = [event for event in controller.events.snapshot() if event.type == "warning"]
+    assert [event.message for event in warnings] == [
+        "Áudio está sendo descartado: a conexão não está acompanhando."
+    ]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_frames_reach_the_remote_in_offset_order(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """One consumer means ordering by construction. With a task per frame they
+    interleave at send()'s drain point and reach the socket out of order."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    stream.stagger_sends()
+
+    await capture_frames(controller, 20)
+    await drain(stream, expected=20)
+
+    assert [decode_audio_frame(frame).offset_ms for frame in stream.frames] == [
+        index * FRAME_DURATION_MS for index in range(20)
+    ]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_leaves_no_task_running(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    sender = controller._sender_task
+    reader = controller._reader_task
+
+    await controller.stop()
+
+    assert sender is not None and sender.done()
+    assert reader is not None and reader.done()
+    assert controller._sender_task is None
+    assert controller._reader_task is None
+    assert not controller._tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_during_a_stall_cancels_the_parked_sender_and_stays_idempotent(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """The sender is parked inside a send that will never return, which is
+    exactly when a stop that waits on it would hang instead of finishing."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    fake_remote.streams[-1].block_sends()
+    await capture_frames(controller, 4)
+    sender = controller._sender_task
+
+    await asyncio.wait_for(controller.stop(), timeout=1)
+    await controller.stop()
+
+    assert sender is not None and sender.done()
+    assert not controller._tasks
+    assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_gets_one_sender_and_none_of_the_previous_audio(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """A second sender against the same queue would put ordering back in the
+    hands of whichever task wins the drain, and audio queued under the previous
+    run's offsets belongs to a session that is over."""
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    choices = CaptureChoices("mic-1", "system-1")
+    await controller.start_new(choices, title="")
+    fake_remote.streams[-1].block_sends()
+    await capture_frames(controller, 4)
+    first_sender = controller._sender_task
+
+    await fake_remote.emit_credit_denied()
+    await settle()
+    assert controller.state is ConnectionState.FAILED
+
+    await controller.resume("session-1", choices)
+    await settle()
+
+    assert first_sender is not None and first_sender.done()
+    assert controller._sender_task is not first_sender
+    assert fake_remote.streams[-1].frames == []
+
+    await controller.stop()
+
+
+def test_a_controller_reopened_on_a_second_event_loop_still_sends_audio(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """One controller outlives the loop a single run was opened on: every local
+    API request drives its own. A queue held across runs would bind to the loop
+    that is gone and take the next run's sender down with it, silently."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    async def run_once() -> None:
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+        await capture_frames(controller, 3)
+        await drain(fake_remote.streams[-1], expected=3)
+        await controller.stop()
+
+    asyncio.run(run_once())
+    asyncio.run(run_once())
+
+    assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
+        0,
+        100,
+        200,
     ]

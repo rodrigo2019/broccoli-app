@@ -663,6 +663,15 @@ async def _send_events(
         await asyncio.gather(receive_task, event_task, return_exceptions=True)
 
 
+#: Strong references to the closers below, held until each one finishes.
+#: CPython keeps only a weak reference to a running task, so a bare create_task
+#: can be collected mid-close and leave the sockets it was returning open. This
+#: lives at module scope because _release_remote is a module function with no
+#: instance to hang it on, and because the tasks outlive the Services object
+#: whose remote they are closing.
+_RELEASE_TASKS: set[asyncio.Task[None]] = set()
+
+
 def _release_remote(remote: ListeningRemote | None) -> None:
     """Close a superseded remote's pooled connections, best effort.
 
@@ -678,7 +687,9 @@ def _release_remote(remote: ListeningRemote | None) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(closer())
+    task = loop.create_task(closer())
+    _RELEASE_TASKS.add(task)
+    task.add_done_callback(_RELEASE_TASKS.discard)
 
 
 def _remote_unavailable() -> JSONResponse:

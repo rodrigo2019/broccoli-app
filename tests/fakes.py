@@ -56,10 +56,38 @@ class FakeLiveRemoteStream:
     fail_close: bool = False
     closed: bool = False
     lifecycle: list[str] = field(default_factory=list)
+    blocked: asyncio.Event | None = None
+    stagger: int = 0
+    started_sends: int = 0
+
+    def block_sends(self) -> None:
+        """Stop acknowledging sends without closing.
+
+        This is the slow-socket case: not an error, so nothing ever reaches
+        RECONNECTING and the reconnect buffer never applies. The stream simply
+        never drains.
+        """
+        self.blocked = asyncio.Event()
+
+    def stagger_sends(self, yields: int = 32) -> None:
+        """Make each send take a different number of loop turns to complete.
+
+        A send that never yields lets even a task-per-frame producer look
+        ordered, because every task then runs start to finish before the next
+        one begins. Descending turns are what a real socket's drain point does
+        to concurrent senders: first in is not first out.
+        """
+        self.stagger = yields
 
     async def send_bytes(self, frame: bytes) -> None:
         if self.fail_send:
             raise FakeRemoteClosedError()
+        if self.blocked is not None:
+            await self.blocked.wait()
+        if self.stagger:
+            self.started_sends += 1
+            for _ in range(max(0, self.stagger - self.started_sends)):
+                await asyncio.sleep(0)
         self.frames.append(frame)
 
     async def send_control(self, message: dict[str, str]) -> None:

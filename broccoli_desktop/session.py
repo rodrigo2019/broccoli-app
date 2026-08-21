@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from broccoli_desktop.audio import AudioPipeline
 from broccoli_desktop.capture import (
@@ -45,6 +46,12 @@ MAX_BUFFERED_AUDIO_MS = 10_000
 FRAME_DURATION_MS = 100
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 15)
 AUTO_DETECT_LANGUAGE = ""
+
+#: The in-flight bound, deliberately equal to the reconnect buffer's: both are
+#: "ten seconds of audio", and if they drift apart one of them is wrong.
+AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
+
+logger = logging.getLogger(__name__)
 
 
 class SleepClock(Protocol):
@@ -89,6 +96,11 @@ class DesktopSessionController:
         self._choices: CaptureChoices | None = None
         self._device_label: str | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._audio_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
+        self._sender_task: asyncio.Task[None] | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._dropped_frames = 0
+        self._reported_dropping = False
         self._recovery_active = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -128,9 +140,8 @@ class DesktopSessionController:
             return
         self.stop_local_capture()
         self._clear_buffered_frames()
-        reader = self._reader_task
-        if reader is not None and reader is not asyncio.current_task():
-            reader.cancel()
+        await self._cancel_tasks()
+        self._reset_audio_queue()
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
@@ -218,11 +229,18 @@ class DesktopSessionController:
             self._pipeline.next_offset_ms if previous_session and self._pipeline else 0
         )
         self._clear_buffered_frames()
+        self._reset_audio_queue()
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
         self._device_label = self._selected_system_label(choices)
         self._set_state(ConnectionState.STARTING)
+        # After STARTING, so that waiting on a previous run's sender cannot open
+        # a window for a second caller to walk past the guard above. A run that
+        # ended without stop() -- a device loss, a failed reconnect -- still owns
+        # a sender, and two senders on one queue would put ordering back in the
+        # hands of whichever task wins the drain.
+        await self._cancel_tasks()
         stream = None
         remote_period_started = False
         try:
@@ -285,6 +303,10 @@ class DesktopSessionController:
             raise
         self.events.publish(UiEvent(type="session", session=summary))
         self._set_state(ConnectionState.STREAMING, session=summary)
+        # Started here, not beside `self._stream = stream`, so that an open which
+        # fails on the way to STREAMING cannot leave a sender running against a
+        # stream nobody owns any more.
+        self._sender_task = self._track(asyncio.create_task(self._send_audio_forever()))
         self._reader_task = asyncio.create_task(self._listen(iterator))
         return summary
 
@@ -450,7 +472,54 @@ class DesktopSessionController:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(self._forward_frame(frame)))
+        loop.call_soon_threadsafe(self._enqueue_frame, frame)
+
+    def _enqueue_frame(self, frame: AudioFrame) -> None:
+        """Hand one frame to the sender, dropping the oldest when the socket is
+        not keeping up.
+
+        Dropping is the honest failure here: the alternative is an unbounded
+        queue that pins ~4.8 KB per frame at 20 frames/second/channel until the
+        process dies. The user is told, because silent audio loss in a
+        transcription product is worse than a visible gap.
+        """
+        while True:
+            try:
+                self._audio_queue.put_nowait(frame)
+                return
+            except asyncio.QueueFull:
+                try:
+                    self._audio_queue.get_nowait()
+                    self._audio_queue.task_done()
+                except asyncio.QueueEmpty:
+                    return
+                self._dropped_frames += 1
+                if not self._reported_dropping:
+                    self._reported_dropping = True
+                    self.events.publish(
+                        UiEvent(
+                            type="warning",
+                            message="Áudio está sendo descartado: a conexão não está acompanhando.",
+                        )
+                    )
+
+    async def _send_audio_forever(self) -> None:
+        """The only consumer of the audio queue.
+
+        One consumer is what makes offset order a property of the code rather
+        than of which task wins the drain, and it is what gives the queue a
+        single place to apply backpressure.
+        """
+        while True:
+            frame = await self._audio_queue.get()
+            try:
+                await self._forward_frame(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[session] Failed to forward an audio frame")
+            finally:
+                self._audio_queue.task_done()
 
     async def _forward_frame(self, frame: AudioFrame) -> None:
         stream = self._stream or self._recovery_stream
@@ -467,11 +536,60 @@ class DesktopSessionController:
             self.enqueue_audio_frames([frame])
             await self._recover()
 
+    def _track(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        """Hold a strong reference for the task's lifetime.
+
+        CPython keeps only a weak reference to a running task, so a bare
+        create_task can be collected mid-flight. For a frame that means silent
+        audio loss; for _handle_device_loss it means a lost state transition.
+        """
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def _cancel_tasks(self) -> None:
+        """Cancel everything this controller started and wait for it to finish.
+
+        The current task is left out on purpose: these methods are reachable
+        from inside one of the very tasks being cancelled, and gathering a task
+        from within itself would deadlock instead of stopping.
+        """
+        current = asyncio.current_task()
+        pending = {
+            task
+            for task in (self._sender_task, self._reader_task, *self._tasks)
+            if task is not None and task is not current and not task.done()
+        }
+        self._sender_task = None
+        self._reader_task = None
+        self._tasks.clear()
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _reset_audio_queue(self) -> None:
+        """Give every run an empty queue of its own.
+
+        Audio queued for a run that is over would otherwise be flushed into the
+        next run's socket under the previous run's offsets. Replacing the queue
+        rather than draining it also keeps the controller loop-agnostic: an
+        asyncio.Queue binds to the first event loop that waits on it, so a
+        queue kept across runs would tie the controller to whichever loop
+        opened the first one. The drop bookkeeping goes with it, so the next
+        stall is reported as its own.
+        """
+        self._audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
+        self._dropped_frames = 0
+        self._reported_dropping = False
+
     def _on_capture_event(self, event: CaptureEvent) -> None:
         if event.type == "device_lost":
             loop = self._loop
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._handle_device_loss()))
+                loop.call_soon_threadsafe(
+                    lambda: self._track(asyncio.create_task(self._handle_device_loss()))
+                )
 
     async def _handle_device_loss(self) -> None:
         if self.state not in {
