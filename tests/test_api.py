@@ -151,6 +151,14 @@ def login(client: TestClient, *, key: str | None = None) -> None:
     assert response.status_code == 204
 
 
+def start_capture(client: TestClient) -> None:
+    response = client.post(
+        "/api/sessions",
+        json={"title": "Reunião", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+    assert response.status_code == 201
+
+
 def login_with_visual_token(client: TestClient) -> None:
     """Authenticate an in-process visual server with its fixed fake-only credential."""
     response = client.post(
@@ -1106,3 +1114,19 @@ def test_a_supplied_title_is_never_replaced_by_a_generated_one(client: TestClien
 
     assert response.json()["title"] == "Retrospectiva da sprint"
     client.post("/api/sessions/stop")
+
+
+def test_login_during_a_capture_is_refused(client: TestClient, services: Services) -> None:
+    """set_authenticated replaces the controller outright. The old one keeps two
+    open WASAPI streams and a remote socket with nothing left holding a
+    reference that can stop them -- the microphone stays open until the process
+    exits."""
+    login(client)
+    start_capture(client)
+    original = services.controller
+
+    response = client.post("/api/login", json={"token": "another-token"})
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "A capture is active."}
+    assert services.controller is original

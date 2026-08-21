@@ -324,13 +324,16 @@ def _install_capability_key_log_redaction() -> None:
 def create_uvicorn_config(app: FastAPI, *, port: int) -> uvicorn.Config:
     """Return a Uvicorn configuration that never binds an external interface.
 
+    The graceful-shutdown timeout is explicit because the default waits forever
+    and the SSE meter stream never ends on its own.
+
     Constructing ``uvicorn.Config`` runs its one-time ``configure_logging()``,
     which is why the redaction filter is installed after it: anything
     attached before would be wiped out by that call, and nothing later in
     ``UvicornLoopbackServer`` or ``tests/visual_server.py`` reconfigures
     logging again.
     """
-    config = uvicorn.Config(app, host=LOOPBACK_HOST, port=port)
+    config = uvicorn.Config(app, host=LOOPBACK_HOST, port=port, timeout_graceful_shutdown=3)
     _install_capability_key_log_redaction()
     return config
 
@@ -416,6 +419,8 @@ def create_app(services: Services) -> FastAPI:
         token = request.token.strip()
         if not token:
             raise ApiError(422, "A credential is required.")
+        if services.controller is not None and _capture_is_active(services.controller):
+            raise ApiError(409, "A capture is active.")
         remote = services.remote_factory(token)
         try:
             await remote.verify_token()
