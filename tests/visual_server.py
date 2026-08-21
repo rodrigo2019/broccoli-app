@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import uvicorn
 
-from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app
+from broccoli_desktop.api import Services, create_app, create_uvicorn_config
 from broccoli_desktop.models import DeviceDescriptor
 from tests.fakes import (
     FakeCaptureBackend,
@@ -56,11 +56,18 @@ def create_visual_app(*, port: int):
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Run the fake-only server on an explicitly selected loopback port."""
+    """Run the fake-only server on an explicitly selected loopback port.
+
+    Built through ``create_uvicorn_config`` rather than ``uvicorn.run(...)``
+    directly, so this fixed test token gets the same log redaction the
+    production path does -- ``uvicorn.run`` builds its own ``uvicorn.Config``
+    internally, with no hook to install anything on it afterward.
+    """
     parser = argparse.ArgumentParser(prog="python -m tests.visual_server")
     parser.add_argument("--port", type=int, required=True)
     arguments = parser.parse_args(argv)
-    uvicorn.run(create_visual_app(port=arguments.port), host=LOOPBACK_HOST, port=arguments.port)
+    config = create_uvicorn_config(create_visual_app(port=arguments.port), port=arguments.port)
+    uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":

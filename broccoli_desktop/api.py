@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import secrets
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -276,9 +278,61 @@ class LoopbackHostMiddleware:
         )
 
 
+# Matches the `k` query parameter uvicorn prints verbatim in two independent
+# places: the HTTP access log (`uvicorn.access`, gated by `access_log` -- but
+# EventSource and the initial window navigation are plain GETs that go
+# through it) and the WebSocket handshake log, which uses a *different*
+# logger (`uvicorn.error`) that `access_log=False` does not touch at all.
+_CAPABILITY_KEY_QUERY_PATTERN = re.compile(r'([?&]k=)[^&\s"]*')
+
+
+class _RedactCapabilityKeyFilter(logging.Filter):
+    """Strip the loopback capability token out of uvicorn's own log lines.
+
+    Neither WebSocket nor EventSource can carry the token as a header, so it
+    travels in the URL's `k` query parameter instead -- and uvicorn logs that
+    raw URL verbatim on every request/handshake. Redacting in place (rather
+    than disabling the loggers outright) keeps the rest of the line -- method,
+    path, status code -- intact for anyone troubleshooting from these logs.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _CAPABILITY_KEY_QUERY_PATTERN.sub(r"\1REDACTED", value)
+                if isinstance(value, str)
+                else value
+                for value in record.args
+            )
+        elif isinstance(record.msg, str):
+            record.msg = _CAPABILITY_KEY_QUERY_PATTERN.sub(r"\1REDACTED", record.msg)
+        return True
+
+
+def _install_capability_key_log_redaction() -> None:
+    """Attach the redaction filter to both loggers that print the raw URL.
+
+    Safe to call more than once: a logger already carrying the filter is left
+    alone instead of gaining a second one.
+    """
+    for name in ("uvicorn.access", "uvicorn.error"):
+        target = logging.getLogger(name)
+        if not any(isinstance(existing, _RedactCapabilityKeyFilter) for existing in target.filters):
+            target.addFilter(_RedactCapabilityKeyFilter())
+
+
 def create_uvicorn_config(app: FastAPI, *, port: int) -> uvicorn.Config:
-    """Return a Uvicorn configuration that never binds an external interface."""
-    return uvicorn.Config(app, host=LOOPBACK_HOST, port=port)
+    """Return a Uvicorn configuration that never binds an external interface.
+
+    Constructing ``uvicorn.Config`` runs its one-time ``configure_logging()``,
+    which is why the redaction filter is installed after it: anything
+    attached before would be wiped out by that call, and nothing later in
+    ``UvicornLoopbackServer`` or ``tests/visual_server.py`` reconfigures
+    logging again.
+    """
+    config = uvicorn.Config(app, host=LOOPBACK_HOST, port=port)
+    _install_capability_key_log_redaction()
+    return config
 
 
 def create_app(services: Services) -> FastAPI:

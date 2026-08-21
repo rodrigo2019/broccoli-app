@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,7 +11,13 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from broccoli_desktop.api import Services, _audio_level_events, create_app
+from broccoli_desktop.api import (
+    Services,
+    _audio_level_events,
+    _RedactCapabilityKeyFilter,
+    create_app,
+    create_uvicorn_config,
+)
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
@@ -914,6 +921,63 @@ def test_the_event_socket_requires_the_capability_token(
 
     with tokened_client.websocket_connect("/api/events?k=launch-key") as websocket:
         assert websocket.receive_json()["type"] == "bootstrap"
+
+
+def test_creating_the_uvicorn_config_installs_capability_key_log_redaction(
+    services: Services,
+) -> None:
+    """uvicorn logs the raw request URL in two places uvicorn's own
+    `access_log` flag does not fully cover: the HTTP access log
+    (`uvicorn.access`) and, independently, the WebSocket handshake log
+    (`uvicorn.error`) -- both need the filter, or the launch key that rides
+    in `?k=` reaches a log regardless."""
+    create_uvicorn_config(create_app(services), port=8765)
+
+    for logger_name in ("uvicorn.access", "uvicorn.error"):
+        filters = logging.getLogger(logger_name).filters
+        assert any(isinstance(installed, _RedactCapabilityKeyFilter) for installed in filters)
+
+
+def test_the_capability_key_redaction_filter_strips_a_logged_request_line() -> None:
+    """Directly exercises the filter uvicorn's own log records pass through --
+    once shaped like its HTTP access log line, once like its WebSocket
+    handshake line -- since neither goes anywhere near our own middleware or
+    a TestClient (both are logged by uvicorn's protocol implementations,
+    which only run against a real socket)."""
+    token = "super-secret-launch-key"
+    redact = _RedactCapabilityKeyFilter()
+
+    http_record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:54321", "GET", f"/?k={token}", "1.1", 200),
+        exc_info=None,
+    )
+    websocket_record = logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "WebSocket %s" [accepted]',
+        args=("127.0.0.1:54321", f"/api/events?k={token}"),
+        exc_info=None,
+    )
+
+    assert redact.filter(http_record) is True
+    assert redact.filter(websocket_record) is True
+
+    http_message = http_record.getMessage()
+    websocket_message = websocket_record.getMessage()
+
+    assert token not in http_message
+    assert token not in websocket_message
+    # The rest of the line -- what actually helps someone debugging a report --
+    # survives the redaction untouched.
+    assert http_message == '127.0.0.1:54321 - "GET /?k=REDACTED HTTP/1.1" 200'
+    assert websocket_message == '127.0.0.1:54321 - "WebSocket /api/events?k=REDACTED" [accepted]'
 
 
 def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(
