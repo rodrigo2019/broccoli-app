@@ -1,14 +1,47 @@
 (() => {
   "use strict";
 
-  // The launch key arrives once, in the URL the native window opened. Read it,
-  // then strip it from the address bar so it is not sitting in a visible URL for
-  // the rest of the session. It never goes to storage and never leaves loopback.
-  const CAPABILITY_KEY = new URLSearchParams(window.location.search).get("k") || "";
-  if (CAPABILITY_KEY) {
-    const clean = window.location.pathname + window.location.hash;
-    window.history.replaceState(null, "", clean);
+  // The launch key arrives once, in the URL the native window opened.
+  //
+  // It used to be read and then stripped with history.replaceState, with
+  // nothing kept anywhere. That made any reload of the current URL fatal:
+  // WebView2 enables F5/Ctrl-R by default, a renderer crash reloads, and the
+  // context menu offers it -- and the reloaded page had no key at all. The
+  // shell and /static/* still serve, so the window rendered normally, but
+  // every /api/* answered 403 and the event socket closed with 1008. No
+  // bootstrap ever arrived, so state.authenticated stayed false and the socket
+  // close handler bailed without retrying; typing a token only produced "Esta
+  // ação só pode partir do aplicativo.". The window was dead until relaunch
+  // and nothing said so.
+  //
+  // sessionStorage is what makes a reload survivable while keeping the
+  // original intent. It is scoped to this one window and is dropped when the
+  // window closes, so the key still lives exactly one launch -- unlike
+  // localStorage, which would hand a stale key to the next launch. The key
+  // stays out of the address bar, and it never leaves loopback either way.
+  const CAPABILITY_STORAGE_KEY = "broccoli-desktop-launch-key";
+
+  function readCapabilityKey() {
+    const fromUrl = new URLSearchParams(window.location.search).get("k") || "";
+    if (fromUrl) {
+      try {
+        window.sessionStorage.setItem(CAPABILITY_STORAGE_KEY, fromUrl);
+      } catch {
+        // Storage denied: this load still works, a reload will not. The 403
+        // handler in localFetch is what tells the user in that case.
+      }
+      const clean = window.location.pathname + window.location.hash;
+      window.history.replaceState(null, "", clean);
+      return fromUrl;
+    }
+    try {
+      return window.sessionStorage.getItem(CAPABILITY_STORAGE_KEY) || "";
+    } catch {
+      return "";
+    }
   }
+
+  const CAPABILITY_KEY = readCapabilityKey();
 
   // An earlier version of the settings screen persisted the whole proxy panel
   // -- password included, in clear text -- under this key. The proxy now
@@ -77,6 +110,9 @@
     settingsSystemLevel: document.querySelector("#settingsSystemLevel"),
     settingsAudioTestStatus: document.querySelector("#settingsAudioTestStatus"),
     settingsAudioTestButton: document.querySelector("#settingsAudioTestButton"),
+    networkSettingsButton: document.querySelector("#networkSettingsButton"),
+    settingsDevicesSection: document.querySelector("#settingsDevicesSection"),
+    settingsAppearanceSection: document.querySelector("#settingsAppearanceSection"),
     themeLightOption: document.querySelector("#themeLightOption"),
     themeDarkOption: document.querySelector("#themeDarkOption"),
     proxyEnabled: document.querySelector("#proxyEnabled"),
@@ -679,14 +715,60 @@
 
   // The API keeps returning machine-readable English detail strings -- that is the
   // right contract for an API. The interface is pt-BR, so the mapping lives here.
+  //
+  // This table covers every `detail` the local API can produce: each ApiError in
+  // api.py, each JSONResponse detail raised by its exception handlers and by
+  // _remote_unavailable, the three LoopbackHostMiddleware rejections, and the
+  // device_error detail the audio-level SSE stream emits. A partial table is
+  // worse than no table: an unmapped detail reaches the user as the generic
+  // "tente novamente" toast, which is correct Portuguese that says nothing,
+  // where the untranslated English at least named the problem. If you add an
+  // ApiError, add its line here -- translateApiMessage logs a warning naming
+  // the missing key when one slips through.
   const API_MESSAGES = {
-    "The session title is invalid.": "O título da reunião não é válido.",
-    "A capture is active.": "Já existe uma captura em andamento.",
+    // Authentication and the local-origin guards.
+    "A credential is required.": "Informe o token de acesso.",
+    "Authentication is required.": "Faça login novamente para continuar.",
+    "Credential storage is unavailable.": "O armazenamento de credenciais não está disponível.",
     "Local host required.": "Esta ação só pode partir do aplicativo.",
     "Local origin required.": "Esta ação só pode partir do aplicativo.",
-    "Local key required.": "Esta ação só pode partir do aplicativo.",
+    // Distinct from the two above on purpose: this one means the window lost
+    // the launch key its process was started with -- reloading normally
+    // recovers it from sessionStorage, so reaching this message means even
+    // that failed and only a relaunch will fix the window. Saying "só pode
+    // partir do aplicativo" here would leave the user retrying inside an
+    // application that can no longer talk to its own service.
+    "Local key required.":
+      "Esta janela perdeu a chave desta sessão. Feche e abra o Broccoli Desktop novamente.",
+    // Requests the server could not parse or accept.
+    "Invalid request.": "Não foi possível processar os dados enviados.",
+    "The session changes are invalid.": "As alterações da reunião não são válidas.",
+    "Choose a session property to update.": "Escolha o que deseja alterar na reunião.",
+    "The session title is invalid.": "O título da reunião não é válido.",
+    "The pin state is invalid.": "Não foi possível alterar a fixação da reunião.",
+    // Capture lifecycle conflicts.
+    "A capture is active.": "Já existe uma captura em andamento.",
+    "The current session cannot be changed.": "Não é possível alterar a reunião em andamento.",
+    "Stop the active capture before changing audio devices.":
+      "Pare a captura em andamento antes de alterar os dispositivos de áudio.",
+    "Stop the active capture before testing audio devices.":
+      "Pare a captura em andamento antes de testar os dispositivos de áudio.",
+    "Stop the live capture before deleting this session.":
+      "Pare a captura em andamento antes de excluir esta reunião.",
+    // Audio devices.
+    "Select an available microphone and system device.":
+      "Selecione um microfone e uma saída de áudio disponíveis.",
+    "The selected capture device is unavailable.":
+      "O dispositivo de captura selecionado não está disponível.",
+    "The selected audio device is unavailable.":
+      "O dispositivo de áudio selecionado não está disponível.",
+    // Remote service.
+    "The remote service is unavailable.": "O serviço do Broccoli não está disponível.",
+    "The requested session was not found.": "A reunião solicitada não foi encontrada.",
+    // Proxy settings.
     "Proxy host and port are required.": "Informe o endereço e a porta do proxy.",
-    "Credential storage is unavailable.": "O armazenamento de credenciais não está disponível.",
+    "Stop the active capture before changing the proxy.":
+      "Pare a captura em andamento antes de alterar o proxy.",
   };
 
   function translateApiMessage(detail) {
@@ -749,22 +831,37 @@
   }
 
   function renderView() {
-    const settingsOpen = state.authenticated && state.activeView === "settings";
-    elements.loginView.classList.toggle("hidden", state.authenticated);
+    // Not gated on authentication any more. The proxy panel is the one screen
+    // that has to work before signing in -- a corporate proxy can be exactly
+    // what stands between this window and the login request -- which is why
+    // /api/settings is unauthenticated on the server. Keeping the screen itself
+    // behind `state.authenticated` made that server-side decision unreachable.
+    const settingsOpen = state.activeView === "settings";
+    elements.loginView.classList.toggle("hidden", state.authenticated || settingsOpen);
     elements.mainView.classList.toggle("hidden", !state.authenticated || settingsOpen);
     // #mainView is what the skip link jumps to, and it carries `hidden` on the
     // login screen -- focusing a heading inside a display:none ancestor is a
     // silent no-op. Keeping the link itself hidden pre-login means there is
     // nothing to skip to yet, and it also drops out of tab order, so the very
     // first Tab on the login screen lands on the token field, not a dead link.
-    elements.skipLink.classList.toggle("hidden", !state.authenticated);
+    // Same reasoning covers the settings screen, where #mainView is hidden too.
+    elements.skipLink.classList.toggle("hidden", !state.authenticated || settingsOpen);
     elements.settingsView.classList.toggle("hidden", !settingsOpen);
+    // Audio devices and appearance both act on an authenticated session (the
+    // device endpoints answer 401 without one), so the pre-login visit shows
+    // only the network section it was opened for.
+    elements.settingsDevicesSection.classList.toggle("hidden", !state.authenticated);
+    elements.settingsAppearanceSection.classList.toggle("hidden", !state.authenticated);
     elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
     elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
     elements.sessionHistorySection.classList.toggle("hidden", !state.authenticated);
     elements.transcriptHeaderContext.classList.toggle("hidden", settingsOpen || !state.authenticated);
     elements.settingsHeaderTitle.classList.toggle("hidden", !settingsOpen);
     elements.backToTranscriptButton.classList.toggle("hidden", !settingsOpen);
+    elements.backToTranscriptButton.setAttribute(
+      "aria-label",
+      state.authenticated ? "Voltar para a captura" : "Voltar para o login",
+    );
     // The capture badge and the code button describe an open session, so the
     // login screen and the settings screen show neither.
     const sessionActionsVisible = state.authenticated && !settingsOpen;
@@ -826,14 +923,29 @@
     elements.proxyFields.classList.toggle("hidden", !elements.proxyEnabled.checked);
   }
 
+  /**
+   * Repaint the proxy panel from `state.proxy`.
+   *
+   * showSettings() calls this twice -- once with the last known values, then
+   * again when the /api/settings read lands -- and resetSettings() calls it
+   * after its own round trip. Both are asynchronous, so either can land while
+   * the user is already typing, and a blind repaint would overwrite the field
+   * under the cursor. The same guard renderSessionDetails() uses for
+   * #sessionTitle applies here: leave the focused field alone and repaint the
+   * rest.
+   */
   function renderSettings() {
-    elements.proxyEnabled.checked = state.proxy.enabled;
-    elements.proxyHost.value = state.proxy.host;
-    elements.proxyPort.value = state.proxy.port;
-    elements.proxyUsername.value = state.proxy.username;
+    const focused = document.activeElement;
+    const writable = (element, value) => {
+      if (element !== focused) element.value = value;
+    };
+    if (elements.proxyEnabled !== focused) elements.proxyEnabled.checked = state.proxy.enabled;
+    writable(elements.proxyHost, state.proxy.host);
+    writable(elements.proxyPort, state.proxy.port);
+    writable(elements.proxyUsername, state.proxy.username);
     // The saved password never comes back from the server -- this field starts
     // empty on every render and stays that way unless the user types a new one.
-    elements.proxyPassword.value = "";
+    writable(elements.proxyPassword, "");
     elements.proxyTestStatus.textContent = "";
     updateProxyFieldsVisibility();
     renderAudioTestControls();
@@ -857,7 +969,6 @@
    * a network round trip), then again once the fresh /api/settings read lands.
    */
   async function showSettings(focusTarget) {
-    if (!state.authenticated) return;
     state.activeView = "settings";
     closeDrawer();
     renderView();
@@ -872,7 +983,10 @@
     state.activeView = "transcript";
     renderView();
     stopAudioTest();
-    focusScreen(elements.mainView);
+    // Leaving settings before signing in lands back on the login screen, so
+    // focus has to follow it there -- focusing inside a `hidden` #mainView is
+    // the silent no-op the skip-link fix already ruled out.
+    focusScreen(state.authenticated ? elements.mainView : elements.loginView);
   }
 
   /**
@@ -924,10 +1038,17 @@
 
   async function saveSettings(event) {
     event.preventDefault();
-    setTheme(elements.themeLightOption.checked ? "light" : "dark");
+    // The proxy goes first. Device selection can throw -- an incomplete pair,
+    // an unavailable device, a 401 -- and doing it first meant the user's proxy
+    // edits were silently discarded while the toast talked about audio
+    // devices. Saving the proxy first means a device failure costs only the
+    // device change, which is what the message is about.
     try {
-      await saveDeviceSelection();
       await saveProxySettings();
+      if (state.authenticated) {
+        setTheme(elements.themeLightOption.checked ? "light" : "dark");
+        await saveDeviceSelection();
+      }
     } catch (error) {
       reportError(error);
       return;
@@ -938,13 +1059,21 @@
   }
 
   async function resetSettings() {
-    setTheme("dark");
-    elements.settingsMicrophoneSelect.value = "";
-    elements.settingsSystemDeviceSelect.value = "";
-    state.pendingDevices = { microphone_id: "", system_device_id: "" };
-    stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
+    // Devices and appearance are hidden and unreachable before signing in --
+    // /api/devices/selection answers 401 there -- so pre-login this restores
+    // the one section actually on screen rather than failing on the others.
+    if (state.authenticated) {
+      setTheme("dark");
+      elements.settingsMicrophoneSelect.value = "";
+      elements.settingsSystemDeviceSelect.value = "";
+      state.pendingDevices = { microphone_id: "", system_device_id: "" };
+      stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
+    }
     try {
-      await localFetch("/api/devices/selection", { method: "DELETE" });
+      if (state.authenticated) {
+        await localFetch("/api/devices/selection", { method: "DELETE" });
+        state.selectedDevices = null;
+      }
       // Disabling here also deletes the stored proxy password server-side --
       // "restore defaults" must not leave a credential behind.
       await localFetch("/api/settings", {
@@ -955,12 +1084,20 @@
       reportError(error);
       return;
     }
-    state.selectedDevices = null;
     await loadProxySettings();
     renderSettings();
     updateDeviceRequirement();
     showNotification("Configurações restauradas.", "info");
   }
+
+  // The probe deliberately tests the values as typed and never reaches for the
+  // saved password (see _default_proxy_prober's docstring for why the answer
+  // never says more than yes/no). So against an authenticating proxy, testing
+  // with the password field left blank always fails -- correctly, but for a
+  // reason the old bare "não foi possível conectar" never gave. The behaviour
+  // is right; the message is what was missing.
+  const PROXY_TEST_FAILED =
+    "Não foi possível conectar através do proxy. Se ele exigir senha, digite-a acima antes de testar.";
 
   async function testProxyConnection() {
     const host = elements.proxyHost.value.trim();
@@ -985,9 +1122,9 @@
       });
       elements.proxyTestStatus.textContent = result.ok
         ? "Conexão bem-sucedida."
-        : "Não foi possível conectar através do proxy.";
+        : PROXY_TEST_FAILED;
     } catch {
-      elements.proxyTestStatus.textContent = "Não foi possível conectar através do proxy.";
+      elements.proxyTestStatus.textContent = PROXY_TEST_FAILED;
     } finally {
       elements.proxyTestButton.disabled = false;
     }
@@ -2142,6 +2279,10 @@
   function applyBootstrap(bootstrap) {
     const wasAuthenticated = state.authenticated;
     state.authenticated = bootstrap.authenticated;
+    // Signing in from the pre-login network-settings screen lands on the
+    // capture screen, not back on settings -- otherwise renderView would keep
+    // #mainView hidden and the focusScreen below would be a silent no-op.
+    if (!wasAuthenticated && state.authenticated) state.activeView = "transcript";
     if (!state.authenticated) closeAudioLevelStream();
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
@@ -2301,6 +2442,10 @@
     focusScreen(elements.mainView);
   });
   elements.settingsButton.addEventListener("click", showSettings);
+  // The login screen's own way in. #settingsButton lives in #sidebarFooter,
+  // which stays hidden until authentication, so without this the pre-login
+  // proxy panel would have no entry point at all.
+  elements.networkSettingsButton.addEventListener("click", showSettings);
   elements.backToTranscriptButton.addEventListener("click", showTranscript);
   elements.logoutButton.addEventListener("click", () => signOut().catch(reportError));
   elements.newSessionButton.addEventListener("click", () => {

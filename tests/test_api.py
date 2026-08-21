@@ -292,6 +292,23 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'aria-labelledby="tokenInputLegend"' in response.text
     assert 'aria-describedby="tokenInputHelp"' in response.text
     assert 'id="tokenInputHelp"' in response.text
+    # The proxy fields carry the same fieldset/legend shape as the token field
+    # above, so they need the same explicit wiring -- without it their
+    # accessible names fall through to `placeholder` and they announce as
+    # "proxy.broccoli.local", "8080", "usuario-local" and "Deixe em branco para
+    # manter a senha salva" instead of Endereço, Porta, Usuário and Senha.
+    for field_id in ("proxyHost", "proxyPort", "proxyUsername", "proxyPassword"):
+        assert f'id="{field_id}Legend"' in response.text
+        assert f'aria-labelledby="{field_id}Legend"' in response.text
+    assert 'aria-describedby="proxyPasswordHelp"' in response.text
+    assert 'id="proxyPasswordHelp"' in response.text
+    # The login screen needs its own way into the settings panel: /api/settings
+    # is unauthenticated precisely so a proxy can be configured before the login
+    # request can reach the backend, and #settingsButton lives in the sidebar
+    # footer, which stays hidden until authentication.
+    assert 'data-testid="network-settings"' in response.text
+    assert 'id="settingsDevicesSection"' in response.text
+    assert 'id="settingsAppearanceSection"' in response.text
     assert 'data-testid="session-search"' in response.text
     assert 'id="drawer-toggle"' in response.text
     assert 'data-testid="capture-indicator"' in response.text
@@ -978,6 +995,34 @@ def test_the_shell_and_its_assets_do_not_require_the_token(
     assert tokened_client.get("/static/app.js").status_code == 200
 
 
+def test_the_window_can_recover_its_launch_key_after_a_reload(
+    tokened_client: TestClient,
+) -> None:
+    """A reload of the window used to brick it.
+
+    The launch key arrives once in the URL and is stripped with
+    history.replaceState. WebView2 enables F5/Ctrl-R by default, a renderer
+    crash reloads, and the context menu offers it -- and the reloaded page had
+    no key anywhere, so every /api/* answered 403 and the event socket closed
+    with 1008. No bootstrap ever arrived, state.authenticated stayed false, and
+    the socket's close handler bailed without retrying: a window that rendered
+    normally and could not do anything, with nothing on screen saying so.
+
+    sessionStorage is the recovery, and it is the right scope: it is per window
+    and dropped when the window closes, so the key still lives exactly one
+    launch, unlike localStorage which would hand a stale key to the next one.
+    The behavioural check -- a real reload with no key in the URL -- lives in
+    scripts/visual-check.ps1; this pins the mechanism against a silent revert.
+    """
+    source = tokened_client.get("/static/app.js").text
+
+    assert '"broccoli-desktop-launch-key"' in source
+    assert "sessionStorage.setItem(CAPABILITY_STORAGE_KEY" in source
+    assert "sessionStorage.getItem(CAPABILITY_STORAGE_KEY)" in source
+    # Still stripped from the address bar -- recovery, not a rollback.
+    assert 'window.history.replaceState(null, "", clean)' in source
+
+
 def test_the_event_socket_requires_the_capability_token(
     tokened_client: TestClient,
 ) -> None:
@@ -1334,6 +1379,109 @@ def test_resaving_proxy_settings_without_a_password_leaves_the_stored_one_untouc
     assert response.status_code == 204
     assert services.credentials.load_proxy_password() == "secret"
     assert client.get("/api/settings").json()["proxy"]["port"] == 9090
+
+
+def test_a_proxy_saved_after_login_reaches_the_next_remote(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """The panel used to be reachable and inert.
+
+    remote_factory reads proxy_url() at the moment it runs, and authenticated()
+    only reran it when the *token* changed -- so a proxy saved after login was
+    never used until sign-out or a restart, while "Testar conexão" reported
+    success, actively telling the user it worked. The factory here mirrors
+    production's (runtime.py's create_services) by reading services.proxy_url()
+    inside the closure, which is the exact shape the defect lived in.
+    """
+    built_with: list[str | None] = []
+    services: Services
+
+    def remote_factory(_token: str) -> FakeSessionRemote:
+        built_with.append(services.proxy_url())
+        return FakeSessionRemote()
+
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=remote_factory,
+        capture_backend=fake_capture,
+        loopback_port=8765,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+    login(client)
+    controller_before = services.controller
+    assert built_with == [None]
+
+    save = client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+    assert save.status_code == 204
+
+    assert client.get("/api/session-name").status_code == 200
+
+    assert built_with[-1] == "http://user:secret@proxy.local:8080"
+    # The controller has to survive the swap: every open /api/events socket is
+    # subscribed to *this* object's EventHub, and replacing it would leave the
+    # window's feed subscribed to something nothing publishes to any more.
+    assert services.controller is controller_before
+
+
+def test_clearing_the_proxy_after_login_reaches_the_next_remote(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """Same defect in the other direction: turning a proxy off has to stop
+    routing through it without waiting for a restart."""
+    built_with: list[str | None] = []
+    services: Services
+
+    def remote_factory(_token: str) -> FakeSessionRemote:
+        built_with.append(services.proxy_url())
+        return FakeSessionRemote()
+
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=remote_factory,
+        capture_backend=fake_capture,
+        loopback_port=8765,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+    client.post(
+        "/api/settings",
+        json={"proxy": {"enabled": True, "host": "proxy.local", "port": 8080, "password": "s"}},
+    )
+    login(client)
+    assert built_with == ["http://proxy.local:8080"]
+
+    assert client.post("/api/settings", json={"proxy": {"enabled": False}}).status_code == 204
+    assert client.get("/api/session-name").status_code == 200
+
+    assert built_with[-1] is None
+
+
+def test_a_proxy_change_is_refused_while_a_capture_is_running(
+    client: TestClient, services: Services
+) -> None:
+    """Saving rebuilds the transport. A live run holds a stream opened through
+    the old one, so the change is refused rather than applied underneath it --
+    the same answer an audio-device change gives."""
+    login(client)
+    start_capture(client)
+
+    response = client.post(
+        "/api/settings",
+        json={"proxy": {"enabled": True, "host": "proxy.local", "port": 8080}},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Stop the active capture before changing the proxy."}
 
 
 def test_saving_a_new_password_replaces_the_stored_one(

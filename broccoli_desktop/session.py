@@ -184,6 +184,24 @@ class DesktopSessionController:
         """Restore a previously validated local selection without starting capture."""
         self._choices = choices
 
+    def set_remote(self, remote: ListeningRemote) -> None:
+        """Point this controller at a freshly built transport.
+
+        Used when the proxy settings change: the remote has to be rebuilt to
+        pick up the new route, but this controller has to survive it, because
+        every open /api/events socket is subscribed to *this* object's
+        EventHub. Refused while a run is in flight -- that run holds a stream
+        opened through the old transport, and swapping it underneath would
+        leave the two disagreeing about where the audio goes.
+        """
+        if self.state in {
+            ConnectionState.STARTING,
+            ConnectionState.STREAMING,
+            ConnectionState.RECONNECTING,
+        }:
+            raise RuntimeError("An active capture owns the remote connection.")
+        self._remote = remote
+
     def clear_selected_devices(self) -> None:
         """Forget an idle local selection after the user restores default settings."""
         if self.state in {

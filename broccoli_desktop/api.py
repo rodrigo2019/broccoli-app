@@ -194,12 +194,39 @@ class Services:
         token = await asyncio.to_thread(self.credentials.load_token)
         if token is None:
             return None
-        if self._token != token or self._remote is None or self.controller is None:
+        if self._token != token or self.controller is None:
             remote = self.remote_factory(token)
             self._remote = remote
             self.controller = await self._create_controller(remote)
             self._token = token
+        elif self._remote is None:
+            # invalidate_remote() dropped the transport without disturbing the
+            # controller. Rebuild only the transport and hand it over, rather
+            # than falling into the branch above: replacing the controller
+            # would leave every open /api/events socket subscribed to the
+            # EventHub of a controller nothing publishes to any more, and the
+            # window's feed would go quiet with no visible cause.
+            remote = self.remote_factory(token)
+            self._remote = remote
+            self.controller.set_remote(remote)
         return self.controller, self._remote
+
+    def invalidate_remote(self) -> None:
+        """Forget the cached remote so the next ``authenticated()`` rebuilds it.
+
+        ``remote_factory`` reads ``proxy_url()`` at the moment it runs, and
+        ``authenticated()`` only reran it when the *token* changed. So a proxy
+        saved after login stayed inert until sign-out or a restart -- while
+        "Testar conexão" reported success, actively telling the user the thing
+        it had just failed to apply was working.
+
+        Callers refuse to run while a capture is active (see save_settings), so
+        the controller this leaves in place is always an idle one, whose next
+        run will open its stream through the rebuilt transport.
+        """
+        previous = self._remote
+        self._remote = None
+        _release_remote(previous)
 
     async def set_authenticated(self, token: str, remote: ListeningRemote) -> None:
         """Install the already verified remote after credential persistence succeeds."""
@@ -287,6 +314,7 @@ class Services:
         if password:
             self.credentials.save_proxy_password(password)
         self.proxy_settings.save(settings)
+        self.invalidate_remote()
 
     def clear_proxy_settings(self) -> None:
         """Delete the vault password before marking the proxy disabled locally.
@@ -301,6 +329,7 @@ class Services:
         """
         self.credentials.delete_proxy_password()
         self.proxy_settings.clear()
+        self.invalidate_remote()
 
     async def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
@@ -641,6 +670,14 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/api/settings", status_code=204)
     async def save_settings(request: SettingsRequest) -> Response:
+        # Saving drops the cached remote so the next request rebuilds it
+        # through the new route. A live run holds a stream opened through the
+        # old one, and swapping the transport under it would leave the two
+        # disagreeing about where the audio goes -- so a running capture is
+        # refused here rather than silently ignored, the same way an audio
+        # device change is.
+        if services.controller is not None and _capture_is_active(services.controller):
+            raise ApiError(409, "Stop the active capture before changing the proxy.")
         proxy = request.proxy
         if not proxy.enabled:
             services.clear_proxy_settings()

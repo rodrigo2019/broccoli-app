@@ -162,6 +162,19 @@
                   <p id="loginError" class="hidden text-sm text-error" role="alert" data-testid="login-error"></p>
                   <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">Entrar</button>
                 </form>
+                <!--
+                  /api/settings is deliberately unauthenticated because a
+                  corporate proxy may be what stands between this window and the
+                  login request itself. That is only true if the panel can be
+                  opened before signing in, which is what this button is for --
+                  the sidebar entry point lives in #sidebarFooter, hidden until
+                  authentication.
+                -->
+                <div class="flex justify-center border-t border-base-content/10 pt-4">
+                  <button id="networkSettingsButton" class="btn btn-ghost btn-sm" type="button" data-testid="network-settings">
+                    <i class="bi bi-hdd-network" aria-hidden="true"></i>Configurações de rede
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -170,7 +183,7 @@
         <section id="settingsView" class="hidden min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-7 sm:px-6 lg:min-h-0 lg:px-8">
           <main class="mx-auto w-full max-w-4xl">
             <form id="settingsForm" class="grid gap-4 lg:grid-cols-2">
-              <section class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl lg:col-span-2">
+              <section id="settingsDevicesSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl lg:col-span-2">
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div class="flex flex-wrap items-start justify-between gap-3">
                     <div>
@@ -221,7 +234,7 @@
                 </div>
               </section>
 
-              <section class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
+              <section id="settingsAppearanceSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div>
                     <h2 class="card-title text-lg">Aparência</h2>
@@ -250,25 +263,37 @@
                     <input id="proxyEnabled" class="toggle toggle-primary" type="checkbox" data-testid="proxy-toggle" />
                     <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Ativar configuração manual de rede.</span></span>
                   </label>
+                  <!--
+                    Every input below points aria-labelledby at its own legend's
+                    id, for the reason spelled out at #tokenInput: a <legend>
+                    names the <fieldset> it belongs to, not a sibling <input>,
+                    so without this the accessible name falls through to
+                    `placeholder` and these fields announce as
+                    "proxy.broccoli.local", "8080", "usuario-local" and "Deixe
+                    em branco para manter a senha salva" instead of their
+                    visible labels. Naming them from the legend keeps the
+                    accessible name identical to the visible text (WCAG 2.5.3)
+                    rather than merely overlapping it.
+                  -->
                   <div id="proxyFields" class="hidden grid gap-3 border-t border-base-content/10 pt-4">
                     <fieldset class="fieldset">
-                      <legend class="fieldset-legend text-xs">Endereço</legend>
-                      <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" />
+                      <legend id="proxyHostLegend" class="fieldset-legend text-xs">Endereço</legend>
+                      <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" aria-labelledby="proxyHostLegend" />
                     </fieldset>
                     <div class="grid gap-3 sm:grid-cols-2">
                       <fieldset class="fieldset">
-                        <legend class="fieldset-legend text-xs">Porta</legend>
-                        <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" />
+                        <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
+                        <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
                       </fieldset>
                       <fieldset class="fieldset">
-                        <legend class="fieldset-legend text-xs">Usuário</legend>
-                        <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" />
+                        <legend id="proxyUsernameLegend" class="fieldset-legend text-xs">Usuário</legend>
+                        <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" aria-labelledby="proxyUsernameLegend" />
                       </fieldset>
                     </div>
                     <fieldset class="fieldset">
-                      <legend class="fieldset-legend text-xs">Senha</legend>
-                      <input id="proxyPassword" class="input w-full" type="password" placeholder="Deixe em branco para manter a senha salva" autocomplete="new-password" data-testid="proxy-password" />
-                      <p class="fieldset-label leading-snug">A senha é salva no Gerenciador de Credenciais do Windows e nunca é exibida aqui novamente.</p>
+                      <legend id="proxyPasswordLegend" class="fieldset-legend text-xs">Senha</legend>
+                      <input id="proxyPassword" class="input w-full" type="password" placeholder="Deixe em branco para manter a senha salva" autocomplete="new-password" data-testid="proxy-password" aria-labelledby="proxyPasswordLegend" aria-describedby="proxyPasswordHelp" />
+                      <p id="proxyPasswordHelp" class="fieldset-label leading-snug">A senha é salva no Gerenciador de Credenciais do Windows e nunca é exibida aqui novamente. "Testar conexão" usa apenas o que estiver preenchido aqui, então digite a senha de novo para testar um proxy que a exija.</p>
                     </fieldset>
                     <div class="flex flex-wrap items-center gap-3 border-t border-base-content/10 pt-4">
                       <button id="proxyTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-proxy">Testar conexão</button>
