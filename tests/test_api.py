@@ -34,6 +34,7 @@ from broccoli_desktop.models import (
     TranscriptSegment,
     UiEvent,
 )
+from broccoli_desktop.remote import RemoteProtocolError
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from tests.fakes import (
     VISUAL_TEST_TOKEN,
@@ -2282,3 +2283,48 @@ def test_a_session_shifted_across_a_page_boundary_is_not_listed_twice(
     )
 
     assert result["merged"] == ["a", "b", "c"]
+
+
+def test_a_revoked_token_boots_the_window_to_the_login_screen(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_credentials: FakeCredentials,
+) -> None:
+    """Opening the app has to ask whether the stored credential still works.
+
+    A stored token is not a valid one. Without this the window came up on the
+    capture screen with a credential the platform had already revoked, and the
+    user only learned of it when their first action returned 401 -- an error
+    toast on a screen that could not do anything.
+    """
+    login(client)
+    assert bootstrap_payload(client)["authenticated"] is True
+
+    fake_remote_factory.remote.revoke_token()
+
+    payload = bootstrap_payload(client)
+
+    assert payload["authenticated"] is False
+    # Verified, found dead, and thrown away -- not left in the vault to fail
+    # the same way on the next launch.
+    assert fake_credentials.load_token() is None
+
+
+def test_an_unreachable_platform_does_not_sign_the_user_out(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_credentials: FakeCredentials,
+) -> None:
+    """Unreachable is not the same as rejected.
+
+    A flaky network, a proxy that is down, a platform mid-deploy: none of those
+    mean the credential is bad, and discarding it would make the user dig their
+    token out again for what is usually a blip.
+    """
+    login(client)
+    fake_remote_factory.remote.verify_failure = RemoteProtocolError("unreachable")
+
+    payload = bootstrap_payload(client)
+
+    assert payload["authenticated"] is True
+    assert fake_credentials.load_token() == "test-token"

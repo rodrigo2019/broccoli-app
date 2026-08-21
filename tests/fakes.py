@@ -191,8 +191,14 @@ class FakeSessionRemote:
     fail_control_stream_indexes: set[int] = field(default_factory=set)
     fail_close_stream_indexes: set[int] = field(default_factory=set)
     unauthorized: bool = False
+    verify_failure: Exception | None = None
 
     async def verify_token(self) -> None:
+        # Injected separately from `unauthorized` on purpose: an unreachable
+        # platform and a rejected credential are different answers, and the
+        # window is only allowed to sign the user out for the second.
+        if self.verify_failure is not None:
+            raise self.verify_failure
         self._assert_authorized()
 
     async def list_sessions(self, cursor: str | None, query: str) -> SessionPage:

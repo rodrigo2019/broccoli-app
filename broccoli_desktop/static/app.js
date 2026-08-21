@@ -790,7 +790,13 @@
     if (response.ok) {
       return response.status === 204 ? null : response.json();
     }
-    if (response.status === 401) closeAudioLevelStream();
+    // A 401 is not just a failed request, it is the end of the session: the
+    // server has already discarded the credential by the time it answers (see
+    // the RemoteUnauthorizedError handler in api.py). Showing only a toast
+    // left the window sitting on the capture screen with a dead token and no
+    // way forward -- the user could read "faça login novamente" and had
+    // nowhere to do it. Send them to the screen that fixes it.
+    if (response.status === 401 && state.authenticated) signOutLocally();
     const payload = await response.json().catch(() => ({}));
     // The raw English detail travels on the error itself so reportError can
     // route it through translateApiMessage -- a client-side validation error
@@ -2444,35 +2450,55 @@
     });
   }
 
-  async function signOut() {
+  /**
+   * Tear the window back down to a signed-out shell.
+   *
+   * Shared by the Sair button and by any request that comes back 401 -- by
+   * which point the server has already discarded the credential, so the window
+   * is signed out whether or not the user asked to be. `renderView` puts the
+   * login screen up once `state.authenticated` is false; without this a 401
+   * left the capture screen on display with nothing behind it.
+   *
+   * `closeNotifications` runs before the caller's own `reportError`, so the
+   * "faça login novamente" toast still lands on top of the login screen and
+   * explains why it appeared.
+   */
+  function signOutLocally() {
     stopAudioTest("Teste de áudio encerrado.");
     closeAudioLevelStream();
     state.authenticated = false;
     state.eventSocket?.close();
     state.eventSocket = null;
+    state.sessionsRequestId += 1;
+    state.sessions = [];
+    state.nextCursor = null;
+    state.searchQuery = "";
+    elements.sessionSearchInput.value = "";
+    state.sessionsLoading = false;
+    state.selectedSession = null;
+    state.selectedDevices = null;
+    state.connectionState = "idle";
+    state.activeView = "transcript";
+    clearTimeline();
+    renderView();
+    renderSessions();
+    renderSessionDetails();
+    renderConnectionState();
+    closeNotifications();
+    // The socket is already gone; reopen it whatever happened. If the
+    // credential survived after all, the fresh bootstrap says so instead of
+    // leaving the window with no feed at all.
+    connectEvents();
+  }
+
+  async function signOut() {
+    // Cleared first so the DELETE below cannot re-enter through localFetch's
+    // own 401 branch, which is guarded on this flag.
+    state.authenticated = false;
     try {
       await localFetch("/api/login", { method: "DELETE" });
     } finally {
-      state.sessionsRequestId += 1;
-      state.sessions = [];
-      state.nextCursor = null;
-      state.searchQuery = "";
-      elements.sessionSearchInput.value = "";
-      state.sessionsLoading = false;
-      state.selectedSession = null;
-      state.selectedDevices = null;
-      state.connectionState = "idle";
-      state.activeView = "transcript";
-      clearTimeline();
-      renderView();
-      renderSessions();
-      renderSessionDetails();
-      renderConnectionState();
-      closeNotifications();
-      // The socket is already gone; reopen it whatever happened. If the request
-      // failed and the credential survived, the fresh bootstrap says so instead
-      // of leaving the window with no feed at all.
-      connectEvents();
+      signOutLocally();
     }
   }
 

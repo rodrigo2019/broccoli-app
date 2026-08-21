@@ -44,6 +44,7 @@ from broccoli_desktop.naming import SessionTitleGenerator
 from broccoli_desktop.remote import (
     ListeningRemote,
     RemoteConflictError,
+    RemoteError,
     RemoteNotFoundError,
     RemoteProtocolError,
     RemoteRequestError,
@@ -876,6 +877,28 @@ def create_app(services: Services) -> FastAPI:
         """
         await websocket.accept()
         authenticated = await services.authenticated()
+        if authenticated is not None:
+            # A *stored* credential is not a *valid* one, and nothing between
+            # the vault read and here had asked the platform. So a token that
+            # had been revoked since the last run still booted the window
+            # straight onto the capture screen, and the user only found out
+            # when their first action came back 401 -- an error toast on a
+            # screen that could not work. Verifying once, here, is what turns
+            # that into the login screen.
+            try:
+                await authenticated[1].verify_token()
+            except RemoteUnauthorizedError:
+                _delete_invalid_credential(services)
+                authenticated = None
+            except RemoteError:
+                # Unreachable is not the same as rejected: a flaky network, a
+                # proxy that is down, a platform mid-deploy. Keeping the
+                # credential lets the window come up and fail loudly on the
+                # action the user actually takes, rather than silently signing
+                # them out and discarding a token that is still good.
+                logging.getLogger(__name__).warning(
+                    "Could not reach the platform to verify the stored credential; keeping it",
+                )
         controller = authenticated[0] if authenticated is not None else None
         bootstrap = {
             "type": "bootstrap",
