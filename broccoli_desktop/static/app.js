@@ -800,13 +800,27 @@
     renderAudioTestControls();
   }
 
-  function showSettings() {
+  /**
+   * Open the settings screen.
+   *
+   * `focusTarget`, when given a real element, is focused instead of the
+   * screen's own heading -- used by startSession() below to land focus on
+   * the microphone selector when the redirect here is the answer to "why
+   * didn't capture start", rather than on a heading that says nothing about
+   * that. The `instanceof` guard is what keeps this safe as a bare listener:
+   * `settingsButton` and `refreshDevicesButton` both register this function
+   * directly, so their click event lands in this parameter too, and a
+   * PointerEvent is not an HTMLElement -- ordinary navigation still falls
+   * through to focusScreen exactly as before.
+   */
+  function showSettings(focusTarget) {
     if (!state.authenticated) return;
     state.activeView = "settings";
     closeDrawer();
     renderView();
     renderSettings();
-    focusScreen(elements.settingsView);
+    if (focusTarget instanceof HTMLElement) focusTarget.focus();
+    else focusScreen(elements.settingsView);
   }
 
   function showTranscript() {
@@ -895,6 +909,39 @@
   function sessionTimestamp(value) {
     const parsed = Date.parse(value || "");
     return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  /** "20 ago" -- the day a session started, for the row itself and its group heading. */
+  function formatSessionDate(startedAt) {
+    return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(
+      new Date(startedAt),
+    );
+  }
+
+  /** "42 min" for an ended session, or "" while it is still open (no `ended_at` yet). */
+  function formatSessionDuration(startedAt, endedAt) {
+    if (!endedAt) return "";
+    const minutes = Math.max(1, Math.round((new Date(endedAt) - new Date(startedAt)) / 60000));
+    return `${minutes} min`;
+  }
+
+  /** "1 segmento" vs "3 segmentos" -- the header tooltip had this hardcoded plural. */
+  function segmentCountLabel(count) {
+    return count === 1 ? "1 segmento" : `${count} segmentos`;
+  }
+
+  /**
+   * Calendar-day key used to group session rows in the sidebar, in the
+   * viewer's own timezone rather than UTC -- grouping by the UTC date would
+   * put a 11pm-local meeting under tomorrow's heading for anyone west of
+   * Greenwich. Empty when there is no parseable `started_at`, so a session
+   * missing that field renders without a group heading instead of a bogus one.
+   */
+  function sessionDateGroupKey(session) {
+    const timestamp = sessionTimestamp(session.started_at);
+    if (!timestamp) return "";
+    const date = new Date(timestamp);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
   /** Pinned first, then most recently created. Mirrors the backend ordering. */
@@ -1118,13 +1165,22 @@
     title.className = "block min-w-0 whitespace-nowrap overflow-hidden text-ellipsis";
     titleLine.append(title);
     rowContent.append(titleLine);
+    // Date and duration, so a list of auto-generated names is still
+    // navigable -- see updateSessionRow, which is the only place this ever
+    // gets text.
+    const metaLine = document.createElement("span");
+    // /70, not the transcript row's /50: this text sits over the sidebar's
+    // lighter background in the light theme, where /50 measured 3.08:1 --
+    // under the 4.5:1 AA floor axe checks for on the settings screen.
+    metaLine.className = "block text-xs text-base-content/70";
+    rowContent.append(metaLine);
     content.append(rowContent);
 
     const menu = sessionActionMenu(holder);
     content.append(menu.dropdown);
     item.append(content);
 
-    item.sessionRefs = { holder, content, titleLine, title, menu };
+    item.sessionRefs = { holder, content, titleLine, title, metaLine, menu };
     return item;
   }
 
@@ -1143,7 +1199,31 @@
     } else if (!session.is_pinned && existingPin) {
       existingPin.remove();
     }
+    const dateLabel = session.started_at ? formatSessionDate(session.started_at) : "";
+    const durationLabel = formatSessionDuration(session.started_at, session.ended_at);
+    refs.metaLine.textContent = durationLabel ? `${dateLabel} · ${durationLabel}` : dateLabel;
+    refs.metaLine.classList.toggle("hidden", !dateLabel);
     updateSessionActionMenu(refs.menu, session);
+  }
+
+  /**
+   * Build one "20 ago" day heading for the sidebar.
+   *
+   * Only structure, same split as buildSessionRow/updateSessionRow: this has
+   * no interactive state to preserve, but it is still built once and patched
+   * in place on later renders rather than recreated every time, so it does
+   * not disturb the sibling session rows' position bookkeeping below.
+   */
+  function buildDateGroupRow(key) {
+    const item = document.createElement("li");
+    item.className =
+      "session-date-group px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-base-content/70 first:pt-1";
+    item.dataset.dateGroup = key;
+    return item;
+  }
+
+  function updateDateGroupRow(item, session) {
+    item.textContent = formatSessionDate(session.started_at);
   }
 
   /**
@@ -1179,24 +1259,51 @@
 
     sortSessions();
 
+    // One heading per calendar day the sorted order crosses into. Computed
+    // fresh every render from state.sessions, same as sortSessions() itself --
+    // this is what turns a flat 45-row list of auto-generated names into
+    // something a day can be found in.
+    const renderItems = [];
+    let lastGroupKey = null;
+    for (const session of state.sessions) {
+      const groupKey = sessionDateGroupKey(session);
+      if (groupKey && groupKey !== lastGroupKey) {
+        renderItems.push({ kind: "group", key: `group:${groupKey}`, session });
+        lastGroupKey = groupKey;
+      }
+      renderItems.push({ kind: "session", key: session.uuid_code, session });
+    }
+
     // Index the rows already on screen by their key. Anything here without a
     // key is a leftover placeholder from the empty/loading state above, not a
     // row -- it gets dropped rather than indexed, since nothing will claim it.
-    const existingRows = new Map();
+    // Session rows are keyed by dataset.sessionId exactly as before -- group
+    // headings share the same map under a `group:`-prefixed key so the one
+    // diff/reposition pass below covers both, but that reuse is cosmetic
+    // only: it never touches how a session row itself is found, built or
+    // patched.
+    const existingItems = new Map();
     for (const child of Array.from(elements.sessionLibrary.children)) {
-      if (child.dataset.sessionId) existingRows.set(child.dataset.sessionId, child);
+      if (child.dataset.sessionId) existingItems.set(child.dataset.sessionId, child);
+      else if (child.dataset.dateGroup) existingItems.set(`group:${child.dataset.dateGroup}`, child);
       else child.remove();
     }
 
     let previousItem = null;
-    for (const session of state.sessions) {
-      let item = existingRows.get(session.uuid_code);
+    for (const renderItem of renderItems) {
+      let item = existingItems.get(renderItem.key);
       if (item) {
-        existingRows.delete(session.uuid_code);
-        updateSessionRow(item, session);
+        existingItems.delete(renderItem.key);
       } else {
-        item = buildSessionRow(session);
-        updateSessionRow(item, session);
+        item =
+          renderItem.kind === "group"
+            ? buildDateGroupRow(renderItem.key.slice("group:".length))
+            : buildSessionRow(renderItem.session);
+      }
+      if (renderItem.kind === "group") {
+        updateDateGroupRow(item, renderItem.session);
+      } else {
+        updateSessionRow(item, renderItem.session);
       }
       const expectedNext = previousItem
         ? previousItem.nextElementSibling
@@ -1210,7 +1317,7 @@
 
     // Whatever is left in the map fell out of state.sessions -- filtered out
     // by a search, or actually removed -- and does not belong on screen.
-    for (const stale of existingRows.values()) stale.remove();
+    for (const stale of existingItems.values()) stale.remove();
   }
 
   function mergeSession(session) {
@@ -1368,18 +1475,31 @@
     captureMotion.setState(state.connectionState);
   }
 
+  // What renderConnectionState last fired a toast for. A render happens far
+  // more often than the connection state actually changes -- the level
+  // stream alone can trigger several while an outage is ongoing -- so
+  // notifying unconditionally on every render re-fired "Reconectando..."
+  // roughly every 15s for as long as the outage lasted. Comparing against
+  // this turns that into exactly one toast per transition into the state.
+  let lastNotifiedConnectionState = null;
+
   function renderConnectionState() {
     elements.captureIndicatorLabel.textContent =
       CONNECTION_LABELS[state.connectionState] || CONNECTION_LABELS.idle;
     const tone = CONNECTION_BADGE_TONES[state.connectionState];
     elements.captureIndicator.classList.remove(...BADGE_TONES);
     if (tone) elements.captureIndicator.classList.add(tone);
-    if (state.connectionState === "reconnecting") {
-      showNotification("Reconectando à transcrição…", "warning");
-    }
     if (state.connectionState === "device_selection_required") {
       elements.deviceRequired.classList.remove("hidden");
-      showNotification("Selecione os dispositivos antes de continuar.", "error");
+    }
+    if (state.connectionState !== lastNotifiedConnectionState) {
+      if (state.connectionState === "reconnecting") {
+        showNotification("Reconectando à transcrição…", "warning");
+      }
+      if (state.connectionState === "device_selection_required") {
+        showNotification("Selecione os dispositivos antes de continuar.", "error");
+      }
+      lastNotifiedConnectionState = state.connectionState;
     }
     renderCaptureDock();
     renderView();
@@ -1733,16 +1853,25 @@
 
   function renderSessionDetails() {
     const session = state.selectedSession;
-    // Only adopt a stored title when there is a stored session. With none, the
-    // field holds the draft name -- generated or typed -- and a socket
-    // reconnect redrawing the header must not wipe it.
-    if (session) elements.sessionTitle.value = session.title || "";
+    // Only adopt a stored title when there is a stored session, and only
+    // when the field is not the very thing being typed into -- a `status`
+    // event landing mid-rename must not overwrite an in-progress edit. With
+    // no session, the field holds the draft name -- generated or typed --
+    // and a socket reconnect redrawing the header must not wipe that either.
+    if (session && document.activeElement !== elements.sessionTitle) {
+      elements.sessionTitle.value = session.title || "";
+    }
     elements.renameSessionButton.disabled = !session;
-    elements.sessionMeta.textContent = session
-      ? `Código ${session.uuid_code} · ${session.segment_count} segmentos`
+    const detailText = session
+      ? `Código ${session.uuid_code} · ${segmentCountLabel(session.segment_count)}`
       : "Inicie uma captura para gerar um código local.";
-    elements.sessionMeta.classList.toggle("hidden", !session);
-    elements.sessionTitle.title = "";
+    // This used to render as visible header text, wide enough at a narrow
+    // window to squeeze the title input down to a couple of pixels (see
+    // index.html's #sessionMeta comment and visual-check.ps1's 375px
+    // assertion). It is secondary detail now: a hover tooltip on the title
+    // field for a mouse, and this permanently sr-only span for everyone else.
+    elements.sessionMeta.textContent = detailText;
+    elements.sessionTitle.title = session ? detailText : "";
     elements.copyCodeButton.disabled = !session;
   }
 
@@ -1767,7 +1896,14 @@
     const devices = selectedDevicePayload();
     if (!devices.microphone_id || !devices.system_device_id) {
       elements.deviceRequired.classList.remove("hidden");
-      showSettings();
+      // Previously this was a silent screen change: for a screen-reader user
+      // it was indistinguishable from a dead button. settingsAudioTestStatus
+      // is the settings screen's one role="status" region, so writing the
+      // reason there gets it announced, and focus goes straight to the
+      // control that fixes it instead of the screen's own heading.
+      elements.settingsAudioTestStatus.textContent =
+        "Selecione um microfone e uma saída de áudio antes de iniciar a captura.";
+      showSettings(elements.settingsMicrophoneSelect);
       return;
     }
     const previousConnectionState = state.connectionState;

@@ -357,6 +357,18 @@ try {
 
     Invoke-Browser -BrowserArguments @("set", "viewport", "375", "812")
     Assert-TranscriptClearsTheDock
+    # Pins the headline finding: the session title used to collapse to 2px
+    # wide at this width, with the session code and segment count crowding it
+    # out of the header. 120px is well under the 128px floor the title now
+    # holds to, leaving margin for future header changes without making this
+    # brittle.
+    $titleWidth = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "Math.round(document.querySelector('#sessionTitle').getBoundingClientRect().width)"
+    ) | ConvertFrom-Json)
+    if ($titleWidth -lt 120) {
+        throw "The session title collapsed to ${titleWidth}px at 375px wide."
+    }
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-narrow.png"))
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
 

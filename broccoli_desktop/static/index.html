@@ -50,14 +50,25 @@
               <i class="bi bi-chevron-left" aria-hidden="true"></i>
             </button>
             <div id="transcriptHeaderContext" class="flex min-w-0 items-center gap-3">
-              <label class="min-w-0" for="sessionTitle">
+              <label class="min-w-32 flex-1" for="sessionTitle">
                 <span class="sr-only">Título da reunião</span>
                 <input id="sessionTitle" class="input input-ghost input-sm w-full max-w-[28rem] truncate px-0 font-semibold text-lg" type="text" maxlength="120" placeholder="Sem título" aria-label="Título da reunião" />
               </label>
               <button id="renameSessionButton" class="btn btn-ghost btn-xs btn-square shrink-0" type="button" data-testid="rename-session" aria-label="Renomear sessão" title="Renomear sessão" disabled>
                 <i class="bi bi-pencil" aria-hidden="true"></i>
               </button>
-              <span id="sessionMeta" class="hidden text-xs text-base-content/60 xl:inline">Inicie uma captura para gerar um código local.</span>
+              <!--
+                The session code and segment count used to render here as
+                visible text ("Código session-1 · 1 segmentos"), which is what
+                squeezed the title input down to a couple of pixels wide at a
+                narrow window width (see visual-check.ps1's 375px title-width
+                assertion). It is secondary detail, not what someone scans the
+                header for, so it now lives in a hover tooltip on the title
+                field (see app.js's renderSessionDetails) and this sr-only
+                line, which keeps it available to assistive tech at every
+                viewport instead of only above the old `xl:` breakpoint.
+              -->
+              <span id="sessionMeta" class="sr-only">Inicie uma captura para gerar um código local.</span>
             </div>
             <h1 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold">Configurações</h1>
           </div>
@@ -66,7 +77,10 @@
               <i class="bi bi-mic" aria-hidden="true"></i>
               <span id="captureIndicatorLabel">Pronto</span>
             </span>
-            <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code">Copiar código</button>
+            <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code" aria-label="Copiar código da sessão" title="Copiar código da sessão">
+              <i class="bi bi-copy" aria-hidden="true"></i>
+              <span class="hidden sm:inline">Copiar código</span>
+            </button>
           </div>
         </header>
 
