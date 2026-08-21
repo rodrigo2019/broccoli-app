@@ -428,6 +428,10 @@ def test_history_routes_proxy_session_and_segment_pages(
         device_label="Meeting speakers",
         segment_count=1,
         is_live=False,
+        # Deliberately later than ended_at and different from every other
+        # timestamp here: the history orders by this field, so the test has to
+        # prove it survives the proxy rather than that the key merely exists.
+        last_activity_at="2026-08-20T09:30:00Z",
     )
     segment = TranscriptSegment("system:1", "system", "A sentence", 100, 900)
     fake_remote_factory.remote.session_pages[(None, "meeting")] = SessionPage((session,), "20")
@@ -453,6 +457,7 @@ def test_history_routes_proxy_session_and_segment_pages(
                 "is_live": False,
                 "is_pinned": False,
                 "pinned_at": None,
+                "last_activity_at": "2026-08-20T09:30:00Z",
             }
         ],
         "next_cursor": "20",
@@ -2153,3 +2158,127 @@ def test_every_error_detail_the_backend_can_send_has_a_portuguese_message(
     # Both extractors have to have found something: two empty sets are equal.
     assert len(details) >= 20
     assert details == translated
+
+
+_HISTORY_ORDER_HARNESS = """
+%s
+
+const state = { sessions: JSON.parse(process.argv[2]) };
+sortSessions();
+console.log(
+  JSON.stringify({
+    order: state.sessions.map((session) => session.uuid_code),
+    groups: state.sessions.map((session) => sessionDateGroupKey(session)),
+    merged: mergeSessionPages(
+      JSON.parse(process.argv[3]),
+      JSON.parse(process.argv[4]),
+    ).map((session) => session.uuid_code),
+  }),
+);
+"""
+
+
+def _extract_function(app_js: str, signature: str) -> str:
+    """Lift one top-level function out of app.js by brace matching."""
+    start = app_js.index(signature)
+    opening = app_js.index("{", start)
+    depth = 0
+    index = opening
+    while True:
+        depth += {"{": 1, "}": -1}.get(app_js[index], 0)
+        index += 1
+        if depth == 0:
+            return app_js[start:index]
+
+
+def _run_history_order(app_js: str, sessions, existing, incoming) -> dict[str, object]:
+    """Run app.js's own ordering helpers under node.
+
+    Asserting on the source text would only catch a literal revert; these are
+    the functions that decide what the history looks like, so the test runs
+    them. They are lifted rather than imported because app.js is one IIFE with
+    no exports, and these four touch neither the DOM nor the network.
+    """
+    separator = chr(10) * 2
+    body = separator.join(
+        _extract_function(app_js, signature)
+        for signature in (
+            "function sessionTimestamp(",
+            "function sessionActivityAt(",
+            "function sessionDateGroupKey(",
+            "function mergeSessionPages(",
+            "function sortSessions(",
+        )
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        script = pathlib.Path(directory) / "history-order.js"
+        script.write_text(_HISTORY_ORDER_HARNESS % body, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                "node",
+                str(script),
+                json.dumps(sessions),
+                json.dumps(existing),
+                json.dumps(incoming),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_history_orders_and_groups_by_last_activity_not_by_creation(
+    tokened_client: TestClient,
+) -> None:
+    """The reopened meeting has to come back to the top, and bring its heading.
+
+    Ordering by `started_at` left a session the user had just resumed sitting
+    at its original creation date. Grouping has to follow the same field or the
+    day headings stop matching the rows underneath them.
+    """
+    app_js = tokened_client.get("/static/app.js").text
+    result = _run_history_order(
+        app_js,
+        [
+            # Created first, but used most recently -- this is the resumed one.
+            {
+                "uuid_code": "resumed",
+                "started_at": "2026-08-18T09:00:00Z",
+                "last_activity_at": "2026-08-20T18:00:00Z",
+                "is_pinned": False,
+            },
+            {
+                "uuid_code": "untouched",
+                "started_at": "2026-08-19T09:00:00Z",
+                "last_activity_at": "2026-08-19T09:30:00Z",
+                "is_pinned": False,
+            },
+            # No last_activity_at at all: an older platform must still render.
+            {"uuid_code": "legacy", "started_at": "2026-08-17T09:00:00Z", "is_pinned": False},
+        ],
+        [],
+        [],
+    )
+
+    assert result["order"] == ["resumed", "untouched", "legacy"]
+    # The heading follows the same field, so "resumed" sits under the 20th.
+    assert result["groups"] == ["2026-08-20", "2026-08-19", "2026-08-17"]
+
+
+def test_a_session_shifted_across_a_page_boundary_is_not_listed_twice(
+    tokened_client: TestClient,
+) -> None:
+    """Offset paging over a live list re-delivers rows; merging must absorb that."""
+    app_js = tokened_client.get("/static/app.js").text
+    result = _run_history_order(
+        app_js,
+        [],
+        [{"uuid_code": "a"}, {"uuid_code": "b"}],
+        # "b" shifted down a page when a new capture started, so it arrives
+        # again at the head of page two.
+        [{"uuid_code": "b"}, {"uuid_code": "c"}],
+    )
+
+    assert result["merged"] == ["a", "b", "c"]

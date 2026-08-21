@@ -54,6 +54,10 @@ class SessionSummary:
     is_live: bool
     is_pinned: bool = False
     pinned_at: str | None = None
+    #: When the session was last used -- what the history is ordered and
+    #: grouped by. Optional so an older platform that does not send it yet
+    #: degrades to ``started_at`` in the UI rather than failing the parse.
+    last_activity_at: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", validate_title(self.title))

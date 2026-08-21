@@ -502,6 +502,7 @@ def _parse_session(payload: object) -> SessionSummary:
         is_live=is_live,
         is_pinned=is_pinned,
         pinned_at=pinned_at,
+        last_activity_at=_optional_string(values, "last_activity_at"),
     )
 
 

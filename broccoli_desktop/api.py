@@ -1192,6 +1192,7 @@ def _session_payload(session: SessionSummary) -> dict[str, object]:
         "is_live": session.is_live,
         "is_pinned": session.is_pinned,
         "pinned_at": session.pinned_at,
+        "last_activity_at": session.last_activity_at,
     }
 
 

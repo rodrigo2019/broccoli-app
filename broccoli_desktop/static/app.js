@@ -1197,14 +1197,45 @@
    * Greenwich. Empty when there is no parseable `started_at`, so a session
    * missing that field renders without a group heading instead of a bogus one.
    */
+  /**
+   * When this session was last *used*. The history is ordered and grouped by
+   * this, never by `started_at`: reopening a meeting has to bring it back to
+   * the top, and ordering by creation date left a session the user had just
+   * spoken into sitting wherever it was first made. Falls back to
+   * `started_at` so a platform that predates the field still renders.
+   */
+  function sessionActivityAt(session) {
+    return session.last_activity_at || session.started_at;
+  }
+
   function sessionDateGroupKey(session) {
-    const timestamp = sessionTimestamp(session.started_at);
+    const timestamp = sessionTimestamp(sessionActivityAt(session));
     if (!timestamp) return "";
     const date = new Date(timestamp);
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
-  /** Pinned first, then most recently created. Mirrors the backend ordering. */
+  /**
+   * Fold a freshly fetched page into the rows already held, keyed by
+   * `uuid_code` so a row cannot arrive twice.
+   *
+   * The platform pages by offset over a list ordered by recent activity, so
+   * anything that reorders that list mid-scroll hands back a row page 1
+   * already delivered -- and starting a capture reorders it, which is exactly
+   * when someone is likely to be scrolling their history. Concatenating blindly
+   * produced two entries with the same key, and the render loop claims a key
+   * only once, so the second was built as its own node instead of being moved:
+   * the same meeting on screen twice, in two different places.
+   *
+   * The incoming copy wins on a collision -- it is the fresher read.
+   */
+  function mergeSessionPages(existing, incoming) {
+    const byCode = new Map();
+    for (const session of [...existing, ...incoming]) byCode.set(session.uuid_code, session);
+    return Array.from(byCode.values());
+  }
+
+  /** Pinned first, then most recently used. Mirrors the backend ordering. */
   function sortSessions() {
     state.sessions.sort((left, right) => {
       if (Boolean(left.is_pinned) !== Boolean(right.is_pinned)) {
@@ -1214,8 +1245,9 @@
         const pinDelta = sessionTimestamp(right.pinned_at) - sessionTimestamp(left.pinned_at);
         if (pinDelta) return pinDelta;
       }
-      const startDelta = sessionTimestamp(right.started_at) - sessionTimestamp(left.started_at);
-      if (startDelta) return startDelta;
+      const activityDelta =
+        sessionTimestamp(sessionActivityAt(right)) - sessionTimestamp(sessionActivityAt(left));
+      if (activityDelta) return activityDelta;
       return String(left.uuid_code).localeCompare(String(right.uuid_code));
     });
   }
@@ -1636,7 +1668,7 @@
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const page = await localFetch(`/api/sessions${suffix}`);
       if (requestId !== state.sessionsRequestId) return;
-      const sessions = reset ? page.sessions : [...state.sessions, ...page.sessions];
+      const sessions = reset ? page.sessions : mergeSessionPages(state.sessions, page.sessions);
       if (state.selectedSession) {
         state.sessions = sessions.map((session) =>
           session.uuid_code === state.selectedSession.uuid_code && !session.title
@@ -1951,6 +1983,16 @@
     appendTimelineRow(row);
   }
 
+  /**
+   * Drop the provisional rows without touching the transcript itself. Used
+   * when a capture resumes an existing session: the finished segments stay on
+   * screen, only the in-flight partials from the previous stream go.
+   */
+  function discardPendingDeltas() {
+    state.pendingDeltas.clear();
+    elements.transcriptProvisional.replaceChildren();
+  }
+
   function clearTimeline() {
     state.pendingDeltas.clear();
     state.segments = { cursor: null, loading: false, requestId: 0 };
@@ -2203,7 +2245,14 @@
     try {
       stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
       state.connectionState = "starting";
-      clearTimeline();
+      // Only wipe the screen when this really is a different meeting. Resuming
+      // (`currentSession` set, POST .../resume) continues the same session, and
+      // its earlier transcript is still on the server -- clearing here made
+      // stop-then-start look like it had thrown the meeting away. The pending
+      // deltas do have to go: they are half-finished rows from the stream that
+      // just died, and the resumed stream renumbers from its own offsets.
+      if (currentSession) discardPendingDeltas();
+      else clearTimeline();
       renderConnectionState();
       const session = await localFetch(path, { method: "POST", body: JSON.stringify(body) });
       state.selectedSession = session;
