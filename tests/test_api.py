@@ -7,6 +7,7 @@ import logging
 import pathlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 
 import httpx
 import pytest
@@ -292,20 +293,35 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     # field at the legend's own id explicitly. Its helper text is wired in via
     # aria-describedby so a screen reader announces it too.
     assert 'aria-label="Broccoli access token"' not in response.text
-    assert 'id="tokenInputLegend"' in response.text
-    assert 'aria-labelledby="tokenInputLegend"' in response.text
     assert 'aria-describedby="tokenInputHelp"' in response.text
     assert 'id="tokenInputHelp"' in response.text
-    # The proxy fields carry the same fieldset/legend shape as the token field
-    # above, so they need the same explicit wiring -- without it their
-    # accessible names fall through to `placeholder` and they announce as
-    # "proxy.broccoli.local", "8080", "usuario-local" and "Deixe em branco para
-    # manter a senha salva" instead of Endereço, Porta, Usuário and Senha.
-    for field_id in ("proxyHost", "proxyPort", "proxyUsername", "proxyPassword"):
-        assert f'id="{field_id}Legend"' in response.text
-        assert f'aria-labelledby="{field_id}Legend"' in response.text
     assert 'aria-describedby="proxyPasswordHelp"' in response.text
     assert 'id="proxyPasswordHelp"' in response.text
+    # The proxy fields carry the same fieldset/legend shape as the token field,
+    # so they need the same explicit wiring -- without it their accessible
+    # names fall through to `placeholder` and they announce as
+    # "proxy.broccoli.local", "8080", "usuario-local" and "Deixe em branco para
+    # manter a senha salva" instead of Endereço, Porta, Usuário and Senha.
+    #
+    # Checked as a pairing, on the parsed document, and against the legend's
+    # visible text. Asserting that `id="proxyHostLegend"` and
+    # `aria-labelledby="proxyHostLegend"` each appear *somewhere* -- which is
+    # what this did -- says nothing about them being on the same field: wiring
+    # #proxyHost to #proxyPortLegend keeps both substrings, and the axe scan
+    # passes it too, because the name is then wrong but present. Comparing the
+    # name to the visible text is also the WCAG 2.5.3 property itself, rather
+    # than a proxy for it.
+    labelled = _parse_labelled_fields(response.text)
+    for field_id, visible_label in (
+        ("tokenInput", "Token de acesso"),
+        ("proxyHost", "Endereço"),
+        ("proxyPort", "Porta"),
+        ("proxyUsername", "Usuário"),
+        ("proxyPassword", "Senha"),
+    ):
+        legend_id = labelled.attributes[field_id]["aria-labelledby"]
+        assert labelled.attributes[legend_id]["tag"] == "legend"
+        assert labelled.legend_text[legend_id].strip() == visible_label
     # The login screen needs its own way into the settings panel: /api/settings
     # is unauthenticated precisely so a proxy can be configured before the login
     # request can reach the backend, and #settingsButton lives in the sidebar
@@ -1874,6 +1890,54 @@ async def test_default_proxy_prober_succeeds_for_a_non_407_response(
     )
 
     assert result is True
+
+
+class _LabelledFields(HTMLParser):
+    """Read the served shell into what an accessible-name check actually needs.
+
+    Substring assertions over the raw document cannot see a pairing: an id and
+    a reference to it both being present says nothing about them belonging to
+    the same field. Parsing gives every element's attributes back keyed by id,
+    and every <legend>'s visible text alongside, which is what turns "the
+    string is in there somewhere" into "this input is named by this legend, and
+    that legend reads what the user sees".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.attributes: dict[str, dict[str, str]] = {}
+        self.legend_text: dict[str, str] = {}
+        self._open_legend: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {name: value or "" for name, value in attrs}
+        identifier = attributes.get("id")
+        if identifier:
+            self.attributes[identifier] = {"tag": tag, **attributes}
+        if tag == "legend":
+            self._open_legend = identifier
+            if identifier:
+                self.legend_text[identifier] = ""
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag == "legend":
+            self._open_legend = None
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "legend":
+            self._open_legend = None
+
+    def handle_data(self, data: str) -> None:
+        if self._open_legend:
+            self.legend_text[self._open_legend] += data
+
+
+def _parse_labelled_fields(document: str) -> _LabelledFields:
+    parser = _LabelledFields()
+    parser.feed(document)
+    parser.close()
+    return parser
 
 
 def _backend_error_details() -> set[str]:
