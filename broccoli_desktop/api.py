@@ -22,7 +22,6 @@ from broccoli_desktop.capture import (
     CaptureBackend,
     DeviceUnavailableError,
 )
-from broccoli_desktop.config import PRODUCTION_SERVER_URL
 from broccoli_desktop.credentials import CredentialStorageError
 from broccoli_desktop.models import (
     ConnectionState,
@@ -35,6 +34,7 @@ from broccoli_desktop.models import (
     UiEvent,
     validate_title,
 )
+from broccoli_desktop.naming import SessionTitleGenerator
 from broccoli_desktop.remote import (
     ListeningRemote,
     RemoteConflictError,
@@ -73,9 +73,9 @@ class Services:
     remote_factory: RemoteFactory
     capture_backend: CaptureBackend
     loopback_port: int | None = None
-    official_broccoli_url: str = PRODUCTION_SERVER_URL
     controller_factory: ControllerFactory = DesktopSessionController
     device_settings: DeviceSettings = field(default_factory=InMemoryDeviceSettings)
+    session_titles: SessionTitleGenerator = field(default_factory=SessionTitleGenerator)
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
@@ -342,6 +342,17 @@ def create_app(services: Services) -> FastAPI:
         services.clear_authenticated()
         return Response(status_code=204)
 
+    @app.get("/api/session-name")
+    async def session_name() -> dict[str, str]:
+        """Suggest a readable title for a session the user is about to start.
+
+        The draft is named before the row exists so the title the user sees is
+        the title that gets persisted, and so a meeting nobody renames is still
+        findable in the history.
+        """
+        _require_authenticated(services)
+        return {"title": services.session_titles()}
+
     @app.get("/api/devices")
     async def devices() -> dict[str, object]:
         return {"devices": _device_payloads(services)}
@@ -435,7 +446,9 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/api/sessions", status_code=201)
     async def start_session(request: StartSessionRequest) -> dict[str, object]:
-        title = _validate_title(request.title)
+        # Named here when the client could not name it -- a failed suggestion
+        # request must not be what leaves a meeting with no title at all.
+        title = _validate_title(request.title) or services.session_titles()
         choices = _validated_choices(services.capture_backend, request)
         controller, _remote = _require_authenticated(services)
         services.stop_audio_level_monitor()
@@ -616,7 +629,6 @@ def _bootstrap_payload(
     choices = controller.selected_devices if controller is not None else None
     return {
         "authenticated": controller is not None,
-        "official_broccoli_url": services.official_broccoli_url,
         "devices": _device_payloads(services),
         "selected_devices": (
             {

@@ -25,7 +25,6 @@ from broccoli_desktop.runtime import (
     start_runtime,
 )
 from tests.fakes import (
-    VISUAL_TEST_BROCCOLI_URL,
     VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
     visual_test_remote_factory,
@@ -809,7 +808,6 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
         bootstrap = websocket.receive_json()["bootstrap"]
 
     assert login.status_code == 204
-    assert bootstrap["official_broccoli_url"] == VISUAL_TEST_BROCCOLI_URL
     assert bootstrap["authenticated"] is True
     assert [device["device_id"] for device in bootstrap["devices"]] == ["mic-1", "system-1"]
     assert VISUAL_TEST_TOKEN not in str(bootstrap)

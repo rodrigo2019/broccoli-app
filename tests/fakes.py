@@ -19,7 +19,10 @@ from broccoli_desktop.remote import (
 )
 
 VISUAL_TEST_TOKEN = "visual-test-token"
-VISUAL_TEST_BROCCOLI_URL = "http://127.0.0.1:8000"
+
+#: Matches DESKTOP_SESSION_PAGE_SIZE on the backend, so a fake page boundary
+#: falls where a real one would.
+SESSION_PAGE_SIZE = 20
 
 
 class FakeRemoteClosedError(Exception):
@@ -125,24 +128,47 @@ class FakeSessionRemote:
         configured_page = self.session_pages.get((cursor, query))
         if configured_page is not None:
             return configured_page
-        return SessionPage(tuple(self._matching_sessions(query)), None)
+        return self._page(self._matching_sessions(query), cursor)
+
+    def _page(self, sessions: list[SessionSummary], cursor: str | None) -> SessionPage:
+        """Slice by offset, the way the backend's cursor actually behaves.
+
+        Answering every request with the whole list would let infinite scroll
+        look like it works against this fake without ever asking for a page.
+        """
+        offset = int(cursor) if cursor else 0
+        window = sessions[offset : offset + SESSION_PAGE_SIZE]
+        has_more = len(sessions) > offset + SESSION_PAGE_SIZE
+        return SessionPage(tuple(window), str(offset + SESSION_PAGE_SIZE) if has_more else None)
 
     def _matching_sessions(self, query: str) -> list[SessionSummary]:
-        """Filter the seeded sessions the way the backend list endpoint does.
+        """Filter and order the seeded sessions the way the list endpoint does.
 
         Ignoring ``query`` here would let the sidebar search look like it works
-        against this fake no matter what it sends.
+        against this fake no matter what it sends. Serving them in insertion
+        order would be worse: the first page would hold the oldest sessions
+        while the real endpoint orders by ``-is_pinned, -pinned_at,
+        -started_at``, and the client sorting its own copy would hide the
+        difference right up until a page boundary mattered.
         """
         term = query.strip().casefold()
-        if not term:
-            return list(self.sessions.values())
-        return [
+        matches = [
             session
             for session in self.sessions.values()
-            if term in session.uuid_code.casefold()
+            if not term
+            or term in session.uuid_code.casefold()
             or term in (session.device_label or "").casefold()
             or term in (session.title or "").casefold()
         ]
+        return sorted(
+            matches,
+            key=lambda session: (
+                session.is_pinned,
+                session.pinned_at or "",
+                session.started_at or "",
+            ),
+            reverse=True,
+        )
 
     async def get_session(self, uuid_code: str) -> SessionSummary:
         self._assert_authorized()
@@ -407,11 +433,40 @@ class VisualTestRemoteFactory:
         return self.remote
 
 
+def visual_history() -> dict[str, SessionSummary]:
+    """Enough retained sessions to need three pages in the browser check.
+
+    Three, not two: with a single page-boundary the sentinel is already in view
+    when the first page lands, the second page loads before anyone scrolls, and
+    the check cannot tell automatic loading from having fetched everything.
+
+    The timestamps deliberately mix the two shapes the backend emits -- with and
+    without fractional seconds -- because comparing them as text is what used to
+    put the oldest session at the top of the list.
+    """
+    history: dict[str, SessionSummary] = {}
+    for index in range(SESSION_PAGE_SIZE * 2 + 5):
+        minute = f"{index:02d}"
+        fraction = ".123456" if index % 2 else ""
+        uuid_code = f"history-{index:02d}"
+        history[uuid_code] = SessionSummary(
+            uuid_code=uuid_code,
+            title=f"Reunião arquivada {index:02d}",
+            status="ended",
+            started_at=f"2026-08-19T10:{minute}:00{fraction}Z",
+            ended_at=f"2026-08-19T11:{minute}:00Z",
+            device_label="Speakers",
+            segment_count=0,
+            is_live=False,
+        )
+    return history
+
+
 def visual_test_remote() -> FakeSessionRemote:
-    """Seed only a fresh fake capture and one final transcript segment."""
+    """Seed a paginated history, a fresh fake capture and one final segment."""
     delta, segment = delta_final_pair()
     return FakeSessionRemote(
-        sessions={},
+        sessions=visual_history(),
         next_sequences=[{"mic": 1, "system": 1}],
         stream_event_scripts=[[delta, segment]],
     )

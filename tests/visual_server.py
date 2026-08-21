@@ -11,7 +11,6 @@ import uvicorn
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app
 from broccoli_desktop.models import DeviceDescriptor
 from tests.fakes import (
-    VISUAL_TEST_BROCCOLI_URL,
     FakeCaptureBackend,
     visual_test_remote_factory,
 )
@@ -47,7 +46,6 @@ def create_visual_app(*, port: int):
             remote_factory=visual_test_remote_factory(),
             capture_backend=capture_backend,
             loopback_port=port,
-            official_broccoli_url=VISUAL_TEST_BROCCOLI_URL,
         )
     )
 

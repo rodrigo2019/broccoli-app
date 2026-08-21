@@ -13,7 +13,8 @@
     logoutButton: document.querySelector("#logoutButton"),
     notification: document.querySelector("#notification"),
     newSessionButton: document.querySelector("#newSessionButton"),
-    loadMoreButton: document.querySelector("#loadMoreButton"),
+    sessionsSentinel: document.querySelector("#sessionsSentinel"),
+    sessionHistoryScroll: document.querySelector(".conversations-section-body"),
     sessionSearchInput: document.querySelector("#sessionSearchInput"),
     sessionHistorySection: document.querySelector("#sessionHistorySection"),
     sessionLibrary: document.querySelector("#sessionLibrary"),
@@ -27,9 +28,9 @@
     backToTranscriptButton: document.querySelector("#backToTranscriptButton"),
     transcriptHeaderContext: document.querySelector("#transcriptHeaderContext"),
     settingsHeaderTitle: document.querySelector("#settingsHeaderTitle"),
+    renameSessionButton: document.querySelector("#renameSessionButton"),
     captureIndicator: document.querySelector("#captureIndicator"),
     captureIndicatorLabel: document.querySelector("#captureIndicatorLabel"),
-    themeToggleButton: document.querySelector("#themeToggleButton"),
     settingsForm: document.querySelector("#settingsForm"),
     settingsRefreshDevicesButton: document.querySelector("#settingsRefreshDevicesButton"),
     settingsMicrophoneSelect: document.querySelector("#settingsMicrophoneSelect"),
@@ -55,8 +56,8 @@
     deviceRequired: document.querySelector("#deviceRequired"),
     captureToggleButton: document.querySelector("#captureToggleButton"),
     copyCodeButton: document.querySelector("#copyCodeButton"),
-    openBroccoliLink: document.querySelector("#openBroccoliLink"),
     captureDock: document.querySelector("#captureDock"),
+    jumpToLatestButton: document.querySelector("#jumpToLatestButton"),
     microphoneHistogram: document.querySelector("#microphoneHistogram"),
     systemHistogram: document.querySelector("#systemHistogram"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
@@ -104,10 +105,11 @@
   function applyTheme(theme) {
     const resolved = theme === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", resolved);
-    const icon = elements.themeToggleButton?.querySelector("i");
-    if (icon) icon.className = resolved === "dark" ? "bi bi-moon" : "bi bi-sun";
     if (elements.themeLightOption) elements.themeLightOption.checked = resolved === "light";
     if (elements.themeDarkOption) elements.themeDarkOption.checked = resolved === "dark";
+    // The histograms paint with colours resolved from CSS, so a theme change has
+    // to invalidate what they cached.
+    captureMotion?.refreshTheme();
   }
 
   function setTheme(theme) {
@@ -133,6 +135,11 @@
     // is exactly how the two drift apart.
     pendingDevices: { microphone_id: "", system_device_id: "" },
     connectionState: "idle",
+    // Whether the transcript should ride along with new content. Decided by the
+    // container's scroll position, not by the moment a row is appended, so a
+    // user reading older lines is never yanked back down.
+    followTranscript: true,
+    transcriptHasNewContent: false,
     pendingDeltas: new Map(),
     eventSocket: null,
     eventRetryDelay: 0,
@@ -149,8 +156,6 @@
     renameSession: null,
     deleteSession: null,
   };
-
-  applyTheme(state.theme);
 
   // ---------------------------------------------------------------- notifications
 
@@ -232,93 +237,220 @@
 
   // ------------------------------------------------------------------- capture motion
 
+  const HISTOGRAM_CHANNELS = ["microphone", "system"];
+  const HISTOGRAM_BARS = 34;
+  // How much history one bar covers. Thirty-four bars at this rate is about a
+  // second and a half of sound on screen.
+  const HISTOGRAM_PUSH_MS = 45;
+  // Share of the remaining distance a bar closes each frame. Low enough to round
+  // off the twenty-hertz steps the level stream delivers, high enough that a
+  // sudden loud sound still reads as sudden.
+  const HISTOGRAM_EASE = 0.3;
+  const HISTOGRAM_ACTIVE_STATES = ["starting", "streaming", "reconnecting"];
+
+  function drawBar(context, x, y, width, height, radius) {
+    if (typeof context.roundRect === "function") {
+      context.beginPath();
+      context.roundRect(x, y, width, height, radius);
+      context.fill();
+      return;
+    }
+    context.fillRect(x, y, width, height);
+  }
+
+  /**
+   * Paints the two channel histograms in the capture panel.
+   *
+   * On a canvas rather than sixty DOM nodes: the level stream ticks about twenty
+   * times a second, and answering each tick by writing sixty CSS custom
+   * properties and restarting sixty transitions is a lot of style recalculation
+   * for a decoration. Here a frame is a couple of dozen fills.
+   *
+   * What makes the motion read as sound rather than as a bar chart being redrawn
+   * is that a bar eases toward the newest sample instead of stepping to it, and
+   * that the history scrolls on a clock of its own instead of on packet arrival.
+   *
+   * The loop only runs while there is something to show. Idle, stopped, hidden
+   * window, or a user who asked for less motion: no frames at all.
+   */
   class CaptureMotion {
     constructor({ microphoneHistogram, systemHistogram }) {
-      this.microphoneHistogram = microphoneHistogram;
-      this.systemHistogram = systemHistogram;
-      this.histogramBars = { microphone: [], system: [] };
+      this.canvases = { microphone: microphoneHistogram, system: systemHistogram };
+      this.contexts = { microphone: null, system: null };
+      this.sizes = { microphone: { width: 0, height: 0 }, system: { width: 0, height: 0 } };
       this.samples = { microphone: [], system: [] };
+      this.levels = { microphone: 0, system: 0 };
+      this.targets = { microphone: 0, system: 0 };
+      this.colors = { microphone: "", system: "" };
       this.captureState = "idle";
       this.signalActive = false;
+      this.phase = 0;
+      this.frame = null;
+      this.lastFrameAt = 0;
+      this.sincePush = 0;
+      this.resizeObserver = null;
+      this.reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)") || null;
     }
 
     mount() {
-      this.histogramBars.microphone = this.createBars(
-        this.microphoneHistogram,
-        30,
-        "capture-histogram__bar",
-      );
-      this.histogramBars.system = this.createBars(
-        this.systemHistogram,
-        30,
-        "capture-histogram__bar",
-      );
-      this.samples.microphone = Array(this.histogramBars.microphone.length).fill(0);
-      this.samples.system = Array(this.histogramBars.system.length).fill(0);
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const canvas = this.canvases[channel];
+        if (!canvas) continue;
+        this.contexts[channel] = canvas.getContext("2d");
+        this.samples[channel] = Array(HISTOGRAM_BARS).fill(0);
+      }
+      // Measured by an observer instead of read every frame: asking a canvas for
+      // its client size mid-frame forces a layout that the rest of the frame
+      // then waits on.
+      if ("ResizeObserver" in window) {
+        this.resizeObserver = new ResizeObserver(() => this.measure());
+        for (const canvas of Object.values(this.canvases)) {
+          if (canvas) this.resizeObserver.observe(canvas);
+        }
+      }
+      this.measure();
+      this.refreshTheme();
+      this.reducedMotion?.addEventListener?.("change", () => this.sync());
+      document.addEventListener("visibilitychange", () => this.sync());
       this.paint();
     }
 
-    createBars(container, count, className) {
-      if (!container) return [];
-      container.replaceChildren();
-      const bars = [];
-      for (let index = 0; index < count; index += 1) {
-        const bar = document.createElement("span");
-        bar.className = className;
-        bar.setAttribute("aria-hidden", "true");
-        container.append(bar);
-        bars.push(bar);
+    measure() {
+      const ratio = window.devicePixelRatio || 1;
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const canvas = this.canvases[channel];
+        if (!canvas) continue;
+        const width = Math.max(1, Math.floor(canvas.clientWidth));
+        const height = Math.max(1, Math.floor(canvas.clientHeight));
+        this.sizes[channel] = { width, height };
+        const deviceWidth = Math.floor(width * ratio);
+        const deviceHeight = Math.floor(height * ratio);
+        if (canvas.width !== deviceWidth || canvas.height !== deviceHeight) {
+          canvas.width = deviceWidth;
+          canvas.height = deviceHeight;
+        }
+        this.contexts[channel]?.setTransform(ratio, 0, 0, ratio, 0, 0);
       }
-      return bars;
+      this.paint();
+    }
+
+    /** Re-read the colour each channel inherits from the stylesheet. */
+    refreshTheme() {
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const canvas = this.canvases[channel];
+        if (canvas) this.colors[channel] = window.getComputedStyle(canvas).color;
+      }
+      this.paint();
     }
 
     setState(connectionState) {
       this.captureState = connectionState;
-      this.paint();
+      this.sync();
     }
 
     isActive() {
-      return ["starting", "streaming", "reconnecting"].includes(this.captureState);
+      return HISTOGRAM_ACTIVE_STATES.includes(this.captureState);
     }
 
     setLevels(snapshot = {}) {
-      const channels = { microphone: snapshot.microphone, system: snapshot.system };
       this.signalActive = Boolean(snapshot.active);
-      Object.entries(channels).forEach(([channel, measurement]) => {
-        const level = Math.max(0, Math.min(1, Number(measurement?.level) || 0));
-        const peak = Math.max(level, Math.min(1, Number(measurement?.peak) || 0));
-        const samples = this.samples[channel];
-        const bars = this.histogramBars[channel];
-        if (!bars.length) return;
-        samples.push({ level, peak });
-        while (samples.length > bars.length) samples.shift();
-      });
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const measurement = channel === "microphone" ? snapshot.microphone : snapshot.system;
+        this.targets[channel] = Math.max(0, Math.min(1, Number(measurement?.level) || 0));
+      }
+      this.sync();
+      // With the animation off, the history still has to advance -- just once per
+      // delivered snapshot rather than once per frame.
+      if (this.frame === null) this.step(HISTOGRAM_PUSH_MS, { instant: true });
+    }
+
+    /** Start or stop the frame loop to match what there is to show. */
+    sync() {
+      const running = this.signalActive && this.isActive();
+      const animate = running && !document.hidden && !this.reducedMotion?.matches;
+      if (animate && this.frame === null) {
+        this.lastFrameAt = performance.now();
+        this.frame = window.requestAnimationFrame((now) => this.tick(now));
+        return;
+      }
+      if (!animate && this.frame !== null) {
+        window.cancelAnimationFrame(this.frame);
+        this.frame = null;
+        if (!running) this.settle();
+      }
+    }
+
+    tick(now) {
+      this.frame = null;
+      // Capped so a window that was hidden for a minute does not replay a minute
+      // of history in a single frame.
+      const elapsed = Math.min(now - this.lastFrameAt, 100);
+      this.lastFrameAt = now;
+      this.step(elapsed);
+      this.sync();
+    }
+
+    step(elapsed, { instant = false } = {}) {
+      const active = this.signalActive && this.isActive();
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const target = active ? this.targets[channel] : 0;
+        this.levels[channel] = instant
+          ? target
+          : this.levels[channel] + (target - this.levels[channel]) * HISTOGRAM_EASE;
+      }
+      this.phase += elapsed * 0.004;
+      this.sincePush += elapsed;
+      while (this.sincePush >= HISTOGRAM_PUSH_MS) {
+        this.sincePush -= HISTOGRAM_PUSH_MS;
+        for (const channel of HISTOGRAM_CHANNELS) {
+          const samples = this.samples[channel];
+          samples.push(this.levels[channel]);
+          if (samples.length > HISTOGRAM_BARS) samples.shift();
+        }
+      }
+      this.paint();
+    }
+
+    /** Drain the history so a stopped capture flattens instead of freezing. */
+    settle() {
+      for (const channel of HISTOGRAM_CHANNELS) {
+        this.levels[channel] = 0;
+        this.targets[channel] = 0;
+        this.samples[channel] = Array(HISTOGRAM_BARS).fill(0);
+      }
       this.paint();
     }
 
     paint() {
-      const active = this.signalActive && this.isActive();
-      Object.entries(this.histogramBars).forEach(([channel, bars]) => {
+      for (const channel of HISTOGRAM_CHANNELS) {
+        const context = this.contexts[channel];
+        const { width, height } = this.sizes[channel];
+        if (!context || !width || !height) continue;
+        context.clearRect(0, 0, width, height);
+        context.fillStyle = this.colors[channel] || "currentColor";
+
         const samples = this.samples[channel];
-        const channelOffset = channel === "microphone" ? 0 : 1.8;
-        const peakIndex = samples.reduce(
-          (best, sample, index) => (sample.peak > (samples[best]?.peak || 0) ? index : best),
-          0,
-        );
-        bars.forEach((bar, index) => {
-          const sample = samples[index] || { level: 0, peak: 0 };
-          const envelope = Math.min(1, Math.sqrt(sample.level) * 1.6);
-          const profile = 0.82 + 0.18 * Math.sin(index * 1.37 + channelOffset);
-          const height = active ? 4 + envelope * 88 * profile : 4;
-          bar.style.setProperty("--histogram-height", `${height.toFixed(1)}%`);
-          bar.classList.toggle("is-peak", active && index === peakIndex && sample.peak > 0.04);
+        const slot = width / samples.length;
+        const barWidth = Math.max(1, slot * 0.62);
+        const radius = barWidth / 2;
+        const floor = Math.min(2, height);
+        samples.forEach((value, index) => {
+          const envelope = Math.min(1, Math.sqrt(Math.max(0, value)) * 1.6);
+          // A travelling wobble rather than a fixed comb: at a steady level the
+          // shape still moves, which is what keeps it from looking frozen.
+          const profile = 0.82 + 0.18 * Math.sin(index * 0.9 + this.phase);
+          const barHeight = Math.max(floor, envelope * height * profile);
+          context.globalAlpha = 0.4 + 0.6 * envelope;
+          drawBar(context, index * slot, height - barHeight, barWidth, barHeight, radius);
         });
-      });
+        context.globalAlpha = 1;
+      }
     }
   }
 
   const captureMotion = new CaptureMotion(elements);
   captureMotion.mount();
+  applyTheme(state.theme);
 
   // ---------------------------------------------------------------- audio levels
 
@@ -541,13 +673,11 @@
     elements.transcriptHeaderContext.classList.toggle("hidden", settingsOpen || !state.authenticated);
     elements.settingsHeaderTitle.classList.toggle("hidden", !settingsOpen);
     elements.backToTranscriptButton.classList.toggle("hidden", !settingsOpen);
-    // The capture badge and the code button describe an open session; on the
-    // login screen and in settings the header keeps only the theme toggle and
-    // the link out to the platform.
+    // The capture badge and the code button describe an open session, so the
+    // login screen and the settings screen show neither.
     const sessionActionsVisible = state.authenticated && !settingsOpen;
     elements.captureIndicator.classList.toggle("hidden", !sessionActionsVisible);
     elements.copyCodeButton.classList.toggle("hidden", !sessionActionsVisible);
-    elements.openBroccoliLink.classList.toggle("hidden", !state.authenticated);
     elements.settingsButton.setAttribute("aria-current", settingsOpen ? "page" : "false");
   }
 
@@ -695,17 +825,32 @@
     return session.title || session.device_label || session.uuid_code;
   }
 
+  /**
+   * Parse a serialized timestamp into an instant, or 0 when it is missing.
+   *
+   * Comparing these as text is what used to put the wrong session on top. The
+   * backend renders a timestamp with microseconds only when it has them, and
+   * `localeCompare` treats the separating dot as ignorable punctuation, so
+   * `…:00Z` and `…:00.9Z` came back in the wrong order. Instants have no such
+   * opinions, and they also make `+00:00` and `Z` the same moment.
+   */
+  function sessionTimestamp(value) {
+    const parsed = Date.parse(value || "");
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  /** Pinned first, then most recently created. Mirrors the backend ordering. */
   function sortSessions() {
     state.sessions.sort((left, right) => {
       if (Boolean(left.is_pinned) !== Boolean(right.is_pinned)) {
         return left.is_pinned ? -1 : 1;
       }
-      if (left.is_pinned && left.pinned_at !== right.pinned_at) {
-        return String(right.pinned_at || "").localeCompare(String(left.pinned_at || ""));
+      if (left.is_pinned) {
+        const pinDelta = sessionTimestamp(right.pinned_at) - sessionTimestamp(left.pinned_at);
+        if (pinDelta) return pinDelta;
       }
-      if (left.started_at !== right.started_at) {
-        return String(right.started_at || "").localeCompare(String(left.started_at || ""));
-      }
+      const startDelta = sessionTimestamp(right.started_at) - sessionTimestamp(left.started_at);
+      if (startDelta) return startDelta;
       return String(left.uuid_code).localeCompare(String(right.uuid_code));
     });
   }
@@ -834,8 +979,9 @@
 
   function renderSessions() {
     elements.sessionLibrary.replaceChildren();
-    elements.loadMoreButton.disabled = state.sessionsLoading || !state.nextCursor;
-    elements.loadMoreButton.classList.toggle("hidden", !state.nextCursor);
+    // The sentinel is both the trigger for the next page and the only loading
+    // affordance the list needs; with no cursor left there is nothing to watch.
+    elements.sessionsSentinel.classList.toggle("hidden", !state.nextCursor);
 
     if (!state.sessions.length) {
       elements.sessionLibrary.append(
@@ -902,6 +1048,10 @@
   }
 
   async function loadSessions({ reset = false } = {}) {
+    // Three ways the sentinel can ask twice for the same page: it stays in view
+    // while the request is in flight, the scroll jitters, or a filter change
+    // races it. All three land here.
+    if (state.sessionsLoading && !reset) return;
     if (!reset && !state.nextCursor) return;
     const requestId = ++state.sessionsRequestId;
     const cursor = reset ? null : state.nextCursor;
@@ -945,6 +1095,47 @@
         renderSessions();
       }
     }
+  }
+
+  /**
+   * Load the next page when the end of the list comes into view.
+   *
+   * Observed once, at boot, on an element that lives outside the list body --
+   * `renderSessions` replaces the list wholesale, and re-observing a fresh node
+   * on every render would be a subscription leak dressed as a feature.
+   */
+  function watchSessionsSentinel() {
+    if (!("IntersectionObserver" in window)) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        loadSessions().catch(reportError);
+      },
+      // Ahead of the fold, so the next page is usually already there by the
+      // time the user reaches the bottom.
+      { root: elements.sessionHistoryScroll, rootMargin: "200px" },
+    );
+    observer.observe(elements.sessionsSentinel);
+  }
+
+  /**
+   * Keep the transcript clear of the floating capture panel.
+   *
+   * The clearance used to be a hand-picked padding, which stopped matching the
+   * moment the panel changed height at a breakpoint. Measuring it means the last
+   * line is never the one hidden behind the controls.
+   */
+  function watchCaptureDockHeight() {
+    const apply = () => {
+      const height = elements.captureDock.getBoundingClientRect().height;
+      if (height) document.documentElement.style.setProperty("--capture-dock-height", `${height}px`);
+    };
+    if ("ResizeObserver" in window) {
+      new ResizeObserver(apply).observe(elements.captureDock);
+      return;
+    }
+    apply();
+    window.addEventListener("resize", apply);
   }
 
   function scheduleSessionSearch() {
@@ -1020,18 +1211,63 @@
 
   // ------------------------------------------------------------------- transcript
 
+  // Distance from the bottom that still counts as "following along", matching
+  // the platform's chat. Wide enough that a stray wheel notch does not detach
+  // the view, narrow enough that reading one message back does.
+  const TRANSCRIPT_FOLLOW_THRESHOLD = 100;
+  let transcriptScrollFrame = null;
+
   function isNearTimelineBottom() {
     const timeline = elements.transcriptTimeline;
-    return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 48;
+    return (
+      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <=
+      TRANSCRIPT_FOLLOW_THRESHOLD
+    );
+  }
+
+  /**
+   * Scroll to the newest content, coalescing to one write per frame.
+   *
+   * A live capture appends on every delta; scrolling inline on each one reads
+   * and writes layout several times a frame for a single visible result.
+   */
+  function scrollTranscriptToLatest({ force = false } = {}) {
+    if (!force && !state.followTranscript) return;
+    if (transcriptScrollFrame !== null) return;
+    transcriptScrollFrame = window.requestAnimationFrame(() => {
+      transcriptScrollFrame = null;
+      elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
+      if (force) setFollowTranscript(true);
+    });
+  }
+
+  function setFollowTranscript(following) {
+    state.followTranscript = following;
+    // Reaching the bottom means the user has seen everything, so the invitation
+    // to jump goes away with it.
+    if (following) state.transcriptHasNewContent = false;
+    elements.jumpToLatestButton.classList.toggle(
+      "hidden",
+      following || !state.transcriptHasNewContent,
+    );
+  }
+
+  function handleTranscriptScroll() {
+    setFollowTranscript(isNearTimelineBottom());
+  }
+
+  /** Note content that arrived while the user was reading further up. */
+  function noteTranscriptActivity() {
+    if (state.followTranscript) return;
+    state.transcriptHasNewContent = true;
+    elements.jumpToLatestButton.classList.remove("hidden");
   }
 
   function appendTimelineRow(row) {
-    const shouldFollow = isNearTimelineBottom();
     elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
     elements.transcriptTimeline.append(row);
-    if (shouldFollow) {
-      elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
-    }
+    noteTranscriptActivity();
+    scrollTranscriptToLatest();
   }
 
   function formatTranscriptTimestamp(offsetMs) {
@@ -1088,12 +1324,10 @@
     const pending = state.pendingDeltas.get(segment.utterance_id);
     const row = transcriptRow(segment, false);
     if (pending) {
-      const shouldFollow = isNearTimelineBottom();
       pending.replaceWith(row);
       state.pendingDeltas.delete(segment.utterance_id);
-      if (shouldFollow) {
-        elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
-      }
+      noteTranscriptActivity();
+      scrollTranscriptToLatest();
       return;
     }
     appendTimelineRow(row);
@@ -1102,6 +1336,8 @@
   function clearTimeline() {
     state.pendingDeltas.clear();
     state.segments = { cursor: null, loading: false, requestId: 0 };
+    state.transcriptHasNewContent = false;
+    setFollowTranscript(true);
     elements.transcriptTimeline.replaceChildren();
     const empty = document.createElement("p");
     empty.id = "emptyTimeline";
@@ -1282,7 +1518,11 @@
 
   function renderSessionDetails() {
     const session = state.selectedSession;
-    elements.sessionTitle.value = session?.title || "";
+    // Only adopt a stored title when there is a stored session. With none, the
+    // field holds the draft name -- generated or typed -- and a socket
+    // reconnect redrawing the header must not wipe it.
+    if (session) elements.sessionTitle.value = session.title || "";
+    elements.renameSessionButton.disabled = !session;
     elements.sessionMeta.textContent = session
       ? `Código ${session.uuid_code} · ${session.segment_count} segmentos`
       : "Inicie uma captura para gerar um código local.";
@@ -1361,6 +1601,13 @@
     if (!session) return;
     const title = elements.sessionTitle.value.trim();
     if (title === session.title) return;
+    if (!title) {
+      // Same rule the rename dialog enforces: a session with no name is one the
+      // user cannot find again.
+      elements.sessionTitle.value = session.title || "";
+      showNotification("A sessão precisa de um nome.", "warning");
+      return;
+    }
     await updateSessionMetadata(session, { title });
   }
 
@@ -1374,7 +1621,16 @@
     }
   }
 
-  function prepareNewSession() {
+  /**
+   * Start a draft session, already named.
+   *
+   * The row itself is still born when the capture starts -- a listening session
+   * is what the backend opens on the audio handshake, and an empty one would sit
+   * against the one-active-session constraint and under the expiry sweep. What
+   * is created here is the title, so the name the user sees is the name that
+   * gets persisted, and a meeting nobody renames is still findable later.
+   */
+  async function prepareNewSession() {
     if (isCaptureActive()) {
       showNotification("Pare a captura antes de iniciar uma nova sessão.", "warning");
       return;
@@ -1387,7 +1643,17 @@
     renderSessions();
     renderSessionDetails();
     renderConnectionState();
+    elements.sessionTitle.value = "";
     elements.sessionTitle.focus();
+    try {
+      const suggestion = await localFetch("/api/session-name");
+      // Only if the field is still the untouched draft: the request is quick,
+      // but not quicker than someone who starts typing straight away.
+      if (!elements.sessionTitle.value) elements.sessionTitle.value = suggestion.title;
+    } catch {
+      // No notification: the capture names the session server-side when the
+      // title arrives empty, so nothing is actually lost here.
+    }
   }
 
   // ---------------------------------------------------------------------- events
@@ -1400,7 +1666,6 @@
     state.connectionState = bootstrap.state;
     state.selectedSession = bootstrap.session;
     if (state.selectedSession) mergeSession(state.selectedSession);
-    elements.openBroccoliLink.href = bootstrap.official_broccoli_url;
     renderDevices(bootstrap.devices || []);
     renderView();
     renderSessions();
@@ -1534,14 +1799,12 @@
       );
     }
   });
-  elements.themeToggleButton.addEventListener("click", () => {
-    setTheme(state.theme === "dark" ? "light" : "dark");
-  });
   elements.settingsButton.addEventListener("click", showSettings);
   elements.backToTranscriptButton.addEventListener("click", showTranscript);
   elements.logoutButton.addEventListener("click", () => signOut().catch(reportError));
-  elements.newSessionButton.addEventListener("click", prepareNewSession);
-  elements.loadMoreButton.addEventListener("click", () => loadSessions().catch(reportError));
+  elements.newSessionButton.addEventListener("click", () => {
+    prepareNewSession().catch(reportError);
+  });
   elements.sessionSearchInput.addEventListener("input", scheduleSessionSearch);
   elements.refreshDevicesButton.addEventListener("click", showSettings);
   elements.settingsRefreshDevicesButton.addEventListener("click", refreshDevices);
@@ -1591,6 +1854,24 @@
       reportError(error);
     });
   });
+  // Inline editing with the same two keys the rename dialog answers to. The
+  // value at focus time is what Escape restores, so cancelling works on a draft
+  // name that has no stored version to fall back on.
+  elements.sessionTitle.addEventListener("focus", (event) => {
+    event.target.dataset.previous = event.target.value;
+  });
+  elements.sessionTitle.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.target.blur();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.target.value = event.target.dataset.previous ?? "";
+      event.target.blur();
+    }
+  });
   elements.renameSessionCancel.addEventListener("click", closeRenameSession);
   elements.renameSessionConfirm.addEventListener("click", () => {
     confirmRenameSession().catch(reportError);
@@ -1612,6 +1893,15 @@
     state.deleteSession = null;
   });
   elements.copyCodeButton.addEventListener("click", copySessionCode);
+  elements.renameSessionButton.addEventListener("click", () => {
+    if (state.selectedSession) openRenameSession(state.selectedSession);
+  });
+  elements.transcriptTimeline.addEventListener("scroll", handleTranscriptScroll, {
+    passive: true,
+  });
+  elements.jumpToLatestButton.addEventListener("click", () => {
+    scrollTranscriptToLatest({ force: true });
+  });
   window.addEventListener("pagehide", closeAudioLevelStream);
   window.addEventListener("pageshow", () => {
     if (state.authenticated && !state.audioLevelSource) connectAudioLevels();
@@ -1620,5 +1910,7 @@
   clearTimeline();
   renderView();
   renderSessions();
+  watchSessionsSentinel();
+  watchCaptureDockHeight();
   connectEvents();
 })();

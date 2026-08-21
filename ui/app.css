@@ -166,6 +166,13 @@
     backdrop-filter: saturate(1.1) blur(16px);
   }
 
+  /* Clearance under the floating capture panel. Fed by a ResizeObserver in
+     app.js, with a fallback close to the panel at its usual height, so the last
+     transcript line is never the one hidden behind the controls. */
+  .capture-view {
+    padding-bottom: calc(var(--capture-dock-height, 5.5rem) + 2rem);
+  }
+
   .transcript-surface {
     display: flex;
     flex-direction: column;
@@ -313,16 +320,22 @@
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.75rem;
-    border: 1px solid color-mix(in oklch, var(--color-primary) 12%, var(--color-base-content));
-    border-radius: 0.75rem;
-    background: color-mix(in oklch, var(--color-base-100) 86%, transparent);
-    box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 22%);
-    backdrop-filter: saturate(1.25) blur(18px);
+    border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
+    border-radius: 1.1rem;
+    background: color-mix(in oklch, var(--color-base-100) 62%, transparent);
+    box-shadow:
+      0 1.5rem 3.5rem color-mix(in oklch, var(--color-base-300) 55%, transparent),
+      inset 0 1px 0 color-mix(in oklch, var(--color-base-100) 60%, transparent);
+    backdrop-filter: saturate(1.6) blur(26px);
+    transition: border-color 240ms ease, box-shadow 240ms ease;
   }
 
   .capture-dock[data-capture-state="streaming"] {
-    border-color: color-mix(in oklch, var(--color-primary) 42%, var(--color-base-content));
-    box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 25%), 0 0 2rem rgb(55 199 60 / 10%);
+    border-color: color-mix(in oklch, var(--color-primary) 38%, transparent);
+    box-shadow:
+      0 1.5rem 3.5rem color-mix(in oklch, var(--color-base-300) 60%, transparent),
+      0 0 2.5rem color-mix(in oklch, var(--color-primary) 18%, transparent),
+      inset 0 1px 0 color-mix(in oklch, var(--color-primary) 22%, transparent);
   }
 
   .capture-dock__sources {
@@ -351,46 +364,28 @@
     text-transform: uppercase;
   }
 
+  /* A canvas, drawn by CaptureMotion in app.js. `color` is the channel tint:
+     the renderer reads it back with getComputedStyle, so the palette stays in
+     the stylesheet and follows the theme without the JS knowing a token name. */
   .capture-dock__histogram {
-    display: flex;
-    align-items: end;
-    gap: 0.13rem;
+    display: block;
+    width: 100%;
     height: 2rem;
     margin-top: 0.3rem;
-    overflow: hidden;
+    color: color-mix(in oklch, var(--color-primary) 62%, var(--color-base-content));
+    transition: color 240ms ease;
   }
 
-  .capture-histogram__bar {
-    width: 0.18rem;
-    min-width: 0.18rem;
-    height: var(--histogram-height, 20%);
-    min-height: 0.22rem;
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--color-primary) 58%, var(--color-base-300));
-    opacity: 0.72;
-    transition: height 90ms linear, opacity 180ms ease, background-color 180ms ease;
+  .capture-dock__histogram--system {
+    color: color-mix(in oklch, var(--color-secondary) 62%, var(--color-base-content));
   }
 
-  .capture-histogram__bar.is-peak {
-    opacity: 1;
-    filter: brightness(1.22);
+  .capture-dock[data-capture-state="streaming"] .capture-dock__histogram {
+    color: var(--color-primary);
   }
 
-  .capture-dock[data-capture-state="streaming"] .capture-histogram__bar {
-    background: var(--color-primary);
-    opacity: 0.98;
-    box-shadow: 0 0 0.65rem color-mix(in oklch, var(--color-primary) 36%, transparent);
-  }
-
-  .capture-dock__histogram--system .capture-histogram__bar {
-    background: color-mix(in oklch, var(--color-secondary) 56%, var(--color-base-300));
-  }
-
-  .capture-dock[data-capture-state="streaming"]
-    .capture-dock__histogram--system
-    .capture-histogram__bar {
-    background: var(--color-secondary);
-    box-shadow: 0 0 0.65rem color-mix(in oklch, var(--color-secondary) 38%, transparent);
+  .capture-dock[data-capture-state="streaming"] .capture-dock__histogram--system {
+    color: var(--color-secondary);
   }
 
   .capture-dock__toggle {
@@ -495,11 +490,7 @@
     }
 
     .capture-dock__histogram {
-      gap: 0.1rem;
-    }
-
-    .capture-histogram__bar:nth-child(n + 22) {
-      display: none;
+      height: 1.6rem;
     }
   }
 }
@@ -550,8 +541,9 @@
     animation: none;
   }
 
+  .capture-dock,
   .capture-dock__toggle,
-  .capture-histogram__bar,
+  .capture-dock__histogram,
   .audio-level-card__segment {
     transition: none;
   }

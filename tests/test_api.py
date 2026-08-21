@@ -171,11 +171,26 @@ def test_fake_bootstrap_exposes_the_same_device_contract() -> None:
     assert [device["kind"] for device in payload["devices"]] == ["mic", "system"]
 
 
-def test_visual_fake_does_not_seed_removed_history_workflow() -> None:
-    """The deterministic visual remote must start fresh rather than model browse/resume history."""
+def test_visual_fake_serves_a_paginated_history_offline() -> None:
+    """The browser check needs a page boundary to scroll past, and no network.
+
+    It also needs both timestamp shapes the backend emits: a fake that only
+    produced whole seconds would never catch the ordering bug the client had.
+    """
     remote = visual_test_remote()
 
-    assert asyncio.run(remote.list_sessions(None, "")).sessions == ()
+    first = asyncio.run(remote.list_sessions(None, ""))
+    second = asyncio.run(remote.list_sessions(first.next_cursor, ""))
+    third = asyncio.run(remote.list_sessions(second.next_cursor, ""))
+
+    assert len(first.sessions) == 20
+    assert first.next_cursor == "20"
+    assert len(second.sessions) == 20
+    assert second.next_cursor == "40"
+    assert third.sessions
+    assert third.next_cursor is None
+    assert any("." in (session.started_at or "") for session in first.sessions)
+    assert any("." not in (session.started_at or "") for session in first.sessions)
 
 
 def test_root_serves_the_desktop_shell(client: TestClient) -> None:
@@ -201,11 +216,16 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="session-library"' in response.text
     assert 'data-testid="capture-toggle"' in response.text
     assert 'data-testid="copy-session-code"' in response.text
-    assert 'data-testid="open-broccoli"' in response.text
+    assert 'data-testid="open-broccoli"' not in response.text
+    assert 'data-testid="rename-session"' in response.text
+    assert 'data-testid="jump-to-latest"' in response.text
+    assert 'id="themeToggleButton"' not in response.text
     assert 'id="renameSessionModal"' in response.text
     assert 'id="deleteSessionModal"' in response.text
     assert 'data-testid="notification-stack"' in response.text
     assert 'data-testid="status-banner"' not in response.text
+    assert 'data-testid="sessions-sentinel"' in response.text
+    assert 'data-testid="load-more"' not in response.text
     assert 'data-testid="transcript-timeline"' in response.text
     assert 'aria-label="Broccoli access token"' in response.text
     assert 'data-testid="session-search"' in response.text
@@ -262,7 +282,6 @@ def test_bootstrap_carries_the_devices_the_first_screen_needs(
 
     assert payload == {
         "authenticated": True,
-        "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
         "devices": [
             {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
             {"device_id": "system-1", "label": "Speakers", "kind": "system"},
@@ -281,7 +300,6 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
 
     assert payload == {
         "authenticated": False,
-        "official_broccoli_url": "https://broccoli.bosch-digital-factory.com",
         "devices": [
             {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
             {"device_id": "system-1", "label": "Speakers", "kind": "system"},
@@ -873,3 +891,51 @@ def test_the_event_socket_listens_before_it_speaks(client: TestClient) -> None:
         with client.websocket_connect("/api/events") as websocket:
             assert websocket.receive_json()["type"] == "bootstrap"
             websocket.close()
+
+
+def test_session_name_suggests_a_title_before_the_session_exists(client: TestClient) -> None:
+    """The draft is named first, so the title the user sees is the one persisted."""
+    unauthenticated = client.get("/api/session-name")
+    login(client)
+
+    first = client.get("/api/session-name")
+    second = client.get("/api/session-name")
+
+    assert unauthenticated.status_code == 401
+    assert first.status_code == 200
+    assert first.json()["title"]
+    assert first.json()["title"] != second.json()["title"]
+
+
+def test_a_capture_started_without_a_title_is_named_by_the_server(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    """A failed suggestion request must not be what leaves a meeting unnamed."""
+    login(client)
+
+    response = client.post(
+        "/api/sessions",
+        json={"title": "", "microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["title"]
+    assert fake_remote_factory.remote.sessions["session-1"].title
+    client.post("/api/sessions/stop")
+
+
+def test_a_supplied_title_is_never_replaced_by_a_generated_one(client: TestClient) -> None:
+    login(client)
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "title": "Retrospectiva da sprint",
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+        },
+    )
+
+    assert response.json()["title"] == "Retrospectiva da sprint"
+    client.post("/api/sessions/stop")

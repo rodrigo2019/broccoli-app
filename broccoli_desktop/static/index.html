@@ -53,6 +53,9 @@
                 <span class="sr-only">Título da reunião</span>
                 <input id="sessionTitle" class="input input-ghost input-sm w-full max-w-[28rem] truncate px-0 font-semibold text-lg" type="text" maxlength="120" placeholder="Sem título" aria-label="Título da reunião" />
               </label>
+              <button id="renameSessionButton" class="btn btn-ghost btn-xs btn-square shrink-0" type="button" data-testid="rename-session" aria-label="Renomear sessão" title="Renomear sessão" disabled>
+                <i class="bi bi-pencil" aria-hidden="true"></i>
+              </button>
               <span id="sessionMeta" class="hidden text-xs text-base-content/60 xl:inline">Inicie uma captura para gerar um código local.</span>
             </div>
             <h3 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold">Configurações</h3>
@@ -63,10 +66,6 @@
               <span id="captureIndicatorLabel">Pronto</span>
             </span>
             <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code">Copiar código</button>
-            <a id="openBroccoliLink" class="btn btn-outline btn-sm" href="" target="_blank" rel="noopener noreferrer" data-testid="open-broccoli">Abrir no Broccoli</a>
-            <button id="themeToggleButton" class="btn-theme-toggle btn btn-ghost btn-sm btn-circle" type="button" title="Alternar tema" aria-label="Alternar tema">
-              <i class="bi bi-sun" aria-hidden="true"></i>
-            </button>
           </div>
         </header>
 
@@ -82,7 +81,7 @@
             <div class="p-6 py-5">
               <fieldset class="fieldset">
                 <legend class="fieldset-legend text-sm">Nome da sessão</legend>
-                <input id="renameSessionInput" class="input w-full" type="text" maxlength="120" autocomplete="off" placeholder="Digite o nome da sessão" />
+                <input id="renameSessionInput" class="input w-full" type="text" maxlength="120" autocomplete="off" placeholder="Digite o nome da sessão" data-testid="rename-session-input" />
               </fieldset>
             </div>
             <hr class="border-base-content/10" />
@@ -259,7 +258,7 @@
           </main>
         </section>
 
-        <section id="mainView" class="hidden min-h-0 flex flex-1 flex-col px-4 pb-36 pt-7 sm:px-6 sm:pb-40 lg:px-8">
+        <section id="mainView" class="capture-view hidden min-h-0 flex flex-1 flex-col px-4 pt-7 sm:px-6 lg:px-8">
           <main class="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col">
             <div class="mb-5 flex items-end justify-between gap-4">
               <div>
@@ -268,8 +267,13 @@
               </div>
             </div>
 
-            <div id="transcriptTimeline" class="transcript-surface min-h-0 flex-1 overflow-y-auto px-1 sm:px-5" aria-live="polite" role="log" data-testid="transcript-timeline">
-              <p id="emptyTimeline" class="transcript-preview__empty">A transcrição aparecerá aqui.</p>
+            <div class="relative flex min-h-0 flex-1 flex-col">
+              <div id="transcriptTimeline" class="transcript-surface min-h-0 flex-1 overflow-y-auto px-1 sm:px-5" aria-live="polite" role="log" data-testid="transcript-timeline">
+                <p id="emptyTimeline" class="transcript-preview__empty">A transcrição aparecerá aqui.</p>
+              </div>
+              <button id="jumpToLatestButton" class="btn btn-sm btn-circle absolute bottom-3 left-1/2 hidden -translate-x-1/2 shadow-lg" type="button" data-testid="jump-to-latest" aria-label="Ir para o fim da transcrição" title="Ir para o fim">
+                <i class="bi bi-arrow-down" aria-hidden="true"></i>
+              </button>
             </div>
 
             <div id="deviceRequired" class="alert alert-error mt-4 hidden items-start" role="alert">
@@ -284,14 +288,14 @@
                   <i class="bi bi-mic shrink-0 text-base-content/60" aria-hidden="true"></i>
                   <div class="min-w-0 flex-1">
                     <span class="capture-dock__channel-label">Microfone</span>
-                    <div id="microphoneHistogram" class="capture-dock__histogram" role="img" aria-label="Histograma do microfone"></div>
+                    <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" aria-label="Histograma do microfone"></canvas>
                   </div>
                 </div>
                 <div class="capture-dock__channel" title="Áudio do sistema definido nas configurações">
                   <i class="bi bi-volume-up shrink-0 text-base-content/60" aria-hidden="true"></i>
                   <div class="min-w-0 flex-1">
                     <span class="capture-dock__channel-label">Sistema</span>
-                    <div id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" aria-label="Histograma do áudio do sistema"></div>
+                    <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" aria-label="Histograma do áudio do sistema"></canvas>
                   </div>
                 </div>
               </div>
@@ -334,12 +338,26 @@
               that DaisyUI rule sits in a nested sublayer, so `min-h-0` wins.
             -->
             <div class="collapse-content conversations-section-body min-h-0 overflow-y-auto p-0">
-              <label class="input input-sm mb-2 flex w-full items-center gap-2">
-                <i class="bi bi-search text-base-content/50" aria-hidden="true"></i>
-                <input id="sessionSearchInput" type="search" class="grow" placeholder="Buscar sessões" autocomplete="off" aria-label="Buscar sessões" data-testid="session-search" />
-              </label>
+              <!--
+                Sticky, because the search box shares the scroll container with
+                the list: without this it scrolls away the moment infinite
+                scroll has anything to scroll.
+              -->
+              <div class="sticky top-0 z-10 bg-base-200 pb-2">
+                <label class="input input-sm flex w-full items-center gap-2">
+                  <i class="bi bi-search text-base-content/50" aria-hidden="true"></i>
+                  <input id="sessionSearchInput" type="search" class="grow" placeholder="Buscar sessões" autocomplete="off" aria-label="Buscar sessões" data-testid="session-search" />
+                </label>
+              </div>
               <ul id="sessionLibrary" class="menu w-full flex-nowrap rounded-lg p-0" aria-label="Biblioteca de sessões" data-testid="session-library"></ul>
-              <button id="loadMoreButton" class="btn btn-ghost btn-sm mt-2 w-full" type="button" data-testid="load-more" disabled>Carregar mais</button>
+              <!--
+                Sibling of the list, not a child: renderSessions replaces the
+                whole `ul` on every render and would take an inner sentinel --
+                and the observer watching it -- down with it.
+              -->
+              <div id="sessionsSentinel" class="flex hidden justify-center py-3" data-testid="sessions-sentinel" aria-hidden="true">
+                <span class="loading loading-spinner loading-xs text-base-content/40"></span>
+              </div>
             </div>
           </details>
 

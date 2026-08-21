@@ -550,7 +550,6 @@ def _create_production_server(
             ),
             capture_backend=PyAudioCaptureBackend(pyaudiowpatch.PyAudio()),
             loopback_port=port,
-            official_broccoli_url=config.server_url,
             device_settings=LocalDeviceSettings(),
         )
 
