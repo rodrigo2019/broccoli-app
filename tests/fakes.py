@@ -7,8 +7,15 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 from broccoli_desktop.capture import DeviceUnavailableError
-from broccoli_desktop.models import DeviceDescriptor, SegmentPage, SessionPage, SessionSummary
+from broccoli_desktop.models import (
+    DeviceDescriptor,
+    SegmentPage,
+    SessionPage,
+    SessionSummary,
+    TranscriptSegment,
+)
 from broccoli_desktop.remote import (
+    SEGMENT_PAGE_SIZE,
     RemoteEvent,
     RemoteFailure,
     RemoteProtocolError,
@@ -16,6 +23,7 @@ from broccoli_desktop.remote import (
     SessionStarted,
     TranscriptDeltaEvent,
     TranscriptSegmentEvent,
+    last_page_cursor,
 )
 
 VISUAL_TEST_TOKEN = "visual-test-token"
@@ -209,6 +217,52 @@ class FakeSessionRemote:
             return configured_page
         return SegmentPage((), None)
 
+    async def last_segment_offset_ms(self, uuid_code: str, segment_count: int) -> int:
+        """Mirror HttpListeningRemote's page-jump so the arithmetic under test
+        actually runs against this fake's seeded pages, not a shortcut."""
+        self._assert_authorized()
+        if segment_count <= 0:
+            return 0
+        cursor = last_page_cursor(segment_count, SEGMENT_PAGE_SIZE)
+        page = await self.list_segments(uuid_code, cursor=str(cursor))
+        return max((segment.ended_offset_ms for segment in page.segments), default=0)
+
+    def seed_segments(self, uuid_code: str, *, count: int, last_ended_offset_ms: int) -> None:
+        """Register a retained session's segment count and its final cursor page.
+
+        Only the last page is populated -- a resume walk that asked for any
+        earlier page would be a bug the real jump-to-the-last-page arithmetic
+        is meant to prevent, and this fake should not paper over that by
+        answering anyway.
+        """
+        existing = self.sessions.get(uuid_code)
+        if existing is None:
+            self.sessions[uuid_code] = SessionSummary(
+                uuid_code=uuid_code,
+                title="",
+                status="ended",
+                started_at="2026-08-19T10:00:00Z",
+                ended_at="2026-08-19T11:00:00Z",
+                device_label="Speakers",
+                segment_count=count,
+                is_live=False,
+            )
+        else:
+            self.sessions[uuid_code] = replace(existing, segment_count=count)
+        cursor = last_page_cursor(count, SEGMENT_PAGE_SIZE) if count else 0
+        page_length = count - cursor
+        segments = tuple(
+            TranscriptSegment(
+                utterance_id=f"system:{cursor + index}",
+                channel="system",
+                text="",
+                started_offset_ms=0,
+                ended_offset_ms=last_ended_offset_ms if index == page_length - 1 else 0,
+            )
+            for index in range(page_length)
+        )
+        self.segment_pages[(uuid_code, str(cursor))] = SegmentPage(segments, None)
+
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
         return await self.update_session(uuid_code, title=title)
 
@@ -358,6 +412,14 @@ class FakeListeningRemote:
     async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
         self._assert_authorized()
         return self.segment_pages.get((uuid_code, cursor), SegmentPage((), None))
+
+    async def last_segment_offset_ms(self, uuid_code: str, segment_count: int) -> int:
+        self._assert_authorized()
+        if segment_count <= 0:
+            return 0
+        cursor = last_page_cursor(segment_count, SEGMENT_PAGE_SIZE)
+        page = await self.list_segments(uuid_code, cursor=str(cursor))
+        return max((segment.ended_offset_ms for segment in page.segments), default=0)
 
     async def update_title(self, uuid_code: str, title: str) -> SessionSummary:
         return await self.update_session(uuid_code, title=title)

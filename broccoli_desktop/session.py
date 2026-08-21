@@ -235,9 +235,6 @@ class DesktopSessionController:
         previous_session = (
             self._session if resume_code and self._session_uuid == resume_code else None
         )
-        previous_offset_ms = (
-            self._pipeline.next_offset_ms if previous_session and self._pipeline else 0
-        )
         self._clear_buffered_frames()
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
@@ -269,6 +266,7 @@ class DesktopSessionController:
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
+            previous_offset_ms = await self._resume_offset_ms(previous_session, resume_code)
             self._set_pipeline(previous_offset_ms)
             summary = SessionSummary(
                 uuid_code=started.uuid_code,
@@ -668,6 +666,33 @@ class DesktopSessionController:
         self._capture = None
         if capture is not None:
             capture.stop()
+
+    async def _resume_offset_ms(
+        self, previous_session: SessionSummary | None, resume_code: str | None
+    ) -> int:
+        """Where this run's captured audio must start counting from.
+
+        Kept in-memory -- no round trip -- when this controller already had
+        the session open: `_pipeline.next_offset_ms` already accounts for
+        every frame captured so far this run. Opening a session from the
+        library gives this controller no history for it, so the base has to
+        come from what the backend already stored; without this, new speech
+        would land back at offset 0, on top of what the meeting already has
+        recorded there.
+
+        Called only after the remote stream has confirmed which session it
+        resumed (`started.uuid_code == resume_code`, checked by the caller),
+        not before: spending a round trip on an identity `resume_code` has
+        not yet confirmed would be wasted work, and a failure here is meant
+        to unwind through the same exception handling that already covers
+        `connect_stream` and the handshake read just above it.
+        """
+        if previous_session is not None and self._pipeline is not None:
+            return self._pipeline.next_offset_ms
+        if resume_code is None:
+            return 0
+        remote_session = await self._remote.get_session(resume_code)
+        return await self._remote.last_segment_offset_ms(resume_code, remote_session.segment_count)
 
     def _set_pipeline(self, base_offset_ms: int) -> None:
         self._pipeline = AudioPipeline(base_offset_ms=base_offset_ms)

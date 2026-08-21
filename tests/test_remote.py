@@ -8,10 +8,12 @@ import pytest
 
 from broccoli_desktop.models import SegmentPage, SessionPage, SessionSummary, TranscriptSegment
 from broccoli_desktop.remote import (
+    SEGMENT_PAGE_SIZE,
     HttpListeningRemote,
     SessionStarted,
     TranscriptDeltaEvent,
     TranscriptSegmentEvent,
+    last_page_cursor,
 )
 
 
@@ -177,6 +179,69 @@ async def test_history_requests_parse_pages_and_keep_query_parameters() -> None:
         "https://broccoli.example/api/listening/desktop/sessions/session-2/",
         "https://broccoli.example/api/listening/desktop/sessions/session-2/segments/",
     ]
+
+
+def test_the_last_segment_page_lands_on_a_cursor_boundary() -> None:
+    """The backend rejects any cursor that is not a multiple of the page size
+    (views.py:61), so max(0, count - page_size) would be Invalid cursor for a
+    250-segment session."""
+    assert last_page_cursor(250, SEGMENT_PAGE_SIZE) == 200
+    assert last_page_cursor(100, SEGMENT_PAGE_SIZE) == 0
+    assert last_page_cursor(101, SEGMENT_PAGE_SIZE) == 100
+    assert last_page_cursor(0, SEGMENT_PAGE_SIZE) == 0
+
+
+@pytest.mark.asyncio
+async def test_last_segment_offset_ms_reads_only_the_final_page() -> None:
+    """A 250-segment session must jump straight to cursor 200, not walk every
+    page from the start -- and the offset comes from where the last segment
+    ended, not where it started."""
+    transport = FakeTransport(
+        responses=[
+            {
+                "segments": [
+                    {
+                        "utterance_id": "system:200",
+                        "channel": "system",
+                        "text": "...",
+                        "started_offset_ms": 1_200_000,
+                        "ended_offset_ms": 1_235_000,
+                    },
+                    {
+                        "utterance_id": "system:201",
+                        "channel": "system",
+                        "text": "...",
+                        "started_offset_ms": 1_236_000,
+                        "ended_offset_ms": 1_240_000,
+                    },
+                ],
+                "next_cursor": None,
+            }
+        ]
+    )
+    remote = HttpListeningRemote(
+        "https://broccoli.example", "secret", transport, websocket_path="/ws/listening/"
+    )
+
+    offset_ms = await remote.last_segment_offset_ms("history-1", 250)
+
+    assert offset_ms == 1_240_000
+    assert transport.urls == [
+        "https://broccoli.example/api/listening/desktop/sessions/history-1/segments/?cursor=200"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_last_segment_offset_ms_makes_no_request_for_an_empty_session() -> None:
+    transport = FakeTransport(responses=[])
+    remote = HttpListeningRemote(
+        "https://broccoli.example", "secret", transport, websocket_path="/ws/listening/"
+    )
+
+    offset_ms = await remote.last_segment_offset_ms("history-1", 0)
+
+    assert offset_ms == 0
+    assert transport.urls == []
 
 
 @pytest.mark.asyncio

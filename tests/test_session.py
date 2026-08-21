@@ -186,6 +186,70 @@ async def test_resume_reuses_the_current_session_summary_and_remote_uuid(
 
 
 @pytest.mark.asyncio
+async def test_resuming_the_open_session_reuses_the_in_memory_offset_without_a_round_trip(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """The base offset was only preserved for the session this controller
+    already had open -- that in-memory path must keep working without a
+    network round trip to the segment list."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await fake_remote.emit_segment("system", "system:1", "first segment", 100, 900)
+    await settle()
+    await controller.stop()
+
+    async def must_not_be_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("resuming the already-open session must not fetch segments")
+
+    fake_remote.list_segments = must_not_be_called  # type: ignore[method-assign]
+    fake_remote.get_session = must_not_be_called  # type: ignore[method-assign]
+
+    resumed = await controller.resume(started.uuid_code, CaptureChoices("mic-1", "system-1"))
+
+    assert resumed.segment_count == 1
+    assert controller.pipeline_base_offset_ms == 0
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_resuming_a_stored_session_starts_after_its_last_segment(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Opening a retained session from the library and pressing start gave
+    base 0, because this controller has no in-memory history for a session it
+    never had open -- so new speech was written at offsets that already held
+    the earlier part of the meeting."""
+    fake_remote.seed_segments("history-1", count=250, last_ended_offset_ms=1_240_000)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    await controller.resume("history-1", CaptureChoices("mic-1", "system-1"))
+
+    assert controller.pipeline_base_offset_ms == 1_240_000
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_resuming_a_stored_session_with_no_segments_makes_no_request(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    fake_remote.seed_segments("history-empty", count=0, last_ended_offset_ms=0)
+
+    async def must_not_be_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a session with no stored segments must not request a page")
+
+    fake_remote.list_segments = must_not_be_called  # type: ignore[method-assign]
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    await controller.resume("history-empty", CaptureChoices("mic-1", "system-1"))
+
+    assert controller.pipeline_base_offset_ms == 0
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_update_title_changes_only_the_active_local_summary(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

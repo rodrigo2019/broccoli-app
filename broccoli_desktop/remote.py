@@ -22,6 +22,22 @@ SESSION_LIST_PATH = "/api/listening/desktop/sessions/"
 #: and reading a hundred-segment page deserves more room than a TCP handshake.
 REQUEST_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
+#: Matches the backend's DESKTOP_SEGMENT_PAGE_SIZE (views.py), so the jump
+#: computed by last_page_cursor lands on a cursor the backend accepts.
+SEGMENT_PAGE_SIZE = 100
+
+
+def last_page_cursor(segment_count: int, page_size: int) -> int:
+    """The offset of the final page, on a page boundary.
+
+    The backend validates cursors with ``offset % page_size == 0``, so the
+    obvious ``segment_count - page_size`` is rejected as an invalid cursor for
+    any count that is not itself a multiple of the page size.
+    """
+    if segment_count <= 0:
+        return 0
+    return ((segment_count - 1) // page_size) * page_size
+
 
 class RemoteError(Exception):
     """Base error for the external Listening boundary."""
@@ -147,6 +163,8 @@ class ListeningRemote(Protocol):
 
     async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage: ...
 
+    async def last_segment_offset_ms(self, uuid_code: str, segment_count: int) -> int: ...
+
     async def update_session(
         self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
     ) -> SessionSummary: ...
@@ -214,6 +232,19 @@ class HttpListeningRemote:
         return _parse_segment_page(
             await self._request_json("GET", _with_query(path, {"cursor": cursor}))
         )
+
+    async def last_segment_offset_ms(self, uuid_code: str, segment_count: int) -> int:
+        """Where a resumed session's new audio must start.
+
+        Reads only the final page rather than walking the whole transcript --
+        the offset comes from where the last stored segment ended, since that
+        is the point in the meeting nothing has been captured past yet.
+        """
+        if segment_count <= 0:
+            return 0
+        cursor = last_page_cursor(segment_count, SEGMENT_PAGE_SIZE)
+        page = await self.list_segments(uuid_code, cursor=str(cursor))
+        return max((segment.ended_offset_ms for segment in page.segments), default=0)
 
     async def update_session(
         self, uuid_code: str, *, title: str | None = None, is_pinned: bool | None = None
