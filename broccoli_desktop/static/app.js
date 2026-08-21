@@ -1055,6 +1055,13 @@
 
   async function saveSettings(event) {
     event.preventDefault();
+    // Ahead of everything that can fail, because setTheme cannot: it writes an
+    // attribute and a localStorage key, with no round trip to lose. Inside the
+    // try it was hostage to the two saves below -- a 409 from the proxy save
+    // while a capture is running is a real outcome -- and the early return left
+    // the radio showing the new theme while the app still wore the old one,
+    // until some later render happened to correct it.
+    if (state.authenticated) setTheme(elements.themeLightOption.checked ? "light" : "dark");
     // The proxy goes first. Device selection can throw -- an incomplete pair,
     // an unavailable device, a 401 -- and doing it first meant the user's proxy
     // edits were silently discarded while the toast talked about audio
@@ -1062,10 +1069,7 @@
     // device change, which is what the message is about.
     try {
       await saveProxySettings();
-      if (state.authenticated) {
-        setTheme(elements.themeLightOption.checked ? "light" : "dark");
-        await saveDeviceSelection();
-      }
+      if (state.authenticated) await saveDeviceSelection();
     } catch (error) {
       reportError(error);
       return;
