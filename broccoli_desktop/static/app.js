@@ -1857,26 +1857,44 @@
   const TRANSCRIPT_FOLLOW_THRESHOLD = 100;
   let transcriptScrollFrame = null;
 
+  /**
+   * The transcript scrolls with the document, not inside a box of its own.
+   *
+   * This mirrors the platform's chat (chat-streaming.js, `scrollMode` other
+   * than 'container'), and the choice is the design, not an accident of
+   * layout: rows have to travel *behind* the fixed capture dock so its
+   * backdrop-filter has something to blur. An inner overflow container would
+   * clip every row at its own edge and leave nothing behind the glass.
+   *
+   * Measured against the document exactly as the platform does -- scrollY for
+   * the offset, documentElement.scrollHeight for the extent, and innerHeight
+   * for the viewport, since a scrolling document's clientHeight is not what
+   * the user actually sees.
+   */
   function isNearTimelineBottom() {
-    const timeline = elements.transcriptTimeline;
-    return (
-      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <=
-      TRANSCRIPT_FOLLOW_THRESHOLD
-    );
+    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+    const distanceFromBottom =
+      document.documentElement.scrollHeight - scrollTop - window.innerHeight;
+    return distanceFromBottom <= TRANSCRIPT_FOLLOW_THRESHOLD;
   }
 
   /**
    * Scroll to the newest content, coalescing to one write per frame.
    *
    * A live capture appends on every delta; scrolling inline on each one reads
-   * and writes layout several times a frame for a single visible result.
+   * and writes layout several times a frame for a single visible result. The
+   * pending frame is cancelled and re-scheduled rather than skipped, so the
+   * write always targets the height as of the latest append.
+   *
+   * `behavior: "auto"` is deliberate and comes from the platform, which notes
+   * that "smooth" cannot keep up while a response streams.
    */
   function scrollTranscriptToLatest({ force = false } = {}) {
     if (!force && !state.followTranscript) return;
-    if (transcriptScrollFrame !== null) return;
+    if (transcriptScrollFrame !== null) window.cancelAnimationFrame(transcriptScrollFrame);
     transcriptScrollFrame = window.requestAnimationFrame(() => {
       transcriptScrollFrame = null;
-      elements.transcriptTimeline.scrollTop = elements.transcriptTimeline.scrollHeight;
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
       if (force) setFollowTranscript(true);
     });
   }
@@ -2658,9 +2676,32 @@
   elements.renameSessionButton.addEventListener("click", () => {
     if (state.selectedSession) openRenameSession(state.selectedSession);
   });
-  elements.transcriptTimeline.addEventListener("scroll", handleTranscriptScroll, {
-    passive: true,
-  });
+  // Both listeners live on the window, not the timeline: the document is what
+  // scrolls, and a scroll event never fires on an element with no overflow of
+  // its own. The pair is the platform's, and each half does a different job.
+  //
+  // The scroll handler is debounced because it only ever *re-enables* follow,
+  // and a 100ms lag on "you came back to the bottom" is invisible. Detaching
+  // has to be instant, though: waiting out the debounce means the next append
+  // yanks the view back down while the user is still turning the wheel. So
+  // wheel-up detaches on the spot rather than waiting to be inferred from a
+  // distance measurement.
+  let transcriptScrollSettle;
+  window.addEventListener(
+    "scroll",
+    () => {
+      window.clearTimeout(transcriptScrollSettle);
+      transcriptScrollSettle = window.setTimeout(handleTranscriptScroll, 100);
+    },
+    { passive: true },
+  );
+  window.addEventListener(
+    "wheel",
+    (event) => {
+      if (event.deltaY < 0) setFollowTranscript(false);
+    },
+    { passive: true },
+  );
   elements.jumpToLatestButton.addEventListener("click", () => {
     scrollTranscriptToLatest({ force: true });
   });

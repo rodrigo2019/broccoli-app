@@ -198,12 +198,16 @@
     padding-bottom: calc(var(--capture-dock-height, 5.5rem) + 2rem);
   }
 
+  /* No overflow and no scrollbar-gutter: this surface does not scroll. The
+     document does, so rows pass behind the fixed capture dock and give its
+     backdrop-filter something to blur. Boxing the transcript in its own
+     scroller would clip every row at the surface's edge and leave nothing
+     behind the glass. */
   .transcript-surface {
     display: flex;
     flex-direction: column;
     gap: 0.65rem;
     padding: 0.75rem 0.2rem 0.5rem;
-    scrollbar-gutter: stable;
     background: color-mix(in oklch, var(--color-base-300) 48%, transparent);
   }
 
