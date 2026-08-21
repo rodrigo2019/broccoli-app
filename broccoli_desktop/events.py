@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 
 from broccoli_desktop.models import UiEvent
+
+#: snapshot() has one consumer, a test. Keeping a bounded tail preserves it
+#: without retaining every transcript delta for the life of the process.
+EVENT_HISTORY_MAX = 256
 
 EventSubscriber = Callable[[UiEvent], None]
 
@@ -14,7 +19,7 @@ class EventHub:
 
     def __init__(self) -> None:
         self._subscribers: list[EventSubscriber] = []
-        self._events: list[UiEvent] = []
+        self._events: deque[UiEvent] = deque(maxlen=EVENT_HISTORY_MAX)
 
     def subscribe(self, subscriber: EventSubscriber) -> None:
         if subscriber not in self._subscribers:

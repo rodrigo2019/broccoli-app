@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from broccoli_desktop.capture import DeviceUnavailableError
-from broccoli_desktop.events import EventHub
+from broccoli_desktop.events import EVENT_HISTORY_MAX, EventHub
 from broccoli_desktop.models import AudioFrame, ConnectionState, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
 from broccoli_desktop.remote import RemoteFailure, RemoteProtocolError, RemoteRequestError
@@ -844,3 +844,16 @@ async def test_a_frame_the_previous_run_handed_over_late_never_reaches_the_new_o
     assert fake_remote.streams[-1].frames == []
 
     await controller.stop()
+
+
+def test_the_event_hub_does_not_grow_without_bound() -> None:
+    """Every delta and every segment passes through here. Unbounded, a
+    four-hour meeting keeps the whole transcript in memory for a snapshot
+    nothing in the product reads."""
+    hub = EventHub()
+
+    for index in range(EVENT_HISTORY_MAX * 2):
+        hub.publish(UiEvent(type="info", message=f"event {index}"))
+
+    assert len(hub.snapshot()) == EVENT_HISTORY_MAX
+    assert hub.snapshot()[-1].message == f"event {EVENT_HISTORY_MAX * 2 - 1}"
