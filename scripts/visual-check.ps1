@@ -171,15 +171,22 @@ try {
         throw "A control that should have been removed is still in the shell: $($removed -join ',')"
     }
 
-    # Newest first. The seeded history mixes timestamps with and without
-    # fractional seconds, which is the pair the old text comparison inverted.
+    # Pinned first, then newest. The seeded history mixes timestamps with and
+    # without fractional seconds, which is the pair the old text comparison
+    # inverted, and pins one older-day session (history-02) so a pin sorting
+    # ahead of a newer, unpinned session is exercised from the very first
+    # page, not just after the fact.
     Invoke-Browser -BrowserArguments @("wait", "--text", "Reuni$([char]0x00E3)o arquivada 44")
-    $firstRow = (Invoke-Browser -BrowserArguments @(
+    $topTestIds = Invoke-Browser -BrowserArguments @(
         "eval",
-        "document.querySelector('#sessionLibrary .session-row-content').getAttribute('aria-label')"
-    ) | ConvertFrom-Json)
-    if ($firstRow -notlike "*44") {
-        throw "The newest session is not at the top of the list: $firstRow"
+        "Array.from(document.querySelectorAll('#sessionLibrary .session-row-content')).slice(0, 2).map((el) => el.dataset.testid)"
+    ) | ConvertFrom-Json
+    $topTestIds = @($topTestIds)
+    if ($topTestIds[0] -ne "session-row-history-02") {
+        throw "The pinned session is not at the top of the list: $($topTestIds -join ', ')"
+    }
+    if ($topTestIds[1] -ne "session-row-history-44") {
+        throw "The newest unpinned session is not first after the pinned section: $($topTestIds -join ', ')"
     }
 
     # Opening a session from the sidebar is the case the reviewer traced the
@@ -229,6 +236,33 @@ try {
         "--fn",
         "document.getElementById('sessionsSentinel').classList.contains('hidden')"
     )
+
+    # Segregating pinned rows into their own "Fixadas" section, ahead of the
+    # day-grouped list, is what stops a single calendar day from rendering as
+    # two separate, non-adjacent headings: history-02 is pinned to a day
+    # (2026-08-18) that history-00/01 also share, unpinned, further down.
+    # Filtered to the `YYYY-MM-DD` shape so the "Fixadas" heading itself --
+    # a real heading, but not a date -- is never counted as a repeat.
+    $dayHeadings = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "Array.from(document.querySelectorAll('#sessionLibrary li[data-group-key]')).map((el) => el.dataset.groupKey).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))"
+    ) | ConvertFrom-Json
+    $dayHeadings = @($dayHeadings)
+    # A fixture with only one day (or none) can never fail the checks below --
+    # this is the guard against the gap the fixture used to leave open.
+    if ($dayHeadings.Count -lt 2) {
+        throw "Expected at least two distinct day headings in the seeded history, found $($dayHeadings.Count): $($dayHeadings -join ', ')"
+    }
+    $uniqueHeadings = @($dayHeadings | Select-Object -Unique)
+    if ($uniqueHeadings.Count -ne $dayHeadings.Count) {
+        throw "Day headings repeat: $($dayHeadings -join ', ')"
+    }
+    $descendingHeadings = @($dayHeadings | Sort-Object -Descending)
+    for ($index = 0; $index -lt $dayHeadings.Count; $index += 1) {
+        if ($dayHeadings[$index] -ne $descendingHeadings[$index]) {
+            throw "Day headings are not in descending order: $($dayHeadings -join ', ')"
+        }
+    }
 
     # Reconciliation treats a row that arrived via infinite scroll the same as
     # one from the initial page, but the suite should still exercise that path

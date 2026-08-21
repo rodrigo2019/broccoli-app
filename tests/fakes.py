@@ -535,21 +535,34 @@ def visual_history() -> dict[str, SessionSummary]:
     The timestamps deliberately mix the two shapes the backend emits -- with and
     without fractional seconds -- because comparing them as text is what used to
     put the oldest session at the top of the list.
+
+    Indices 0-2 land on 2026-08-18, a day earlier than the other 42; index 2 is
+    pinned, leaving indices 0-1 as ordinary (unpinned) sessions on that same
+    earlier day. That combination -- a pin from an older day, with more of that
+    day still sitting unpinned further down -- is what a real account hits
+    constantly, and what used to make the day heading for 2026-08-18 render
+    twice, non-adjacently, once for the pin and again lower down among the
+    unpinned rows sharing its date. visual-check.ps1 asserts against this
+    directly: the day headings it finds must be unique and strictly descending.
     """
     history: dict[str, SessionSummary] = {}
     for index in range(SESSION_PAGE_SIZE * 2 + 5):
         minute = f"{index:02d}"
         fraction = ".123456" if index % 2 else ""
         uuid_code = f"history-{index:02d}"
+        day = "18" if index < 3 else "19"
+        is_pinned = index == 2
         history[uuid_code] = SessionSummary(
             uuid_code=uuid_code,
             title=f"Reunião arquivada {index:02d}",
             status="ended",
-            started_at=f"2026-08-19T10:{minute}:00{fraction}Z",
-            ended_at=f"2026-08-19T11:{minute}:00Z",
+            started_at=f"2026-08-{day}T10:{minute}:00{fraction}Z",
+            ended_at=f"2026-08-{day}T11:{minute}:00Z",
             device_label="Speakers",
             segment_count=0,
             is_live=False,
+            is_pinned=is_pinned,
+            pinned_at="2026-08-20T09:00:00Z" if is_pinned else None,
         )
     return history
 

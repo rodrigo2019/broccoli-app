@@ -1207,23 +1207,30 @@
   }
 
   /**
-   * Build one "20 ago" day heading for the sidebar.
+   * Build one sidebar section heading -- either "Fixadas" or a "20 ago" day
+   * heading.
    *
    * Only structure, same split as buildSessionRow/updateSessionRow: this has
    * no interactive state to preserve, but it is still built once and patched
    * in place on later renders rather than recreated every time, so it does
    * not disturb the sibling session rows' position bookkeeping below.
+   *
+   * `key` is opaque here -- `"pinned"` or a `YYYY-MM-DD` string -- it only
+   * has to be stable and unique per heading for the reconciliation map in
+   * renderSessions() below. visual-check.ps1 relies on genuine day headings
+   * being distinguishable from the pinned one, so it filters this attribute
+   * by the `YYYY-MM-DD` shape rather than assuming every heading is a date.
    */
-  function buildDateGroupRow(key) {
+  function buildGroupHeadingRow(key) {
     const item = document.createElement("li");
     item.className =
-      "session-date-group px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-base-content/70 first:pt-1";
-    item.dataset.dateGroup = key;
+      "session-group-heading px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-base-content/70 first:pt-1";
+    item.dataset.groupKey = key;
     return item;
   }
 
-  function updateDateGroupRow(item, session) {
-    item.textContent = formatSessionDate(session.started_at);
+  function updateGroupHeadingRow(item, label) {
+    item.textContent = label;
   }
 
   /**
@@ -1259,16 +1266,37 @@
 
     sortSessions();
 
-    // One heading per calendar day the sorted order crosses into. Computed
-    // fresh every render from state.sessions, same as sortSessions() itself --
-    // this is what turns a flat 45-row list of auto-generated names into
-    // something a day can be found in.
+    // Pinned sessions get their own labelled section ahead of the
+    // day-grouped list, instead of taking part in the day grouping below.
+    // They used to walk the same recency-then-day pass as everything else,
+    // which is exactly what broke: a pin sorts to the top regardless of its
+    // date, so the very next (unpinned, newest) session usually starts a
+    // *different* day, and the pinned session's own day would then open a
+    // second, non-adjacent heading once the unpinned block reached it --
+    // one calendar day rendered as two separate, out-of-order groups. A
+    // pinned item is found by being pinned, not by its date, so it does not
+    // need a day heading at all -- its own row still shows its date (see
+    // updateSessionRow), just not as a group heading.
+    const pinnedSessions = state.sessions.filter((session) => session.is_pinned);
+    const unpinnedSessions = state.sessions.filter((session) => !session.is_pinned);
+
     const renderItems = [];
+    if (pinnedSessions.length) {
+      renderItems.push({ kind: "group", key: "group:pinned", label: "Fixadas" });
+      for (const session of pinnedSessions) {
+        renderItems.push({ kind: "session", key: session.uuid_code, session });
+      }
+    }
+
+    // One heading per calendar day the unpinned order crosses into.
+    // Computed fresh every render from state.sessions, same as
+    // sortSessions() itself -- this is what turns a flat 45-row list of
+    // auto-generated names into something a day can be found in.
     let lastGroupKey = null;
-    for (const session of state.sessions) {
+    for (const session of unpinnedSessions) {
       const groupKey = sessionDateGroupKey(session);
       if (groupKey && groupKey !== lastGroupKey) {
-        renderItems.push({ kind: "group", key: `group:${groupKey}`, session });
+        renderItems.push({ kind: "group", key: `group:${groupKey}`, label: formatSessionDate(session.started_at) });
         lastGroupKey = groupKey;
       }
       renderItems.push({ kind: "session", key: session.uuid_code, session });
@@ -1285,7 +1313,7 @@
     const existingItems = new Map();
     for (const child of Array.from(elements.sessionLibrary.children)) {
       if (child.dataset.sessionId) existingItems.set(child.dataset.sessionId, child);
-      else if (child.dataset.dateGroup) existingItems.set(`group:${child.dataset.dateGroup}`, child);
+      else if (child.dataset.groupKey) existingItems.set(`group:${child.dataset.groupKey}`, child);
       else child.remove();
     }
 
@@ -1297,11 +1325,11 @@
       } else {
         item =
           renderItem.kind === "group"
-            ? buildDateGroupRow(renderItem.key.slice("group:".length))
+            ? buildGroupHeadingRow(renderItem.key.slice("group:".length))
             : buildSessionRow(renderItem.session);
       }
       if (renderItem.kind === "group") {
-        updateDateGroupRow(item, renderItem.session);
+        updateGroupHeadingRow(item, renderItem.label);
       } else {
         updateSessionRow(item, renderItem.session);
       }
