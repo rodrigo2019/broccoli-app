@@ -502,6 +502,27 @@ class FakeListeningRemote:
             raise RemoteUnauthorizedError
 
 
+async def settle() -> None:
+    """Let the loop, and the one worker thread behind it, finish what is pending.
+
+    Two turns used to be enough because capture teardown ran inline. It no
+    longer does -- _stop_capture_off_loop hands the blocking join to a worker
+    thread -- and yielding to the loop does not wait for a thread, so the same
+    two turns would sample the state mid-teardown.
+
+    The to_thread call in the middle is the barrier, not a delay: tests/
+    conftest.py pins the loop's default executor to a single worker, so this
+    no-op cannot start until whatever the controller handed over has finished.
+    The turns on either side are what let the controller reach its hand-off in
+    the first place, and then let its continuation run once the thread returns.
+    """
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.to_thread(lambda: None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
 def unauthorized_remote() -> FakeListeningRemote:
     """Return an offline fake that rejects login attempts."""
     return FakeListeningRemote(unauthorized=True)

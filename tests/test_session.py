@@ -23,6 +23,7 @@ from tests.fakes import (
     FakeLiveRemoteStream,
     FakeRemoteStream,
     FakeSessionRemote,
+    settle,
 )
 
 
@@ -45,11 +46,6 @@ def make_frames(milliseconds: int) -> list[AudioFrame]:
     return [
         AudioFrame("system", offset_ms, b"\x00\x00") for offset_ms in range(0, milliseconds, 100)
     ]
-
-
-async def settle() -> None:
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
 
 
 def frame_at(index: int) -> AudioFrame:
@@ -555,6 +551,11 @@ async def test_stop_closes_capture_before_ending_the_remote_session(
     assert controller.events.snapshot()[-1] == UiEvent(type="status", state=ConnectionState.STOPPED)
 
 
+# Three thread hops have to be in flight at once here: the parked capture
+# open, the test's own wait on it, and stop()'s teardown. The single-worker
+# default executor that makes `settle` a barrier elsewhere would serialise
+# them into a deadlock, so this test widens the pool for itself.
+@pytest.mark.parametrize("default_executor_workers", [4])
 @pytest.mark.asyncio
 async def test_a_stop_landing_while_capture_is_still_opening_does_not_strand_streaming(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
@@ -609,6 +610,57 @@ async def test_a_stop_landing_while_capture_is_still_opening_does_not_strand_str
     assert controller._stream is None
     assert controller._sender_task is None
     assert controller._reader_task is None
+
+
+# Two hops in flight: the parked capture teardown and the test's own wait on it.
+@pytest.mark.parametrize("default_executor_workers", [4])
+@pytest.mark.asyncio
+async def test_capture_teardown_from_a_remote_end_does_not_freeze_the_event_loop(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Only stop() used to hop off the loop.
+
+    CaptureSession.stop() -> handle.close() joins two daemon workers with a
+    one-second timeout each plus PortAudio teardown, and seven other teardown
+    paths -- a remote end, a remote failure, a device loss, two in _recover and
+    three in _open's except clauses -- ran it inline. Each one froze the event
+    loop, and with it the transcript socket, the event feed and the level
+    stream, for as long as the devices took to let go.
+
+    Parking one handle's close is what makes that observable: while it is
+    parked, an ordinary coroutine on this loop still has to get its turn.
+    """
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    closing = threading.Event()
+    release = threading.Event()
+    handle = fake_capture.handles["mic-1"]
+    inner_close = handle.close
+
+    def blocking_close() -> None:
+        closing.set()
+        assert release.wait(timeout=5), "the test never released the close"
+        inner_close()
+
+    handle.close = blocking_close  # type: ignore[method-assign]
+
+    await fake_remote.emit_ended()
+    assert await asyncio.to_thread(closing.wait, 5), "teardown never reached handle.close"
+
+    turns = 0
+    for _ in range(5):
+        await asyncio.sleep(0)
+        turns += 1
+
+    # Reached at all only because the loop was never the thread doing the join.
+    assert turns == 5
+    assert release.is_set() is False
+
+    release.set()
+    await settle()
+
+    assert controller.state is ConnectionState.STOPPED
+    assert fake_capture.closed_sources == {"mic-1", "system-1"}
 
 
 @pytest.mark.asyncio

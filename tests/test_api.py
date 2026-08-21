@@ -35,6 +35,7 @@ from tests.fakes import (
     FakeClock,
     FakeSessionRemote,
     RealisticFakeKeyring,
+    settle,
     visual_test_remote,
 )
 from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
@@ -777,8 +778,9 @@ async def test_background_recovery_auth_failure_clears_the_service_credential(
     fake_remote_factory.remote.revoke_token()
 
     await fake_remote_factory.remote.emit_failure()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # settle(), not two bare turns: the recovery path's capture teardown hops
+    # to a worker thread, and yielding to the loop does not wait for a thread.
+    await settle()
 
     assert fake_credentials.token is None
     assert fake_credentials.deleted_count == 1

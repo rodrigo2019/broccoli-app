@@ -177,7 +177,13 @@ class DesktopSessionController:
         self._set_state(ConnectionState.STOPPED)
 
     def stop_local_capture(self) -> None:
-        """Stop capture synchronously while controller finalization remains pending."""
+        """Stop capture synchronously while controller finalization remains pending.
+
+        Stays synchronous on purpose: this is also the tray and console-shutdown
+        teardown path (see runtime.py), which calls it from a plain background
+        thread with no event loop to hop onto. Every caller that *does* have a
+        loop goes through _stop_capture_off_loop instead.
+        """
         self._stop_capture()
 
     def restore_selected_devices(self, choices: CaptureChoices) -> None:
@@ -355,7 +361,7 @@ class DesktopSessionController:
             # to `capture` rather than only reading it back off `self` below.
             await asyncio.to_thread(capture.start)
         except _RunReclaimed:
-            # No _stop_capture()/_clear_buffered_frames()/_set_state() here,
+            # No capture teardown/_clear_buffered_frames()/_set_state() here,
             # unlike the clauses below: stop() already did all three (that is
             # what the generation bump we just detected means), and this run
             # never got far enough to touch any of that state itself --
@@ -367,19 +373,19 @@ class DesktopSessionController:
             raise RuntimeError("The session was stopped while it was starting.") from None
         except DeviceUnavailableError:
             await self._close_open_stream(stream, remote_period_started)
-            self._stop_capture()
+            await self._stop_capture_off_loop()
             self._clear_buffered_frames()
             self._set_state(ConnectionState.DEVICE_SELECTION_REQUIRED)
             raise
         except RemoteUnauthorizedError:
             await self._close_open_stream(stream, remote_period_started)
-            self._stop_capture()
+            await self._stop_capture_off_loop()
             self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Authentication failed.")
             raise
         except Exception:
             await self._close_open_stream(stream, remote_period_started)
-            self._stop_capture()
+            await self._stop_capture_off_loop()
             self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Unable to start the session.")
             raise
@@ -389,9 +395,9 @@ class DesktopSessionController:
             # mechanism on purpose: capture.start() succeeded, but
             # self._capture no longer points at the CaptureSession this run
             # just opened, meaning a concurrent stop() reclaimed the run
-            # while it was opening. _stop_capture() nulls self._capture (and
-            # stops this exact object) as the very first thing stop() does,
-            # off its own thread, so this can be true well before stop()
+            # while it was opening. Clearing self._capture (and stopping
+            # this exact object) is the very first thing stop() does, off its
+            # own thread, so this can be true well before stop()
             # finishes -- a run-generation counter bumped later in stop()
             # would not reliably catch it *at this specific point*, which is
             # why this checks capture identity instead. (The earlier
@@ -565,7 +571,7 @@ class DesktopSessionController:
                     return
                 except RemoteUnauthorizedError:
                     await self._discard_recovery_stream(stream or self._recovery_stream)
-                    self._stop_capture()
+                    await self._stop_capture_off_loop()
                     self._clear_buffered_frames()
                     self._notify_authentication_failure()
                     self._set_state(ConnectionState.FAILED, message="Authentication failed.")
@@ -584,14 +590,14 @@ class DesktopSessionController:
                         UiEvent(type="recoverable_error", message="Connection retry failed.")
                     )
             await self._discard_recovery_stream(self._recovery_stream)
-            self._stop_capture()
+            await self._stop_capture_off_loop()
             self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Connection could not be restored.")
         finally:
             self._recovery_active = False
 
     async def _end_from_remote(self) -> None:
-        self._stop_capture()
+        await self._stop_capture_off_loop()
         self._clear_buffered_frames()
         stream = self._stream or self._recovery_stream
         self._stream = None
@@ -603,7 +609,7 @@ class DesktopSessionController:
     async def _fail_from_remote(
         self, message: str = "The remote session could not continue."
     ) -> None:
-        self._stop_capture()
+        await self._stop_capture_off_loop()
         self._clear_buffered_frames()
         stream = self._stream or self._recovery_stream
         self._stream = None
@@ -770,7 +776,7 @@ class DesktopSessionController:
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
-        self._stop_capture()
+        await self._stop_capture_off_loop()
         self._clear_buffered_frames()
         if stream is not None:
             await self._end_and_close_stream(stream)
@@ -784,6 +790,28 @@ class DesktopSessionController:
         self._capture = None
         if capture is not None:
             capture.stop()
+
+    async def _stop_capture_off_loop(self) -> None:
+        """Detach the capture here, then close it on a worker thread.
+
+        CaptureSession.stop() -> handle.close() joins two daemon workers with a
+        one-second timeout each, plus PortAudio teardown. Run inline that is up
+        to ~2 seconds of a frozen event loop -- the transcript socket, the event
+        feed and the level meter all stop with it -- which is exactly what a
+        device unplugged mid-meeting produces. stop() already hops for this
+        reason; every other teardown path reaches it through here.
+
+        Only the join goes off the loop. self._capture is still cleared
+        synchronously, before the first await, because _open's second
+        concurrent-stop check compares capture *identity* against that field
+        and reads it after this returns. Overlapping with stop() is safe: the
+        second caller finds self._capture already None and does nothing, and
+        CaptureSession.stop() is idempotent besides.
+        """
+        capture = self._capture
+        self._capture = None
+        if capture is not None:
+            await asyncio.to_thread(capture.stop)
 
     async def _resume_state(
         self, previous_session: SessionSummary | None, resume_code: str | None
