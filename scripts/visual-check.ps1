@@ -324,6 +324,32 @@ try {
         "--fn",
         "document.documentElement.getAttribute('data-theme') === 'dark'"
     )
+
+    # The proxy panel used to persist its whole state -- password included, in
+    # clear text -- to localStorage. Exercise it here so the storage assertion
+    # at the end of this script has a real fake secret to look for.
+    $fakeProxyPassword = "visual-test-proxy-secret"
+    Invoke-Browser -BrowserArguments @("find", "testid", "proxy-toggle", "click")
+    Invoke-Browser -BrowserArguments @("eval", "document.getElementById('proxyHost').value = 'proxy.visual-check.invalid'") | Out-Null
+    Invoke-Browser -BrowserArguments @("eval", "document.getElementById('proxyPort').value = '8080'") | Out-Null
+    Invoke-Browser -BrowserArguments @("eval", "document.getElementById('proxyUsername').value = 'visual-user'") | Out-Null
+    Invoke-Browser -BrowserArguments @("find", "testid", "proxy-password", "fill", $fakeProxyPassword)
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("find", "testid", "test-proxy", "click")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Conex$([char]0x00E3)o bem-sucedida.")
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "settings-proxy-dark.png"))
+    Invoke-Browser -BrowserArguments @("find", "testid", "save-settings", "click")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Configura$([char]0x00E7)$([char]0x00F5)es salvas nesta m$([char]0x00E1)quina.")
+    # The saved password must never come back to the page: the field has to be
+    # blank again once the save round trip (POST, then the re-fetch that
+    # repopulates the form) has completed.
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.getElementById('proxyPassword').value === ''"
+    )
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Voltar para a captura")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
@@ -454,8 +480,13 @@ try {
         throw "Browser console errors were reported: $errorsJson"
     }
     Assert-NoAccessibilityViolations -Screen "the dark capture screen"
-    $storage = Invoke-Browser -BrowserArguments @("eval", "[document.documentElement.innerText.includes('visual-test-token'), localStorage.getItem('broccoli-desktop-settings')?.includes('visual-test-token') ?? false, sessionStorage.length, document.documentElement.innerText.includes('visual-capability-token')]") | ConvertFrom-Json
-    if (@($storage).Count -ne 4 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0 -or $storage[3] -ne $false) {
+    # Scans every localStorage key rather than the one the settings panel used
+    # to write to -- the proxy password must never reach *any* key, and this
+    # also has to catch the panel's own legacy key if an old value from before
+    # this feature ever got scrubbed on load.
+    $storageCheck = "(() => { const keys = Object.keys(localStorage); const hasInStorage = (needle) => keys.some((key) => (localStorage.getItem(key) || '').includes(needle)); return [document.documentElement.innerText.includes('visual-test-token'), hasInStorage('visual-test-token'), sessionStorage.length, document.documentElement.innerText.includes('visual-capability-token'), document.documentElement.innerText.includes('$fakeProxyPassword'), hasInStorage('$fakeProxyPassword')]; })()"
+    $storage = Invoke-Browser -BrowserArguments @("eval", $storageCheck) | ConvertFrom-Json
+    if (@($storage).Count -ne 6 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0 -or $storage[3] -ne $false -or $storage[4] -ne $false -or $storage[5] -ne $false) {
         throw "The browser retained fake credential data in page text or web storage."
     }
     $passed = $true

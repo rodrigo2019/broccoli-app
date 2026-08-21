@@ -8,12 +8,13 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -50,7 +51,13 @@ from broccoli_desktop.remote import (
     RemoteValidationError,
 )
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
-from broccoli_desktop.settings import DeviceSettings, InMemoryDeviceSettings
+from broccoli_desktop.settings import (
+    DeviceSettings,
+    InMemoryDeviceSettings,
+    InMemoryProxySettings,
+    ProxySettings,
+    ProxySettingsStore,
+)
 
 LOOPBACK_HOST = "127.0.0.1"
 STATIC_DIRECTORY = Path(__file__).with_name("static")
@@ -58,6 +65,43 @@ STATIC_DIRECTORY = Path(__file__).with_name("static")
 #: Long enough that a burst of calls costs one enumeration, short enough that
 #: plugging in a headset shows up without a restart.
 DEVICE_CACHE_TTL_SECONDS = 5.0
+
+#: Bounds the "Testar conexão" probe so a proxy that never answers cannot hang
+#: the settings screen -- generous next to REQUEST_TIMEOUT in remote.py since
+#: this is a one-off manual check, not a request on the hot path.
+PROXY_TEST_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+
+
+def _build_proxy_url(host: str, port: int, username: str, password: str | None) -> str:
+    """Build ``http://user:pass@host:port``, omitting credentials entirely when
+    no username was configured -- an unauthenticated proxy is a normal setup,
+    not a half-filled one.
+    """
+    if not username:
+        return f"http://{host}:{port}"
+    userinfo = quote(username, safe="")
+    if password:
+        userinfo = f"{userinfo}:{quote(password, safe='')}"
+    return f"http://{userinfo}@{host}:{port}"
+
+
+async def _default_proxy_prober(target_url: str, proxy_url: str) -> bool:
+    """Report only whether a request reached ``target_url`` through the proxy.
+
+    Deliberately collapses every failure -- DNS, a refused connection, a proxy
+    auth challenge, a 5xx from the target -- into the same ``False``. Anything
+    more specific would let this become a credential oracle for whoever can
+    reach the loopback API: a caller could tell "wrong password" apart from
+    "host unreachable" by the shape of the answer alone.
+    """
+    if not target_url:
+        return False
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=PROXY_TEST_TIMEOUT) as client:
+            await client.get(target_url)
+    except httpx.HTTPError:
+        return False
+    return True
 
 
 class CredentialStoreProtocol(Protocol):
@@ -69,9 +113,18 @@ class CredentialStoreProtocol(Protocol):
 
     def delete_token(self) -> None: ...
 
+    def load_proxy_password(self) -> str | None: ...
+
+    def save_proxy_password(self, password: str) -> None: ...
+
+    def delete_proxy_password(self) -> None: ...
+
 
 type RemoteFactory = Callable[[str], ListeningRemote]
 type ControllerFactory = Callable[[ListeningRemote, CaptureBackend], DesktopSessionController]
+#: (target_url, proxy_url) -> whether a request reached the target through the
+#: proxy. Injected so tests never need a real network or a real proxy.
+type ProxyProber = Callable[[str, str], Awaitable[bool]]
 
 
 @dataclass
@@ -88,6 +141,12 @@ class Services:
     capability_token: str | None = None
     controller_factory: ControllerFactory = DesktopSessionController
     device_settings: DeviceSettings = field(default_factory=InMemoryDeviceSettings)
+    proxy_settings: ProxySettingsStore = field(default_factory=InMemoryProxySettings)
+    #: The backend origin the "Testar conexão" probe is aimed at -- production
+    #: wires this to the same server the app talks to. Left blank by default so
+    #: an injected Services never reaches the network unless a test opts in.
+    backend_url: str = ""
+    proxy_prober: ProxyProber = _default_proxy_prober
     session_titles: SessionTitleGenerator = field(default_factory=SessionTitleGenerator)
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
@@ -177,6 +236,55 @@ class Services:
         if self.controller is not None:
             self.controller.clear_selected_devices()
 
+    def proxy_url(self) -> str | None:
+        """Build the proxy URL a remote should route through, or None when unset.
+
+        Reads the vault password at call time rather than caching it, so a
+        password rotated or cleared mid-run is honoured by the very next remote
+        this builds -- this only runs at login and at token change, never on
+        the request hot path, so a vault read here is cheap enough to not
+        thread through asyncio.to_thread the way credentials.load_token() does.
+        """
+        settings = self.proxy_settings.load()
+        if not settings.enabled or not settings.host or not settings.port:
+            return None
+        password = self.credentials.load_proxy_password()
+        return _build_proxy_url(settings.host, settings.port, settings.username, password)
+
+    def save_proxy_settings(self, settings: ProxySettings, *, password: str | None) -> None:
+        """Save a submitted password to the vault before persisting the
+        connection settings that mark the proxy enabled.
+
+        In that order deliberately: if the vault write fails partway through
+        (CredentialStorageError, propagated to the client as a 503), nothing
+        has been marked enabled yet, so this never leaves an "enabled" proxy
+        on disk with no password behind it, silently falling back to an
+        unauthenticated connection.
+
+        Only touches the vault when a new password was actually submitted --
+        the saved password never comes back to the settings screen, so the
+        form resubmits with an empty password field unless the user typed a
+        new one, and treating that as "leave it alone" is what lets
+        host/port/username be edited without forcing a retype every time.
+        """
+        if password:
+            self.credentials.save_proxy_password(password)
+        self.proxy_settings.save(settings)
+
+    def clear_proxy_settings(self) -> None:
+        """Delete the vault password before marking the proxy disabled locally.
+
+        Disable the proxy and delete its stored password -- not merely stop
+        using it. A password left behind in the vault after the user turned
+        the proxy off is still a credential this product promised would only
+        live there while needed. This order is what keeps a failed vault
+        delete (CredentialStorageError, propagated to the client as a 503)
+        from leaving the proxy showing "disabled" locally while the password
+        it was supposed to take with it is still sitting in the vault.
+        """
+        self.credentials.delete_proxy_password()
+        self.proxy_settings.clear()
+
     async def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
         controller.set_authentication_failure_handler(self._on_background_authentication_failure)
@@ -226,6 +334,36 @@ class StartSessionRequest(SessionRequest):
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
     is_pinned: bool | None = None
+
+
+class ProxyPayload(BaseModel):
+    """Deliberately mirrors ProxySettings plus one write-only field: a password
+    that is only ever read here, on the way into the vault, and never appears
+    on any model this API returns.
+    """
+
+    enabled: bool
+    host: str = ""
+    port: int = 0
+    username: str = ""
+    #: None means "leave whatever is already stored" -- the saved password
+    #: never round-trips to the settings screen, so there is nothing to resend
+    #: unless the user actually typed a new one.
+    password: str | None = None
+
+
+class SettingsRequest(BaseModel):
+    proxy: ProxyPayload
+
+
+class ProxyTestRequest(BaseModel):
+    """The candidate values currently in the settings form, tested as typed --
+    independent of whatever is already saved or enabled."""
+
+    host: str = ""
+    port: int = 0
+    username: str = ""
+    password: str | None = None
 
 
 class LoopbackHostMiddleware:
@@ -476,6 +614,41 @@ def create_app(services: Services) -> FastAPI:
         services.credentials.delete_token()
         services.clear_authenticated()
         return Response(status_code=204)
+
+    @app.get("/api/settings")
+    async def get_settings() -> dict[str, object]:
+        """Reachable without authentication: a corporate network may need this
+        proxy configured before the login request itself can even reach the
+        backend."""
+        return {"proxy": _proxy_payload(services.proxy_settings.load())}
+
+    @app.post("/api/settings", status_code=204)
+    async def save_settings(request: SettingsRequest) -> Response:
+        proxy = request.proxy
+        if not proxy.enabled:
+            services.clear_proxy_settings()
+            return Response(status_code=204)
+        host = proxy.host.strip()
+        username = proxy.username.strip()
+        if not host or not proxy.port:
+            raise ApiError(422, "Informe o endereço e a porta do proxy.")
+        services.save_proxy_settings(
+            ProxySettings(host=host, port=proxy.port, username=username, enabled=True),
+            password=proxy.password,
+        )
+        return Response(status_code=204)
+
+    @app.post("/api/settings/test-proxy")
+    async def test_proxy(request: ProxyTestRequest) -> dict[str, bool]:
+        """Try one request through the submitted (not necessarily saved) proxy
+        values and report only whether it got through -- see _default_proxy_prober
+        for why the answer never says more than that."""
+        host = request.host.strip()
+        if not host or not request.port:
+            raise ApiError(422, "Informe o endereço e a porta do proxy.")
+        proxy_url = _build_proxy_url(host, request.port, request.username.strip(), request.password)
+        ok = await services.proxy_prober(services.backend_url, proxy_url)
+        return {"ok": ok}
 
     @app.get("/api/session-name")
     async def session_name() -> dict[str, str]:
@@ -887,6 +1060,16 @@ def _audio_level_payload(snapshot: AudioLevelSnapshot) -> dict[str, object]:
         "active": snapshot.active,
         "microphone": {"level": snapshot.microphone, "peak": snapshot.microphone_peak},
         "system": {"level": snapshot.system, "peak": snapshot.system_peak},
+    }
+
+
+def _proxy_payload(settings: ProxySettings) -> dict[str, object]:
+    """Never includes a password field -- ProxySettings has none to include."""
+    return {
+        "enabled": settings.enabled,
+        "host": settings.host,
+        "port": settings.port,
+        "username": settings.username,
     }
 
 

@@ -9,6 +9,7 @@ import keyring
 
 SERVICE_NAME = "Broccoli Desktop"
 ACCOUNT_NAME = "api-token"
+PROXY_PASSWORD_ACCOUNT_NAME = "proxy-password"
 
 _Result = TypeVar("_Result")
 
@@ -52,6 +53,31 @@ class CredentialStore:
         """Remove the stored API token."""
         self._run_backend_operation(
             lambda: self._backend.delete_password(SERVICE_NAME, ACCOUNT_NAME)
+        )
+
+    def load_proxy_password(self) -> str | None:
+        """Return the stored proxy password, if one was saved."""
+        return self._run_backend_operation(
+            lambda: self._backend.get_password(SERVICE_NAME, PROXY_PASSWORD_ACCOUNT_NAME)
+        )
+
+    def save_proxy_password(self, password: str) -> None:
+        """Save a non-empty proxy password under its own vault entry.
+
+        Kept separate from the API token entry so clearing one credential can
+        never reach into the other, and so this is the only place the proxy
+        password is ever written to disk.
+        """
+        if not password:
+            raise ValueError("A credential is required.")
+        self._run_backend_operation(
+            lambda: self._backend.set_password(SERVICE_NAME, PROXY_PASSWORD_ACCOUNT_NAME, password)
+        )
+
+    def delete_proxy_password(self) -> None:
+        """Remove the stored proxy password."""
+        self._run_backend_operation(
+            lambda: self._backend.delete_password(SERVICE_NAME, PROXY_PASSWORD_ACCOUNT_NAME)
         )
 
     @staticmethod

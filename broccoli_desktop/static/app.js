@@ -10,6 +10,17 @@
     window.history.replaceState(null, "", clean);
   }
 
+  // An earlier version of the settings screen persisted the whole proxy panel
+  // -- password included, in clear text -- under this key. The proxy now
+  // lives behind /api/settings, with the password only ever in the Windows
+  // Credential Manager, so this scrubs any copy an earlier version already
+  // wrote to a returning user's machine. Idempotent: a no-op once removed.
+  try {
+    window.localStorage.removeItem("broccoli-desktop-settings");
+  } catch {
+    // Same best-effort contract as the rest of this file's localStorage use.
+  }
+
   function apiHeaders(extra = {}) {
     return CAPABILITY_KEY ? { ...extra, "X-Broccoli-Key": CAPABILITY_KEY } : { ...extra };
   }
@@ -74,6 +85,8 @@
     proxyPort: document.querySelector("#proxyPort"),
     proxyUsername: document.querySelector("#proxyUsername"),
     proxyPassword: document.querySelector("#proxyPassword"),
+    proxyTestButton: document.querySelector("#proxyTestButton"),
+    proxyTestStatus: document.querySelector("#proxyTestStatus"),
     resetSettingsButton: document.querySelector("#resetSettingsButton"),
     sessionTitle: document.querySelector("#sessionTitle"),
     sessionMeta: document.querySelector("#sessionMeta"),
@@ -90,33 +103,23 @@
     drawerToggle: document.querySelector("#drawer-toggle"),
   };
 
-  const SETTINGS_STORAGE_KEY = "broccoli-desktop-settings";
   // Same key and same values the platform writes, so the two surfaces agree on
   // what "dark" means and a theme picked in one reads naturally in the other.
   const THEME_STORAGE_KEY = "theme";
-  const defaultSettings = {
-    proxyEnabled: false,
-    proxyHost: "",
-    proxyPort: "",
-    proxyUsername: "",
-    proxyPassword: "",
-  };
 
-  function loadSettings() {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
-      if (!saved || typeof saved !== "object") return { ...defaultSettings };
-      return { ...defaultSettings, ...saved, proxyEnabled: Boolean(saved.proxyEnabled) };
-    } catch {
-      return { ...defaultSettings };
-    }
-  }
+  // The proxy password is never part of this shape and never travels through
+  // localStorage: it lives only in the Windows Credential Manager, reached
+  // exclusively through /api/settings. This is what the server returns for an
+  // unconfigured proxy, and what the form falls back to if that fetch fails.
+  const DEFAULT_PROXY = { enabled: false, host: "", port: "", username: "" };
 
-  function persistSettings() {
+  async function loadProxySettings() {
     try {
-      window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
-    } catch {
-      // Local preferences are best-effort in restricted browser contexts.
+      const data = await localFetch("/api/settings");
+      state.proxy = data.proxy;
+    } catch (error) {
+      state.proxy = { ...DEFAULT_PROXY };
+      reportError(error);
     }
   }
 
@@ -173,7 +176,9 @@
     sessionsRequestId: 0,
     segments: { cursor: null, loading: false, requestId: 0 },
     activeView: "transcript",
-    settings: loadSettings(),
+    // Populated from /api/settings when the settings screen opens -- never
+    // from localStorage, and never carrying a password field.
+    proxy: { ...DEFAULT_PROXY },
     theme: loadTheme(),
     audioTestActive: false,
     audioMeterBars: { microphone: [], system: [] },
@@ -820,11 +825,14 @@
   }
 
   function renderSettings() {
-    elements.proxyEnabled.checked = state.settings.proxyEnabled;
-    elements.proxyHost.value = state.settings.proxyHost;
-    elements.proxyPort.value = state.settings.proxyPort;
-    elements.proxyUsername.value = state.settings.proxyUsername;
-    elements.proxyPassword.value = state.settings.proxyPassword;
+    elements.proxyEnabled.checked = state.proxy.enabled;
+    elements.proxyHost.value = state.proxy.host;
+    elements.proxyPort.value = state.proxy.port;
+    elements.proxyUsername.value = state.proxy.username;
+    // The saved password never comes back from the server -- this field starts
+    // empty on every render and stays that way unless the user types a new one.
+    elements.proxyPassword.value = "";
+    elements.proxyTestStatus.textContent = "";
     updateProxyFieldsVisibility();
     renderAudioTestControls();
   }
@@ -841,8 +849,12 @@
    * directly, so their click event lands in this parameter too, and a
    * PointerEvent is not an HTMLElement -- ordinary navigation still falls
    * through to focusScreen exactly as before.
+   *
+   * The proxy panel renders twice: once immediately with whatever was loaded
+   * last (so the rest of the screen -- audio devices, theme -- never waits on
+   * a network round trip), then again once the fresh /api/settings read lands.
    */
-  function showSettings(focusTarget) {
+  async function showSettings(focusTarget) {
     if (!state.authenticated) return;
     state.activeView = "settings";
     closeDrawer();
@@ -850,6 +862,8 @@
     renderSettings();
     if (focusTarget instanceof HTMLElement) focusTarget.focus();
     else focusScreen(elements.settingsView);
+    await loadProxySettings();
+    renderSettings();
   }
 
   function showTranscript() {
@@ -859,15 +873,33 @@
     focusScreen(elements.mainView);
   }
 
-  function collectSettings() {
-    return {
-      ...state.settings,
-      proxyEnabled: elements.proxyEnabled.checked,
-      proxyHost: elements.proxyHost.value.trim(),
-      proxyPort: elements.proxyPort.value.trim(),
-      proxyUsername: elements.proxyUsername.value.trim(),
-      proxyPassword: elements.proxyPassword.value,
+  /**
+   * Build the /api/settings proxy payload from the form.
+   *
+   * The password is included only when the user actually typed one -- an
+   * empty field means "keep whatever is already in the vault", never "clear
+   * it", since the saved password never round-trips here for the user to see
+   * and re-enter.
+   */
+  function collectProxyPayload() {
+    if (!elements.proxyEnabled.checked) return { enabled: false };
+    const payload = {
+      enabled: true,
+      host: elements.proxyHost.value.trim(),
+      port: Number(elements.proxyPort.value.trim()) || 0,
+      username: elements.proxyUsername.value.trim(),
     };
+    const password = elements.proxyPassword.value;
+    if (password) payload.password = password;
+    return payload;
+  }
+
+  async function saveProxySettings() {
+    await localFetch("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ proxy: collectProxyPayload() }),
+    });
+    await loadProxySettings();
   }
 
   async function saveDeviceSelection() {
@@ -890,34 +922,73 @@
 
   async function saveSettings(event) {
     event.preventDefault();
-    const nextSettings = collectSettings();
     setTheme(elements.themeLightOption.checked ? "light" : "dark");
     try {
       await saveDeviceSelection();
+      await saveProxySettings();
     } catch (error) {
       reportError(error);
       return;
     }
-    state.settings = nextSettings;
-    persistSettings();
     updateDeviceRequirement();
     renderSettings();
     showNotification("Configurações salvas nesta máquina.", "success");
   }
 
   async function resetSettings() {
-    state.settings = { ...defaultSettings };
     setTheme("dark");
     elements.settingsMicrophoneSelect.value = "";
     elements.settingsSystemDeviceSelect.value = "";
     state.pendingDevices = { microphone_id: "", system_device_id: "" };
-    persistSettings();
     stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
-    await localFetch("/api/devices/selection", { method: "DELETE" });
+    try {
+      await localFetch("/api/devices/selection", { method: "DELETE" });
+      // Disabling here also deletes the stored proxy password server-side --
+      // "restore defaults" must not leave a credential behind.
+      await localFetch("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ proxy: { enabled: false } }),
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
     state.selectedDevices = null;
+    await loadProxySettings();
     renderSettings();
     updateDeviceRequirement();
     showNotification("Configurações restauradas.", "info");
+  }
+
+  async function testProxyConnection() {
+    const host = elements.proxyHost.value.trim();
+    const port = Number(elements.proxyPort.value.trim()) || 0;
+    if (!host || !port) {
+      elements.proxyTestStatus.textContent = "Informe o endereço e a porta antes de testar.";
+      return;
+    }
+    elements.proxyTestButton.disabled = true;
+    elements.proxyTestStatus.textContent = "Testando conexão...";
+    try {
+      const result = await localFetch("/api/settings/test-proxy", {
+        method: "POST",
+        body: JSON.stringify({
+          host,
+          port,
+          username: elements.proxyUsername.value.trim(),
+          // Same rule as saving: an empty field tests without a password
+          // rather than silently reusing whatever is already stored.
+          password: elements.proxyPassword.value || undefined,
+        }),
+      });
+      elements.proxyTestStatus.textContent = result.ok
+        ? "Conexão bem-sucedida."
+        : "Não foi possível conectar através do proxy.";
+    } catch {
+      elements.proxyTestStatus.textContent = "Não foi possível conectar através do proxy.";
+    } finally {
+      elements.proxyTestButton.disabled = false;
+    }
   }
 
   // ------------------------------------------------------------------- session list
@@ -2250,8 +2321,10 @@
     }
   });
   elements.proxyEnabled.addEventListener("change", () => {
-    state.settings.proxyEnabled = elements.proxyEnabled.checked;
     updateProxyFieldsVisibility();
+  });
+  elements.proxyTestButton.addEventListener("click", () => {
+    testProxyConnection().catch(reportError);
   });
   elements.themeLightOption.addEventListener("change", () => {
     if (elements.themeLightOption.checked) setTheme("light");

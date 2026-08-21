@@ -244,17 +244,13 @@
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div>
                     <h2 class="card-title text-lg">Conexão</h2>
-                    <p class="mt-1 text-sm text-base-content/60">Configure uma rota de proxy para esta demonstração.</p>
+                    <p class="mt-1 text-sm text-base-content/60">Configure uma rota de proxy para a conexão com o Broccoli.</p>
                   </div>
                   <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
                     <input id="proxyEnabled" class="toggle toggle-primary" type="checkbox" data-testid="proxy-toggle" />
                     <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Ativar configuração manual de rede.</span></span>
                   </label>
                   <div id="proxyFields" class="hidden grid gap-3 border-t border-base-content/10 pt-4">
-                    <div class="alert alert-warning items-start py-3 text-xs">
-                      <i class="bi bi-exclamation-triangle text-warning" aria-hidden="true"></i>
-                      <span>Valores de exemplo pré-configurados para a demonstração.</span>
-                    </div>
                     <fieldset class="fieldset">
                       <legend class="fieldset-legend text-xs">Endereço</legend>
                       <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" />
@@ -266,13 +262,18 @@
                       </fieldset>
                       <fieldset class="fieldset">
                         <legend class="fieldset-legend text-xs">Usuário</legend>
-                        <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" />
+                        <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" />
                       </fieldset>
                     </div>
                     <fieldset class="fieldset">
                       <legend class="fieldset-legend text-xs">Senha</legend>
-                      <input id="proxyPassword" class="input w-full" type="password" placeholder="senha-local" />
+                      <input id="proxyPassword" class="input w-full" type="password" placeholder="Deixe em branco para manter a senha salva" autocomplete="new-password" data-testid="proxy-password" />
+                      <p class="fieldset-label leading-snug">A senha é salva no Gerenciador de Credenciais do Windows e nunca é exibida aqui novamente.</p>
                     </fieldset>
+                    <div class="flex flex-wrap items-center gap-3 border-t border-base-content/10 pt-4">
+                      <button id="proxyTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-proxy">Testar conexão</button>
+                      <p id="proxyTestStatus" class="text-xs text-base-content/60" role="status"></p>
+                    </div>
                   </div>
                 </div>
               </section>

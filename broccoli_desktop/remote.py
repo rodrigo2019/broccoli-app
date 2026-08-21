@@ -196,15 +196,22 @@ class HttpListeningRemote:
         token: str,
         transport: httpx.AsyncBaseTransport | None = None,
         *,
-        websocket_path: str,
+        websocket_path: str = "",
         socket_factory: SocketFactory | None = None,
+        proxy: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._transport = transport
         self._websocket_path = websocket_path
         self._socket_factory = socket_factory or websockets.connect
+        self._proxy = proxy
         self._client: httpx.AsyncClient | None = None
+
+    @property
+    def client_proxy(self) -> str | None:
+        """The proxy URL this credential's requests are routed through, if any."""
+        return self._proxy
 
     async def aclose(self) -> None:
         """Release the pooled connections once this credential is done with."""
@@ -281,6 +288,7 @@ class HttpListeningRemote:
                     title=title,
                 ),
                 additional_headers={"Authorization": _authorization_header(self._token)},
+                proxy=self._proxy,
             )
         except Exception as error:
             if _handshake_status_code(error) in {401, 403}:
@@ -300,6 +308,7 @@ class HttpListeningRemote:
                 headers={"Authorization": _authorization_header(self._token)},
                 transport=self._transport,
                 timeout=REQUEST_TIMEOUT,
+                proxy=self._proxy,
             )
         return self._client
 

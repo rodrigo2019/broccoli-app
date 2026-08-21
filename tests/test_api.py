@@ -43,6 +43,9 @@ class FakeCredentials:
     saved_tokens: list[str] = field(default_factory=list)
     deleted_count: int = 0
     unavailable: bool = False
+    proxy_password: str | None = None
+    saved_proxy_passwords: list[str] = field(default_factory=list)
+    deleted_proxy_password_count: int = 0
 
     def load_token(self) -> str | None:
         if self.unavailable:
@@ -60,6 +63,25 @@ class FakeCredentials:
             raise CredentialStorageError("Credential storage is unavailable.")
         self.token = None
         self.deleted_count += 1
+
+    def load_proxy_password(self) -> str | None:
+        if self.unavailable:
+            raise CredentialStorageError("Credential storage is unavailable.")
+        return self.proxy_password
+
+    def save_proxy_password(self, password: str) -> None:
+        if self.unavailable:
+            raise CredentialStorageError("Credential storage is unavailable.")
+        if not password:
+            raise ValueError("A credential is required.")
+        self.proxy_password = password
+        self.saved_proxy_passwords.append(password)
+
+    def delete_proxy_password(self) -> None:
+        if self.unavailable:
+            raise CredentialStorageError("Credential storage is unavailable.")
+        self.proxy_password = None
+        self.deleted_proxy_password_count += 1
 
 
 @dataclass
@@ -1167,3 +1189,367 @@ def test_login_during_a_capture_is_refused(client: TestClient, services: Service
     assert response.status_code == 409
     assert response.json() == {"detail": "A capture is active."}
     assert services.controller is original
+
+
+# --------------------------------------------------------------------- proxy settings
+
+
+@dataclass
+class FakeProxyProber:
+    """Deterministic stand-in for the real network probe, so these tests never
+    reach an actual proxy or backend."""
+
+    result: bool = True
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    async def __call__(self, target_url: str, proxy_url: str) -> bool:
+        self.calls.append((target_url, proxy_url))
+        return self.result
+
+
+def test_the_proxy_password_never_reaches_the_settings_payload(
+    client: TestClient, services: Services
+) -> None:
+    """The panel used to persist the password to localStorage in clear text, in
+    a product whose selling point is that credentials live in the Windows
+    vault."""
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+
+    stored = client.get("/api/settings").json()
+
+    assert "secret" not in json.dumps(stored)
+    assert services.credentials.load_proxy_password() == "secret"
+
+
+def test_clearing_the_proxy_deletes_the_stored_password(
+    client: TestClient, services: Services
+) -> None:
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "p",
+                "port": 1,
+                "username": "u",
+                "password": "secret",
+            }
+        },
+    )
+
+    client.post("/api/settings", json={"proxy": {"enabled": False}})
+
+    assert services.credentials.load_proxy_password() is None
+
+
+def test_saved_proxy_settings_are_returned_without_a_password_field(client: TestClient) -> None:
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+
+    stored = client.get("/api/settings").json()
+
+    assert stored == {
+        "proxy": {"enabled": True, "host": "proxy.local", "port": 8080, "username": "user"}
+    }
+    assert "password" not in json.dumps(stored)
+
+
+def test_settings_default_to_a_disabled_proxy(client: TestClient) -> None:
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {"proxy": {"enabled": False, "host": "", "port": 0, "username": ""}}
+
+
+def test_settings_are_reachable_without_authentication(client: TestClient) -> None:
+    """The proxy may be exactly what a corporate network needs to reach the
+    login endpoint in the first place, so it has to be configurable pre-login."""
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+
+
+def test_enabling_the_proxy_without_a_host_or_port_is_rejected(
+    client: TestClient, services: Services
+) -> None:
+    response = client.post("/api/settings", json={"proxy": {"enabled": True}})
+
+    assert response.status_code == 422
+    assert services.credentials.load_proxy_password() is None
+
+
+def test_resaving_proxy_settings_without_a_password_leaves_the_stored_one_untouched(
+    client: TestClient, services: Services
+) -> None:
+    """The saved password never comes back to the page, so editing the host or
+    port later must not force the user to retype it."""
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+
+    response = client.post(
+        "/api/settings",
+        json={"proxy": {"enabled": True, "host": "proxy.local", "port": 9090, "username": "user"}},
+    )
+
+    assert response.status_code == 204
+    assert services.credentials.load_proxy_password() == "secret"
+    assert client.get("/api/settings").json()["proxy"]["port"] == 9090
+
+
+def test_saving_a_new_password_replaces_the_stored_one(
+    client: TestClient, services: Services
+) -> None:
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {"enabled": True, "host": "p", "port": 1, "username": "u", "password": "first"}
+        },
+    )
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "p",
+                "port": 1,
+                "username": "u",
+                "password": "second",
+            }
+        },
+    )
+
+    assert services.credentials.load_proxy_password() == "second"
+
+
+def test_proxy_url_is_none_when_disabled(services: Services) -> None:
+    assert services.proxy_url() is None
+
+
+def test_proxy_url_is_built_from_saved_settings_and_the_vault_password(
+    client: TestClient, services: Services
+) -> None:
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+
+    assert services.proxy_url() == "http://user:secret@proxy.local:8080"
+
+
+def test_proxy_url_omits_credentials_when_no_username_is_configured(
+    client: TestClient, services: Services
+) -> None:
+    client.post(
+        "/api/settings",
+        json={"proxy": {"enabled": True, "host": "proxy.local", "port": 8080, "username": ""}},
+    )
+
+    assert services.proxy_url() == "http://proxy.local:8080"
+
+
+def test_test_proxy_reports_success(client: TestClient, services: Services) -> None:
+    prober = FakeProxyProber(result=True)
+    services.proxy_prober = prober
+    services.backend_url = "https://backend.example"
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={"host": "proxy.local", "port": 8080, "username": "user", "password": "secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert prober.calls == [("https://backend.example", "http://user:secret@proxy.local:8080")]
+
+
+def test_test_proxy_reports_failure_identically_for_a_bad_password_and_an_unreachable_host(
+    client: TestClient, services: Services
+) -> None:
+    """The response must not let a caller tell a wrong password apart from a host
+    that never answers -- either would otherwise turn this into a credential
+    oracle for whoever can reach the loopback API."""
+    services.backend_url = "https://backend.example"
+
+    services.proxy_prober = FakeProxyProber(result=False)
+    wrong_password_response = client.post(
+        "/api/settings/test-proxy",
+        json={"host": "proxy.local", "port": 8080, "username": "user", "password": "wrong"},
+    )
+
+    services.proxy_prober = FakeProxyProber(result=False)
+    unreachable_host_response = client.post(
+        "/api/settings/test-proxy",
+        json={
+            "host": "unreachable.invalid",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert wrong_password_response.status_code == unreachable_host_response.status_code == 200
+    assert wrong_password_response.json() == unreachable_host_response.json() == {"ok": False}
+
+
+def test_test_proxy_never_echoes_the_password_back(client: TestClient, services: Services) -> None:
+    services.backend_url = "https://backend.example"
+    services.proxy_prober = FakeProxyProber(result=False)
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={
+            "host": "proxy.local",
+            "port": 8080,
+            "username": "user",
+            "password": "super-secret-value",
+        },
+    )
+
+    assert "super-secret-value" not in response.text
+
+
+def test_test_proxy_requires_a_host_and_port(client: TestClient) -> None:
+    response = client.post("/api/settings/test-proxy", json={"host": "", "port": 0})
+
+    assert response.status_code == 422
+
+
+def test_test_proxy_checks_the_submitted_values_not_the_saved_ones(
+    client: TestClient, services: Services
+) -> None:
+    """The button tests whatever is currently in the form, not what is already
+    saved -- the point is to validate a configuration before committing to it."""
+    services.backend_url = "https://backend.example"
+    services.proxy_prober = FakeProxyProber(result=True)
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={"host": "proxy.local", "port": 8080, "username": "", "password": ""},
+    )
+
+    assert response.json() == {"ok": True}
+
+
+def test_saving_and_testing_the_proxy_never_logs_the_password(
+    client: TestClient, services: Services, caplog: pytest.LogCaptureFixture
+) -> None:
+    services.backend_url = "https://backend.example"
+    services.proxy_prober = FakeProxyProber(result=True)
+    caplog.set_level(logging.DEBUG)
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "log-sentinel-secret",
+            }
+        },
+    )
+    client.post(
+        "/api/settings/test-proxy",
+        json={
+            "host": "proxy.local",
+            "port": 8080,
+            "username": "user",
+            "password": "log-sentinel-secret",
+        },
+    )
+
+    assert "log-sentinel-secret" not in caplog.text
+
+
+def test_a_failed_vault_write_does_not_leave_the_proxy_enabled_locally(
+    client: TestClient, services: Services, fake_credentials: FakeCredentials
+) -> None:
+    """The password is saved to the vault before the connection settings are
+    marked enabled -- otherwise a vault write that fails partway through
+    would leave an "enabled" proxy on disk with no password behind it, and
+    proxy_url() would silently fall back to an unauthenticated connection."""
+    fake_credentials.unavailable = True
+
+    response = client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+
+    assert response.status_code == 503
+    assert services.proxy_settings.load().enabled is False
+
+
+def test_a_failed_vault_delete_does_not_leave_the_proxy_disabled_locally(
+    client: TestClient, services: Services, fake_credentials: FakeCredentials
+) -> None:
+    """Mirrors the save-side ordering fix: the vault password is deleted
+    before the connection settings are marked disabled, so a vault failure
+    here leaves the proxy exactly as it was rather than showing "disabled"
+    locally while the password it was supposed to take with it lingers."""
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+    fake_credentials.unavailable = True
+
+    response = client.post("/api/settings", json={"proxy": {"enabled": False}})
+
+    assert response.status_code == 503
+    assert services.proxy_settings.load().enabled is True

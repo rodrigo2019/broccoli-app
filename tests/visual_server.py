@@ -25,6 +25,7 @@ class VisualCredentials:
     """Store the fake browser credential in process memory for one visual run."""
 
     token: str | None = None
+    proxy_password: str | None = None
 
     def load_token(self) -> str | None:
         return self.token
@@ -34,6 +35,21 @@ class VisualCredentials:
 
     def delete_token(self) -> None:
         self.token = None
+
+    def load_proxy_password(self) -> str | None:
+        return self.proxy_password
+
+    def save_proxy_password(self, password: str) -> None:
+        self.proxy_password = password
+
+    def delete_proxy_password(self) -> None:
+        self.proxy_password = None
+
+
+async def _visual_proxy_prober(_target_url: str, _proxy_url: str) -> bool:
+    """Always succeed: this is a fake-only offline server, so "Testar conexão"
+    must never open a real socket the way the production prober does."""
+    return True
 
 
 def create_visual_app(*, port: int):
@@ -51,6 +67,7 @@ def create_visual_app(*, port: int):
             capture_backend=capture_backend,
             loopback_port=port,
             capability_token=VISUAL_CAPABILITY_TOKEN,
+            proxy_prober=_visual_proxy_prober,
         )
     )
 

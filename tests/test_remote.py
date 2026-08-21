@@ -54,10 +54,14 @@ class FakeSocketFactory:
     socket: FakeSocket = field(default_factory=FakeSocket)
     url: str | None = None
     headers: dict[str, str] | None = None
+    proxy: str | None = None
 
-    async def __call__(self, url: str, *, additional_headers: dict[str, str]) -> FakeSocket:
+    async def __call__(
+        self, url: str, *, additional_headers: dict[str, str], proxy: str | None = None
+    ) -> FakeSocket:
         self.url = url
         self.headers = additional_headers
+        self.proxy = proxy
         return self.socket
 
 
@@ -367,6 +371,39 @@ async def test_stream_includes_nonempty_resume_in_the_handshake_query(
         == "wss://broccoli.example/ws/listening/?resume=live+1&device=Laptop+speakers&language=en"
     )
     assert fake_socket_factory.headers == {"Authorization": "Token secret"}
+
+
+def test_the_remote_uses_the_configured_proxy() -> None:
+    """Injection is the point of the whole feature -- a remote built with a
+    proxy has to expose it, or nothing downstream can ever route through it."""
+    remote = HttpListeningRemote(
+        base_url="https://example.invalid", token="t", proxy="http://user:pass@proxy.local:8080"
+    )
+
+    assert remote.client_proxy == "http://user:pass@proxy.local:8080"
+
+
+def test_a_remote_built_without_a_proxy_has_none() -> None:
+    remote = HttpListeningRemote(base_url="https://example.invalid", token="t")
+
+    assert remote.client_proxy is None
+
+
+@pytest.mark.asyncio
+async def test_the_websocket_stream_is_opened_through_the_configured_proxy(
+    fake_socket_factory: FakeSocketFactory,
+) -> None:
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=fake_socket_factory,
+        proxy="http://user:pass@proxy.local:8080",
+    )
+
+    await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+
+    assert fake_socket_factory.proxy == "http://user:pass@proxy.local:8080"
 
 
 @pytest.mark.asyncio

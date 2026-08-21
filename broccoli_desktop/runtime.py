@@ -25,7 +25,7 @@ from broccoli_desktop.config import (
 from broccoli_desktop.credentials import CredentialStore
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
-from broccoli_desktop.settings import LocalDeviceSettings
+from broccoli_desktop.settings import LocalDeviceSettings, LocalProxySettings
 
 HEALTH_PATH = "/health"
 STARTUP_TIMEOUT_SECONDS = 10
@@ -560,15 +560,27 @@ def _create_production_server(
     websocket_path = _configured_websocket_path(config.websocket_path)
 
     def create_services(port: int) -> Services:
-        return Services(
+        # `services` is read inside the lambda, not passed to it -- the remote
+        # is only built once a token exists (login, or a token change), which
+        # is always after this closure returns, so by the time it runs
+        # `services` is already bound. That late lookup is what lets a proxy
+        # saved after startup reach the very next remote this factory builds,
+        # without threading Services through HttpListeningRemote's construction.
+        services = Services(
             credentials=CredentialStore(),
             remote_factory=lambda token: HttpListeningRemote(
-                config.server_url, token, websocket_path=websocket_path
+                config.server_url,
+                token,
+                websocket_path=websocket_path,
+                proxy=services.proxy_url(),
             ),
             capture_backend=PyAudioCaptureBackend(pyaudiowpatch.PyAudio()),
             loopback_port=port,
             device_settings=LocalDeviceSettings(),
+            proxy_settings=LocalProxySettings(),
+            backend_url=config.server_url,
         )
+        return services
 
     return UvicornLoopbackServer(create_services, port=port)
 
