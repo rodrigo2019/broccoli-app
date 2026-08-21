@@ -209,6 +209,29 @@ try {
         throw "Focus was left on the body after entering the capture screen."
     }
 
+    # Landing on the capture screen puts you in front of an unnamed draft, and
+    # the field used to sit blank until you pressed "Nova sessao" -- a button
+    # there is no reason to press when you have only just opened the app. The
+    # existing draft-name check further down runs after that click, so it never
+    # covered arriving here. Asserted through the real UI because the fill
+    # happens in applyBootstrap, where there is nothing for pytest to reach.
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#sessionTitle').value.trim().length > 0"
+    )
+
+    # The screen's label moved into the topbar. The <h1> stayed behind as
+    # sr-only so the skip link and focusScreen still have a heading to land on,
+    # which is exactly the kind of thing a redesign quietly deletes.
+    $headingKind = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const h = document.querySelector('#mainView h1'); return h ? (h.classList.contains('sr-only') && h.getClientRects().length > 0 ? 'sr-only-laid-out' : 'visible') : 'missing'; })()"
+    ) | ConvertFrom-Json)
+    if ($headingKind -ne "sr-only-laid-out") {
+        throw "The capture screen's heading is '$headingKind'; focusScreen and the skip link need an sr-only h1 that is still laid out."
+    }
+
     # The skip link is intentionally off-screen (`transform: translateY(-120%)`)
     # except while focused, so `find ... click` -- which expects an actionable,
     # in-viewport target -- is the wrong tool here; a synthetic click exercises

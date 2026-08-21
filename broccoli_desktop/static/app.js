@@ -2375,10 +2375,24 @@
     renderConnectionState();
     elements.sessionTitle.value = "";
     elements.sessionTitle.focus();
+    await fillDraftSessionTitle();
+  }
+
+  /**
+   * Put a suggested name in the draft title field, if it is still empty.
+   *
+   * Shared by "Nova sessão" and by startup, because opening the app already
+   * puts you in front of an unnamed draft -- the field just sat blank until
+   * you pressed a button you had no reason to press.
+   *
+   * The emptiness check is repeated after the await on purpose: the request is
+   * quick, but not quicker than someone who starts typing straight away, and
+   * overwriting what they typed would be worse than suggesting nothing.
+   */
+  async function fillDraftSessionTitle() {
+    if (elements.sessionTitle.value) return;
     try {
       const suggestion = await localFetch("/api/session-name");
-      // Only if the field is still the untouched draft: the request is quick,
-      // but not quicker than someone who starts typing straight away.
       if (!elements.sessionTitle.value) elements.sessionTitle.value = suggestion.title;
     } catch {
       // No notification: the capture names the session server-side when the
@@ -2421,6 +2435,12 @@
       if (!state.selectedSession) clearTimeline();
       loadSessions({ reset: true }).catch(reportError);
     }
+    // Opening the app with no session selected leaves you on an unnamed draft,
+    // which is the same state "Nova sessão" produces -- so it gets the same
+    // suggested name instead of a blank field. Guarded on there being no
+    // selected session so a reconnect bootstrap for a running capture cannot
+    // overwrite that session's real title.
+    if (!state.selectedSession) fillDraftSessionTitle();
   }
 
   function handleEvent(event) {

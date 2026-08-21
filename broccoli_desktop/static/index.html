@@ -59,10 +59,13 @@
               <i class="bi bi-chevron-left" aria-hidden="true"></i>
             </button>
             <div id="transcriptHeaderContext" class="flex min-w-0 items-center gap-3">
-              <label class="min-w-32 flex-1" for="sessionTitle">
+              <div class="flex min-w-0 flex-1 flex-col">
+                <p class="text-[0.65rem] font-bold uppercase leading-tight tracking-[0.18em] text-primary">Registro ao vivo</p>
+                <label class="min-w-32" for="sessionTitle">
                 <span class="sr-only">Título da reunião</span>
                 <input id="sessionTitle" class="input input-ghost input-sm w-full max-w-[28rem] truncate px-0 font-semibold text-lg" type="text" maxlength="120" placeholder="Sem título" aria-label="Título da reunião" />
-              </label>
+                </label>
+              </div>
               <button id="renameSessionButton" class="btn btn-ghost btn-xs btn-square shrink-0" type="button" data-testid="rename-session" aria-label="Renomear sessão" title="Renomear sessão" disabled>
                 <i class="bi bi-pencil" aria-hidden="true"></i>
               </button>
@@ -322,12 +325,17 @@
 
         <section id="mainView" class="capture-view hidden min-h-0 flex flex-1 flex-col px-4 pt-7 sm:px-6 lg:px-8">
           <main class="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col">
-            <div class="mb-5 flex items-end justify-between gap-4">
-              <div>
-                <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary">Registro ao vivo</p>
-                <h1 class="mt-2 text-2xl font-semibold tracking-tight">Transcrição</h1>
-              </div>
-            </div>
+            <!--
+              The screen's label lives in the topbar now, above the session
+              title. The heading stays here, and stays a real <h1>, because
+              #mainView is what the skip link jumps to and what focusScreen
+              looks inside for a heading to move focus to -- sr-only is clipped
+              but still laid out, so getClientRects() finds it (see
+              focusScreen). Deleting it outright would drop the capture screen
+              out of the document outline and send focus to the first button
+              instead.
+            -->
+            <h1 class="sr-only">Transcrição</h1>
 
             <div class="relative flex min-h-0 flex-1 flex-col">
               <div id="transcriptTimeline" class="transcript-surface px-1 sm:px-5" aria-live="polite" role="log" data-testid="transcript-timeline">
