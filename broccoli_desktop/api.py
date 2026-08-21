@@ -333,6 +333,7 @@ class Services:
 
     async def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
+        controller.set_device_lookup(self.list_devices)
         controller.set_authentication_failure_handler(self._on_background_authentication_failure)
         controller.set_audio_level_callbacks(
             self.audio_levels.record,
@@ -467,7 +468,15 @@ class LoopbackHostMiddleware:
                 presented = parse_qs(scope.get("query_string", b"").decode("latin-1")).get(
                     "k", [""]
                 )[0]
-            if not secrets.compare_digest(presented, self._capability_token):
+            # Compared as bytes. secrets.compare_digest raises TypeError on a
+            # str with any character above U+007F, and _header decodes headers
+            # latin-1 -- so a non-ASCII X-Broccoli-Key produced an unhandled
+            # 500 where it should have produced the same 403 as any other wrong
+            # key. Encoding both sides keeps the comparison constant-time and
+            # makes a garbage key a rejection rather than a stack trace.
+            if not secrets.compare_digest(
+                presented.encode("utf-8"), self._capability_token.encode("utf-8")
+            ):
                 await self._reject(scope, send, status=403, detail="Local key required.")
                 return
         await self.app(scope, receive, send)

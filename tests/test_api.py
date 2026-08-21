@@ -571,10 +571,8 @@ def test_device_selection_reuses_the_cached_device_list(
     """_validated_choices used to call backend.list_devices() directly, bypassing
     the cache and blocking the loop again on every save, audio-level check,
     session start and resume. Exercised here through device selection, which
-    validates choices without also constructing a CaptureSession -- that path
-    calls list_devices() on its own for reasons outside this fix's scope, which
-    would make a start_session-based assertion about exact call counts couple
-    this test to unrelated internals."""
+    validates choices without also constructing a CaptureSession; the session
+    start path is covered separately below."""
     login(client)
 
     client.get("/api/devices")
@@ -584,6 +582,22 @@ def test_device_selection_reuses_the_cached_device_list(
     )
 
     assert saved.status_code == 204
+    assert fake_capture.list_devices_calls == 1
+
+
+def test_starting_a_session_reuses_the_cached_device_list(
+    client: TestClient, fake_capture: FakeCaptureBackend
+) -> None:
+    """Starting a session used to enumerate three more times on top of the
+    cached validation read: once to resolve the system device's label, once in
+    CaptureSession's constructor -- both on the event loop -- and once more
+    inside CaptureSession.start(). That is the hot path the TTL cache was
+    written to protect, and it was the one path that bypassed it."""
+    login(client)
+    client.get("/api/devices")
+
+    start_capture(client)
+
     assert fake_capture.list_devices_calls == 1
 
 
@@ -995,6 +1009,23 @@ def test_the_shell_and_its_assets_do_not_require_the_token(
     """The page has to boot before it can present a key."""
     assert tokened_client.get("/").status_code == 200
     assert tokened_client.get("/static/app.js").status_code == 200
+
+
+def test_a_non_ascii_capability_key_is_rejected_rather_than_crashing(
+    tokened_client: TestClient,
+) -> None:
+    """secrets.compare_digest raises TypeError on a str carrying anything above
+    U+007F, and headers are decoded latin-1 -- so a key with a single accented
+    byte in it turned a 403 into an unhandled 500, telling a caller its garbage
+    key was different in kind from an ordinary wrong one."""
+    # Raw bytes, the way a real caller sends them: the ASGI server decodes
+    # headers latin-1, so this arrives as a str with a character above U+007F.
+    response = tokened_client.get(
+        "/api/devices", headers={"X-Broccoli-Key": "chave-inválida".encode("latin-1")}
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Local key required."}
 
 
 def test_the_window_can_recover_its_launch_key_after_a_reload(

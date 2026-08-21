@@ -20,6 +20,7 @@ from broccoli_desktop.models import (
     AudioFrame,
     CaptureEvent,
     ConnectionState,
+    DeviceDescriptor,
     SessionSummary,
     TranscriptDelta,
     TranscriptSegment,
@@ -123,6 +124,7 @@ class DesktopSessionController:
         self._run_generation = 0
         self._recovery_active = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._device_lookup: Callable[[], Awaitable[list[DeviceDescriptor]]] | None = None
 
     @property
     def buffered_audio_ms(self) -> int:
@@ -222,6 +224,16 @@ class DesktopSessionController:
             raise RuntimeError("An active capture owns the selected devices.")
         self._choices = None
 
+    def set_device_lookup(self, lookup: Callable[[], Awaitable[list[DeviceDescriptor]]]) -> None:
+        """Use the API layer's cached, off-loop enumeration instead of the backend.
+
+        Services.list_devices caches for a few seconds and runs the call on a
+        worker thread. Without this the controller called
+        backend.list_devices() directly on the event loop, defeating that cache
+        on the very path it was written to protect.
+        """
+        self._device_lookup = lookup
+
     def set_authentication_failure_handler(self, callback: Callable[[], None] | None) -> None:
         """Set the narrow local notification used when background recovery loses auth."""
         self._on_authentication_failure = callback
@@ -282,7 +294,13 @@ class DesktopSessionController:
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
-        self._device_label = self._selected_system_label(choices)
+        # One enumeration for this whole start, from the cache when the API
+        # layer gave this controller its lookup. It used to be three: this label
+        # resolution and CaptureSession's constructor both went straight to the
+        # backend on the event loop, and CaptureSession.start() took a third on
+        # its worker thread.
+        device_labels = {device.device_id: device.label for device in await self._list_devices()}
+        self._device_label = device_labels.get(choices.system_device_id, choices.system_device_id)
         self._set_state(ConnectionState.STARTING)
         # After STARTING, so that waiting on a previous run's sender cannot open
         # a window for a second caller to walk past the guard above. A run that
@@ -355,6 +373,7 @@ class DesktopSessionController:
                 on_event=self._on_capture_event,
                 on_audio_level=self._on_audio_level,
                 on_capture_state=self._on_capture_state,
+                device_labels=device_labels,
             )
             self._capture = capture
             # Opens two WASAPI endpoints synchronously; off the loop so a
@@ -885,11 +904,19 @@ class DesktopSessionController:
         self._pipeline = AudioPipeline(base_offset_ms=base_offset_ms)
         self._pipeline_base_offset_ms = base_offset_ms
 
-    def _selected_system_label(self, choices: CaptureChoices) -> str:
-        for device in self._capture_backend.list_devices():
-            if device.device_id == choices.system_device_id:
-                return device.label
-        return choices.system_device_id
+    async def _list_devices(self) -> list[DeviceDescriptor]:
+        """Enumerate capture devices without blocking the loop.
+
+        Prefers the lookup the API layer installs, which is
+        Services.list_devices and answers from a TTL cache -- the cache exists
+        precisely for this hot path, and going straight to the backend here
+        defeated it. Falls back to a thread hop for a controller built without
+        one, so a direct user of this class never enumerates on the loop either.
+        """
+        lookup = self._device_lookup
+        if lookup is not None:
+            return await lookup()
+        return await asyncio.to_thread(self._capture_backend.list_devices)
 
     def _set_state(
         self,

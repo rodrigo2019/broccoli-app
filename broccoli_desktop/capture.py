@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from queue import Empty, Full, Queue
@@ -468,7 +468,18 @@ class CaptureSession:
         on_event: CaptureEventCallback | None = None,
         on_audio_level: PcmCallback | None = None,
         on_capture_state: Callable[[bool], None] | None = None,
+        device_labels: Mapping[str, str] | None = None,
     ) -> None:
+        """``device_labels`` is an already-taken enumeration, device id to label.
+
+        These labels only ever name a device in a failure message, and this
+        class used to buy them with two full Windows enumerations per session
+        start -- one here, on the event loop, and one more in start(). The
+        caller has almost always just enumerated for its own validation, and its
+        copy comes off a TTL cache (Services.list_devices), so handing that over
+        removes both. Left out, the old self-service behaviour is kept, which is
+        what direct users of this class in the tests rely on.
+        """
         self._backend = backend
         self._microphone_id = microphone_id
         self._system_device_id = system_device_id
@@ -476,11 +487,12 @@ class CaptureSession:
         self._on_event = on_event
         self._on_audio_level = on_audio_level
         self._on_capture_state = on_capture_state
+        self._device_labels = None if device_labels is None else dict(device_labels)
         selected_ids = {microphone_id, system_device_id}
         self._selected_labels = {
-            device.device_id: device.label
-            for device in backend.list_devices()
-            if device.device_id in selected_ids
+            device_id: label
+            for device_id, label in self._known_device_labels().items()
+            if device_id in selected_ids
         }
         self._lock = RLock()
         self._handles: dict[str, CaptureHandle] = {}
@@ -489,6 +501,12 @@ class CaptureSession:
         self._startup_error: Exception | None = None
         self._selection_invalid = False
 
+    def _known_device_labels(self) -> Mapping[str, str]:
+        """Device id to label, from the caller's enumeration or a fresh one."""
+        if self._device_labels is not None:
+            return self._device_labels
+        return {device.device_id: device.label for device in self._backend.list_devices()}
+
     def start(self) -> None:
         """Start both sources or leave no active source behind."""
         with self._lock:
@@ -496,8 +514,7 @@ class CaptureSession:
                 raise DeviceUnavailableError("Select a replacement device")
             if self._handles:
                 return
-            labels = {device.device_id: device.label for device in self._backend.list_devices()}
-            for device_id, label in labels.items():
+            for device_id, label in self._known_device_labels().items():
                 self._selected_labels.setdefault(device_id, label)
             opening_device_id = self._microphone_id
             self._starting = True
