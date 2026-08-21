@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -370,6 +371,62 @@ async def test_stop_closes_capture_before_ending_the_remote_session(
     assert fake_capture.closed_sources == {"mic-1", "system-1"}
     assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
     assert controller.events.snapshot()[-1] == UiEvent(type="status", state=ConnectionState.STOPPED)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_landing_while_capture_is_still_opening_does_not_strand_streaming(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """CaptureSession.start() now opens its two WASAPI endpoints on a worker
+    thread (asyncio.to_thread), freeing the loop for the rest of the open --
+    including to a concurrent stop(). Without a check in _open(), a stop
+    landing in that window nulls self._capture while start() is still
+    running, and _open() -- unaware -- goes on to declare STREAMING with no
+    capture behind it."""
+    mic_opening = threading.Event()
+    release_mic_open = threading.Event()
+    real_open_microphone = fake_capture.open_microphone
+
+    def slow_open_microphone(device_id: str, on_pcm):
+        mic_opening.set()
+        assert release_mic_open.wait(timeout=5), "test never released the open"
+        return real_open_microphone(device_id, on_pcm)
+
+    fake_capture.open_microphone = slow_open_microphone  # type: ignore[method-assign]
+
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    start_task = asyncio.create_task(
+        controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    )
+    assert await asyncio.to_thread(mic_opening.wait, 5), (
+        "capture.start() never reached open_microphone"
+    )
+
+    # stop() lands while capture.start() is still parked opening the second
+    # (system) device. Its own asyncio.to_thread() hop lets its early nulling
+    # of self._capture run on a worker thread without touching the lock
+    # capture.start() is holding, so this poll -- not a fixed sleep -- is what
+    # makes the race deterministic: it waits for exactly the state transition
+    # under test instead of a guessed duration.
+    stop_task = asyncio.create_task(controller.stop())
+    for _ in range(10_000):
+        if controller._capture is None:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("stop() never reclaimed self._capture before the open finished")
+
+    release_mic_open.set()
+
+    with pytest.raises(RuntimeError, match="stopped while it was starting"):
+        await start_task
+    await stop_task
+
+    assert controller.state is ConnectionState.STOPPED
+    assert controller._capture is None
+    assert controller._stream is None
+    assert controller._sender_task is None
+    assert controller._reader_task is None
 
 
 @pytest.mark.asyncio

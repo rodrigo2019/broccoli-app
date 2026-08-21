@@ -129,15 +129,15 @@ class Services:
         if self._token != token or self._remote is None or self.controller is None:
             remote = self.remote_factory(token)
             self._remote = remote
-            self.controller = self._create_controller(remote)
+            self.controller = await self._create_controller(remote)
             self._token = token
         return self.controller, self._remote
 
-    def set_authenticated(self, token: str, remote: ListeningRemote) -> None:
+    async def set_authenticated(self, token: str, remote: ListeningRemote) -> None:
         """Install the already verified remote after credential persistence succeeds."""
         previous = self._remote
         self._remote = remote
-        self.controller = self._create_controller(remote)
+        self.controller = await self._create_controller(remote)
         self._token = token
         _release_remote(previous)
 
@@ -177,7 +177,7 @@ class Services:
         if self.controller is not None:
             self.controller.clear_selected_devices()
 
-    def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
+    async def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
         controller = self.controller_factory(remote, self.capture_backend)
         controller.set_authentication_failure_handler(self._on_background_authentication_failure)
         controller.set_audio_level_callbacks(
@@ -186,7 +186,7 @@ class Services:
         )
         selection = self.device_settings.load()
         if selection is not None:
-            if _choices_are_available(self.capture_backend, selection):
+            if await _choices_are_available(self, selection):
                 controller.restore_selected_devices(selection)
             else:
                 self.device_settings.clear()
@@ -458,7 +458,7 @@ def create_app(services: Services) -> FastAPI:
             services.clear_authenticated()
             raise ApiError(401, "Authentication is required.") from None
         services.credentials.save_token(token)
-        services.set_authenticated(token, remote)
+        await services.set_authenticated(token, remote)
         return Response(status_code=204)
 
     @app.delete("/api/login", status_code=204)
@@ -494,7 +494,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.put("/api/devices/selection", status_code=204)
     async def save_device_selection(request: SessionRequest) -> Response:
-        choices = _validated_choices(services.capture_backend, request)
+        choices = await _validated_choices(services, request)
         controller, _remote = await _require_authenticated(services)
         if _capture_is_active(controller):
             raise ApiError(409, "Stop the active capture before changing audio devices.")
@@ -525,8 +525,8 @@ def create_app(services: Services) -> FastAPI:
         if not microphone_id and not system_device_id:
             return _audio_level_response(services, test_choices=None)
 
-        choices = _validated_choices(
-            services.capture_backend,
+        choices = await _validated_choices(
+            services,
             SessionRequest(microphone_id=microphone_id, system_device_id=system_device_id),
         )
         if _capture_is_active(controller):
@@ -584,7 +584,7 @@ def create_app(services: Services) -> FastAPI:
         # Named here when the client could not name it -- a failed suggestion
         # request must not be what leaves a meeting with no title at all.
         title = _validate_title(request.title) or services.session_titles()
-        choices = _validated_choices(services.capture_backend, request)
+        choices = await _validated_choices(services, request)
         controller, _remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
@@ -598,7 +598,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
     async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
-        choices = _validated_choices(services.capture_backend, request)
+        choices = await _validated_choices(services, request)
         controller, remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
@@ -742,8 +742,8 @@ def _delete_invalid_credential(services: Services) -> None:
     services.clear_authenticated()
 
 
-def _validated_choices(backend: CaptureBackend, request: SessionRequest) -> CaptureChoices:
-    by_id = {device.device_id: device for device in backend.list_devices()}
+async def _validated_choices(services: Services, request: SessionRequest) -> CaptureChoices:
+    by_id = {device.device_id: device for device in await services.list_devices()}
     microphone = by_id.get(request.microphone_id)
     system = by_id.get(request.system_device_id)
     if microphone is None or microphone.kind != "mic" or system is None or system.kind != "system":
@@ -751,8 +751,8 @@ def _validated_choices(backend: CaptureBackend, request: SessionRequest) -> Capt
     return CaptureChoices(request.microphone_id, request.system_device_id)
 
 
-def _choices_are_available(backend: CaptureBackend, choices: CaptureChoices) -> bool:
-    devices = {device.device_id: device.kind for device in backend.list_devices()}
+async def _choices_are_available(services: Services, choices: CaptureChoices) -> bool:
+    devices = {device.device_id: device.kind for device in await services.list_devices()}
     return (
         devices.get(choices.microphone_id) == "mic"
         and devices.get(choices.system_device_id) == "system"

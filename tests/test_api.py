@@ -512,6 +512,51 @@ def test_device_enumeration_is_cached_between_calls(
     assert fake_capture.list_devices_calls == 1
 
 
+def test_device_selection_reuses_the_cached_device_list(
+    client: TestClient, fake_capture: FakeCaptureBackend
+) -> None:
+    """_validated_choices used to call backend.list_devices() directly, bypassing
+    the cache and blocking the loop again on every save, audio-level check,
+    session start and resume. Exercised here through device selection, which
+    validates choices without also constructing a CaptureSession -- that path
+    calls list_devices() on its own for reasons outside this fix's scope, which
+    would make a start_session-based assertion about exact call counts couple
+    this test to unrelated internals."""
+    login(client)
+
+    client.get("/api/devices")
+    saved = client.put(
+        "/api/devices/selection",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert saved.status_code == 204
+    assert fake_capture.list_devices_calls == 1
+
+
+def test_bootstrap_reuses_the_cached_device_list_when_restoring_a_selection(
+    fake_credentials: FakeCredentials,
+    fake_remote_factory: FakeRemoteFactory,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    """_choices_are_available used to call backend.list_devices() directly from
+    Services._create_controller, bypassing the cache on every token change."""
+    settings = FakeDeviceSettings(selection=CaptureChoices("mic-1", "system-1"))
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+        device_settings=settings,
+    )
+    fake_credentials.save_token("candidate")
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+
+    client.get("/api/devices")
+    bootstrap_payload(client)
+
+    assert fake_capture.list_devices_calls == 1
+
+
 def test_audio_level_stream_requires_a_credential(client: TestClient) -> None:
     assert client.get("/api/audio-levels/stream").status_code == 401
     assert (

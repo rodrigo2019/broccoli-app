@@ -139,7 +139,16 @@ class DesktopSessionController:
         """Stop capture before ending the remote session and publishing stopped."""
         if self.state is ConnectionState.STOPPED:
             return
-        self.stop_local_capture()
+        # CaptureSession.start() holds its lock for the whole WASAPI open. A
+        # stop landing here while a start is still opening devices on its own
+        # thread would otherwise call capture.stop() synchronously below and
+        # block this coroutine on that same lock -- and with it the entire
+        # event loop, since nothing else can run while one coroutine is
+        # parked on a real OS lock -- for whatever is left of the open.
+        # stop_local_capture() itself stays synchronous: it is also the tray
+        # and console-shutdown teardown path (see runtime.py), which calls it
+        # from a plain background thread with no event loop to hop onto.
+        await asyncio.to_thread(self.stop_local_capture)
         self._clear_buffered_frames()
         await self._cancel_tasks()
         self._reset_audio_queue()
@@ -276,7 +285,7 @@ class DesktopSessionController:
             self._session = summary
             self._session_uuid = started.uuid_code
             self._stream = stream
-            self._capture = CaptureSession(
+            capture = CaptureSession(
                 self._capture_backend,
                 choices.microphone_id,
                 choices.system_device_id,
@@ -285,10 +294,14 @@ class DesktopSessionController:
                 on_audio_level=self._on_audio_level,
                 on_capture_state=self._on_capture_state,
             )
+            self._capture = capture
             # Opens two WASAPI endpoints synchronously; off the loop so a
             # session start cannot freeze the transcript socket and the meter
             # stream while Windows takes its time handing back the streams.
-            await asyncio.to_thread(self._capture.start)
+            # The loop is free for the rest of this open, including to a
+            # concurrent stop() -- which is why this keeps its own reference
+            # to `capture` rather than only reading it back off `self` below.
+            await asyncio.to_thread(capture.start)
         except DeviceUnavailableError:
             await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
@@ -307,6 +320,22 @@ class DesktopSessionController:
             self._clear_buffered_frames()
             self._set_state(ConnectionState.FAILED, message="Unable to start the session.")
             raise
+        if self._capture is not capture:
+            # capture.start() succeeded, but self._capture no longer points at
+            # the CaptureSession this run just opened: a concurrent stop()
+            # reclaimed the run while it was opening. _stop_capture() nulls
+            # self._capture (and stops this exact object) as the very first
+            # thing stop() does, off its own thread, so this can be true well
+            # before stop() finishes -- a run-generation counter bumped later
+            # in stop() would not reliably catch it, which is why this checks
+            # capture identity instead. Declaring STREAMING now would
+            # resurrect a session stop() is already tearing down, and starting
+            # a sender/reader pair here would run them straight into the first
+            # send() failure against a stream stop() is closing, with nobody
+            # watching. stop() owns the rest of this run's teardown -- there is
+            # nothing left here to do but tell the caller the start did not
+            # happen.
+            raise RuntimeError("The session was stopped while it was starting.")
         self.events.publish(UiEvent(type="session", session=summary))
         self._set_state(ConnectionState.STREAMING, session=summary)
         # Started here, not beside `self._stream = stream`, so that an open which
