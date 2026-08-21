@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import parse_qs, quote
 
 import httpx
@@ -160,6 +160,9 @@ class Services:
     backend_url: str = ""
     proxy_prober: ProxyProber = _default_proxy_prober
     session_titles: SessionTitleGenerator = field(default_factory=SessionTitleGenerator)
+    #: Moves the native window between its two fixed sizes. None wherever there
+    #: is no native window to move -- browser_only.py and the API tests.
+    window_mode: Callable[[bool], None] | None = None
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
@@ -383,6 +386,10 @@ class ApiError(Exception):
 
 class LoginRequest(BaseModel):
     token: str
+
+
+class WindowModeRequest(BaseModel):
+    mode: Literal["compact", "maximized"]
 
 
 class SessionRequest(BaseModel):
@@ -749,6 +756,13 @@ def create_app(services: Services) -> FastAPI:
         proxy_url = _build_proxy_url(host, request.port, request.username.strip(), request.password)
         ok = await services.proxy_prober(services.backend_url, proxy_url)
         return {"ok": ok}
+
+    @app.post("/api/window", status_code=204)
+    def set_window_mode(request: WindowModeRequest) -> Response:
+        """Follow the screen the UI is showing; the window has no other size."""
+        if services.window_mode is not None:
+            services.window_mode(request.mode == "maximized")
+        return Response(status_code=204)
 
     @app.get("/api/session-name")
     async def session_name() -> dict[str, str]:

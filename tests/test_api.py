@@ -2367,3 +2367,104 @@ def test_a_newly_created_session_sorts_to_the_top_not_the_bottom(
     )
 
     assert result["order"] == ["just-created", "older"]
+
+
+def test_window_mode_moves_the_native_window(services: Services, client: TestClient) -> None:
+    """The web UI is the only thing that knows which screen is on show."""
+    received: list[bool] = []
+    services.window_mode = lambda maximized: received.append(maximized)
+
+    assert client.post("/api/window", json={"mode": "maximized"}).status_code == 204
+    assert client.post("/api/window", json={"mode": "compact"}).status_code == 204
+
+    assert received == [True, False]
+
+
+def test_window_mode_rejects_a_size_that_is_not_one_of_the_two(
+    services: Services, client: TestClient
+) -> None:
+    received: list[bool] = []
+    services.window_mode = lambda maximized: received.append(maximized)
+
+    response = client.post("/api/window", json={"mode": "fullscreen"})
+
+    assert response.status_code == 422
+    assert received == []
+
+
+def test_window_mode_is_accepted_without_a_native_window(client: TestClient) -> None:
+    """browser_only.py serves the same UI with no native window to resize."""
+    assert client.post("/api/window", json={"mode": "maximized"}).status_code == 204
+
+
+def test_window_mode_requires_the_capability_key(tokened_client: TestClient) -> None:
+    assert tokened_client.post("/api/window", json={"mode": "maximized"}).status_code == 403
+
+
+#: Drives the shipped window-size rule through the transitions renderView makes.
+#: A template for the same reason _LAUNCH_KEY_HARNESS is one.
+_WINDOW_MODE_HARNESS = """%s
+
+console.log(
+  JSON.stringify({
+    boot_logged_out: windowModeForAuthChange(null, false),
+    boot_with_stored_credential: windowModeForAuthChange(null, true),
+    login: windowModeForAuthChange(false, true),
+    logout: windowModeForAuthChange(true, false),
+    rerender_logged_in: windowModeForAuthChange(true, true),
+    rerender_logged_out: windowModeForAuthChange(false, false),
+  }),
+);
+"""
+
+
+def _slice_function(app_js: str, name: str) -> str:
+    """Lift one function out of app.js by brace matching, as the launch-key check does."""
+    start = app_js.index(f"function {name}(")
+    depth = 0
+    index = app_js.index("{", start)
+    while True:
+        depth += {"{": 1, "}": -1}.get(app_js[index], 0)
+        index += 1
+        if depth == 0:
+            break
+    return app_js[start:index]
+
+
+def _run_window_mode_scenarios(app_js: str) -> dict[str, object]:
+    """Run app.js's own window-size rule under node.
+
+    The function is pure and touches no DOM, which is what makes lifting it out
+    by text work at all -- everything else in the file queries elements that
+    only exist in the served shell.
+    """
+    lifted = _slice_function(app_js, "windowModeForAuthChange")
+    with tempfile.TemporaryDirectory() as directory:
+        script = pathlib.Path(directory) / "window-mode.js"
+        script.write_text(_WINDOW_MODE_HARNESS % lifted, encoding="utf-8")
+        completed = subprocess.run(
+            ["node", str(script)], capture_output=True, text=True, check=False
+        )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_the_window_size_follows_login_without_overriding_the_user(
+    tokened_client: TestClient,
+) -> None:
+    """renderView runs constantly; only a login/logout may impose a size."""
+    results = _run_window_mode_scenarios(tokened_client.get("/static/app.js").text)
+
+    assert results == {
+        # The window is created compact and starts there. The first paint only
+        # establishes the baseline -- a stored credential is not a sign-in, and
+        # maximizing on it would mean the app never opens at the small size.
+        "boot_logged_out": None,
+        "boot_with_stored_credential": None,
+        "login": "maximized",
+        "logout": "compact",
+        # The two that matter: a render with no authentication change leaves
+        # whatever size the user picked with the topbar button alone.
+        "rerender_logged_in": None,
+        "rerender_logged_out": None,
+    }

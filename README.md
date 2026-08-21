@@ -50,27 +50,24 @@ Start Menu and desktop shortcuts named **Broccoli Desktop**, and includes an
 uninstaller. Microsoft Edge WebView2 Runtime must already be installed; the
 installer stops before installation when it is unavailable.
 
-The packaged application uses the exact backend WebSocket path provided by the
-backend owner. The production hostname is embedded in the client by design (see
-`config.py`); do not include a token or a production transcript in build
-inputs, CI configuration, or release artifacts.
+The packaged application embeds the backend hostnames and the Listening
+WebSocket path by design (see `config.py`); do not include a token or a
+production transcript in build inputs, CI configuration, or release artifacts.
 
-## Backend WebSocket configuration
+## Selecting an environment
 
-Before launching the desktop client, obtain the exact WebSocket path from the
-backend owner and set it locally. The path is non-secret, but it must be supplied
-by the deployed backend; Broccoli Desktop never guesses a remote route.
+`broccoli-desktop` runs against production by default. `--dev` selects the
+development deployment and `--local` a platform checkout served on
+`http://127.0.0.1:8000`:
 
 ```powershell
-$env:BROCCOLI_DESKTOP_WEBSOCKET_PATH = "/path-provided-by-the-backend-owner"
 broccoli-desktop --local
 ```
 
-The normal desktop runtime will display a local startup error when this setting
-is missing or is not an absolute path. The fake browser-only visual runner does
-not need a production remote path.
+The local port is the one setting that varies per machine, so `--local` takes
+it as an argument. Nothing else needs configuring -- no environment variable is
+read at startup:
 
-The `broccoli-desktop` command supports `--local` for
-`http://127.0.0.1:8000` and `--dev` for a development URL supplied by local build
-configuration. Production builds use the official remote Broccoli backend, which is
-an external prerequisite.
+```powershell
+broccoli-desktop --local 9000
+```

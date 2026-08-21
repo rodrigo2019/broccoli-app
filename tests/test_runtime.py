@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
@@ -19,12 +20,12 @@ from broccoli_desktop.browser_only import print_window_url
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
+    COMPACT_WINDOW_SIZE,
     DesktopRuntime,
     PyWebViewWindow,
     UvicornLoopbackServer,
     _available_loopback_port,
-    _configured_websocket_path,
-    _create_production_server,
+    _create_pywebview_window,
     start_browser_only,
     start_runtime,
 )
@@ -58,6 +59,12 @@ class FakeWindow:
     focused: bool = False
     destroyed: bool = False
     close_handler: Any = None
+    compacted: int = 0
+    expanded: int = 0
+    calls: list[str] = field(default_factory=list)
+    size_changed_handler: Any = None
+    #: Mimics the real window, whose restore() makes pywebview fire `restored`.
+    restore_reports_restored: bool = False
 
     def hide(self) -> None:
         self.hidden = True
@@ -67,15 +74,34 @@ class FakeWindow:
 
     def restore(self) -> None:
         self.restored = True
+        self.calls.append("restore")
+        if self.restore_reports_restored and self.size_changed_handler is not None:
+            self.size_changed_handler(False)
 
     def focus(self) -> None:
         self.focused = True
+        self.calls.append("focus")
 
     def destroy(self) -> None:
         self.destroyed = True
 
     def bind_closing(self, handler: Any) -> None:
         self.close_handler = handler
+
+    def compact(self) -> None:
+        self.compacted += 1
+        self.calls.append("compact")
+
+    def expand(self) -> None:
+        self.expanded += 1
+        self.calls.append("expand")
+
+    def bind_size_changed(self, handler: Any) -> None:
+        self.size_changed_handler = handler
+
+    def report_size_change(self, maximized: bool) -> None:
+        """Stand in for the user clicking the title bar's own buttons."""
+        self.size_changed_handler(maximized)
 
 
 @dataclass
@@ -93,8 +119,26 @@ class FakeClosingEvent:
 
 
 @dataclass
+class FakeWindowEvent:
+    """PyWebView-shaped event that collects handlers and calls them on demand."""
+
+    handlers: list[Any] = field(default_factory=list)
+
+    def __iadd__(self, handler: Any) -> FakeWindowEvent:
+        self.handlers.append(handler)
+        return self
+
+    def fire(self) -> None:
+        for handler in self.handlers:
+            handler()
+
+
+@dataclass
 class FakeWebViewEvents:
     closing: FakeClosingEvent = field(default_factory=FakeClosingEvent)
+    shown: FakeWindowEvent = field(default_factory=FakeWindowEvent)
+    maximized: FakeWindowEvent = field(default_factory=FakeWindowEvent)
+    restored: FakeWindowEvent = field(default_factory=FakeWindowEvent)
 
 
 @dataclass
@@ -130,6 +174,23 @@ class FakeNativeWindow:
 
 
 @dataclass
+class FakeSizedNativeWindow:
+    """PyWebView-like fake that records the order of window-size operations."""
+
+    calls: list[Any] = field(default_factory=list)
+    events: FakeWebViewEvents = field(default_factory=FakeWebViewEvents)
+
+    def restore(self) -> None:
+        self.calls.append(("restore",))
+
+    def resize(self, width: int, height: int) -> None:
+        self.calls.append(("resize", width, height))
+
+    def maximize(self) -> None:
+        self.calls.append(("maximize",))
+
+
+@dataclass
 class FakeSession:
     state: ConnectionState = ConnectionState.IDLE
     stop_calls: int = 0
@@ -155,6 +216,10 @@ class FakeServer:
     shutdown_calls: int = 0
     url: str = "http://127.0.0.1:45678"
     window_url: str = "http://127.0.0.1:45678/?k=fake-capability-token"
+    window_mode: Any = None
+
+    def bind_window_mode(self, handler: Any) -> None:
+        self.window_mode = handler
 
     def start(self) -> bool:
         self.started = True
@@ -419,7 +484,6 @@ def test_browser_only_command_reuses_runtime_config_and_forwards_the_port(
             RuntimeConfig(
                 environment="local",
                 server_url="http://127.0.0.1:8000",
-                websocket_path=None,
             ),
             8765,
         )
@@ -846,36 +910,6 @@ def test_window_start_failure_stops_the_loopback_server() -> None:
     assert dialog.errors == ["O Broccoli Desktop não conseguiu abrir a janela."]
 
 
-def test_production_server_rejects_a_missing_configured_websocket_path() -> None:
-    """Production composition must fail safely instead of inventing a remote route."""
-    config = RuntimeConfig(
-        environment="local",
-        server_url="http://127.0.0.1:8000",
-        websocket_path=None,
-    )
-
-    with raises(RuntimeError, match="backend-provided WebSocket path"):
-        _create_production_server(config)
-
-
-def test_production_server_rejects_a_websocket_path_with_a_query_or_fragment() -> None:
-    """The external route is a path component, never a full URL suffix."""
-    for websocket_path in ("/backend/listening?debug=true", "/backend/listening#fragment"):
-        config = RuntimeConfig(
-            environment="local",
-            server_url="http://127.0.0.1:8000",
-            websocket_path=websocket_path,
-        )
-
-        with raises(RuntimeError, match="backend-provided WebSocket path"):
-            _create_production_server(config)
-
-
-def test_production_server_accepts_a_normalized_absolute_websocket_path() -> None:
-    """The backend-provided path is preserved when it has no URL components."""
-    assert _configured_websocket_path("/backend/listening/") == "/backend/listening/"
-
-
 def test_loopback_port_probe_retries_once_then_starts_cleanly(monkeypatch: Any) -> None:
     """A racy first reservation must not sink startup: one retry is enough."""
     attempts = 0
@@ -964,3 +998,144 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
     assert bootstrap["authenticated"] is True
     assert [device["device_id"] for device in bootstrap["devices"]] == ["mic-1", "system-1"]
     assert VISUAL_TEST_TOKEN not in str(bootstrap)
+
+
+def test_compact_leaves_the_maximized_state_before_resizing() -> None:
+    """SetWindowPos does not clear FormWindowState.Maximized, so restore must come first."""
+    native = FakeSizedNativeWindow()
+
+    PyWebViewWindow(native).compact()
+
+    assert native.calls == [("restore",), ("resize", 1100, 600)]
+
+
+def test_expand_maximizes_the_native_window() -> None:
+    native = FakeSizedNativeWindow()
+
+    PyWebViewWindow(native).expand()
+
+    assert native.calls == [("maximize",)]
+
+
+def test_the_native_window_is_created_fixed_at_the_compact_size(monkeypatch: Any) -> None:
+    """The user gets no resize affordance; only the runtime ever changes the size."""
+    received: dict[str, Any] = {}
+    webview = types.ModuleType("webview")
+
+    def create_window(title: str, url: str, **keywords: Any) -> FakeSizedNativeWindow:
+        received.update(keywords)
+        return FakeSizedNativeWindow()
+
+    webview.create_window = create_window
+    monkeypatch.setitem(sys.modules, "webview", webview)
+
+    _create_pywebview_window("Broccoli Desktop", "http://127.0.0.1:8765/?k=token")
+
+    assert (received["width"], received["height"]) == COMPACT_WINDOW_SIZE
+    assert received["resizable"] is False
+
+
+def test_setting_the_window_mode_expands_and_compacts_the_window() -> None:
+    window = FakeWindow()
+    runtime = DesktopRuntime(
+        server=FakeServer(), window=window, tray=FakeTray(), dialog=FakeDialog()
+    )
+
+    runtime.set_window_mode(maximized=True)
+    runtime.set_window_mode(maximized=False)
+
+    assert window.calls == ["expand", "compact"]
+
+
+def test_showing_a_maximized_window_from_the_tray_restores_its_size() -> None:
+    """PyWebView's restore() drops the window to Normal, undoing the maximized state."""
+    window = FakeWindow()
+    runtime = DesktopRuntime(
+        server=FakeServer(), window=window, tray=FakeTray(), dialog=FakeDialog()
+    )
+    runtime.set_window_mode(maximized=True)
+    window.calls.clear()
+
+    runtime.show_window()
+
+    assert window.calls == ["restore", "expand", "focus"]
+
+
+def test_showing_a_compact_window_from_the_tray_leaves_it_compact() -> None:
+    window = FakeWindow()
+    runtime = DesktopRuntime(
+        server=FakeServer(), window=window, tray=FakeTray(), dialog=FakeDialog()
+    )
+
+    runtime.show_window()
+
+    assert window.calls == ["restore", "focus"]
+
+
+def test_startup_hands_the_window_mode_to_the_local_api(
+    fake_server: FakeServer,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+) -> None:
+    """Only the web UI knows which screen is showing, and only it has no window."""
+    window = FakeWindow()
+
+    start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+
+    assert fake_server.window_mode is not None
+    fake_server.window_mode(True)
+    fake_server.window_mode(False)
+
+    assert window.calls == ["expand", "compact"]
+
+
+def test_the_window_reports_a_size_change_made_from_the_title_bar() -> None:
+    """With MaximizeBox back on, the native button is the user's way between sizes."""
+    native = FakeSizedNativeWindow()
+    reported: list[bool] = []
+
+    PyWebViewWindow(native).bind_size_changed(reported.append)
+    native.events.maximized.fire()
+    native.events.restored.fire()
+
+    assert reported == [True, False]
+
+
+def test_a_title_bar_maximize_survives_a_trip_to_the_tray() -> None:
+    window = FakeWindow()
+    runtime = DesktopRuntime(
+        server=FakeServer(), window=window, tray=FakeTray(), dialog=FakeDialog()
+    )
+    runtime.start()
+    window.report_size_change(True)
+    window.calls.clear()
+
+    runtime.show_window()
+
+    assert window.calls == ["restore", "expand", "focus"]
+
+
+def test_showing_a_window_ignores_the_restore_it_performs_itself() -> None:
+    """show_window's own restore() fires `restored`; reading the mode after it loses it."""
+    window = FakeWindow(restore_reports_restored=True)
+    runtime = DesktopRuntime(
+        server=FakeServer(), window=window, tray=FakeTray(), dialog=FakeDialog()
+    )
+    runtime.start()
+    window.report_size_change(True)
+    window.calls.clear()
+
+    runtime.show_window()
+
+    assert window.calls == ["restore", "expand", "focus"]

@@ -855,7 +855,52 @@
     target.focus();
   }
 
+  // The window has exactly two sizes and cannot be dragged to any other -- see
+  // COMPACT_WINDOW_SIZE and resizable=False in runtime.py. Signing in and out
+  // impose one; the title bar's own maximize button overrides it. Only the
+  // *transition* imposes:
+  // renderView runs on every state change, so re-deriving the size from
+  // state.authenticated each time would undo the user's choice on the very
+  // next render. Keying on the visible view would be worse still --
+  // #settingsView is reachable both before signing in (the proxy panel) and
+  // from inside a session, so opening settings would shrink the window
+  // mid-capture.
+  function windowModeForAuthChange(previous, authenticated) {
+    // null means the first bootstrap has not answered yet, so the app does not
+    // know whether a stored credential exists. Nothing to compare against and
+    // nothing to impose: the window stays at the size it was created at.
+    if (previous === null || previous === authenticated) return null;
+    return authenticated ? "maximized" : "compact";
+  }
+
+  // Seeded with the size the window is created at, so a boot into the login
+  // screen costs no native call at all.
+  let appliedWindowMode = "compact";
+  // Seeded by the first applyBootstrap rather than the first render, because
+  // renderView runs before the credential check answers. Seeding it there
+  // instead made a stored credential look like a sign-in, which maximized the
+  // window on every launch.
+  let windowModeAuthentication = null;
+
+  function setWindowMode(mode) {
+    if (mode === appliedWindowMode) return;
+    appliedWindowMode = mode;
+    // Fire and forget, failure swallowed: browser_only.py serves this same UI
+    // with no native window behind it, and a QA run must not raise a toast
+    // about a window that does not exist.
+    localFetch("/api/window", { method: "POST", body: JSON.stringify({ mode }) }).catch(() => {});
+  }
+
+  function applyWindowMode() {
+    const mode = windowModeForAuthChange(windowModeAuthentication, state.authenticated);
+    // Only track once seeded; writing before that would set the baseline from
+    // a render that predates the answer.
+    if (windowModeAuthentication !== null) windowModeAuthentication = state.authenticated;
+    if (mode !== null) setWindowMode(mode);
+  }
+
   function renderView() {
+    applyWindowMode();
     // Not gated on authentication any more. The proxy panel is the one screen
     // that has to work before signing in -- a corporate proxy can be exactly
     // what stands between this window and the login request -- which is why
@@ -2403,6 +2448,7 @@
   // ---------------------------------------------------------------------- events
 
   function applyBootstrap(bootstrap) {
+    if (windowModeAuthentication === null) windowModeAuthentication = bootstrap.authenticated;
     const wasAuthenticated = state.authenticated;
     state.authenticated = bootstrap.authenticated;
     // Signing in from the pre-login network-settings screen lands on the

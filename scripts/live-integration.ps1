@@ -58,8 +58,7 @@ function Start-ChildProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [hashtable]$Environment = @{}
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -68,9 +67,6 @@ function Start-ChildProcess {
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument $_ }) -join " ")
-    foreach ($name in $Environment.Keys) {
-        $startInfo.Environment[$name] = [string]$Environment[$name]
-    }
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -134,8 +130,7 @@ try {
     $desktopProcess = Start-ChildProcess `
         -FilePath $desktopPython `
         -Arguments @("-m", "broccoli_desktop.browser_only", "--port", "$DesktopPort", "--local") `
-        -WorkingDirectory $desktopRoot `
-        -Environment @{ "BROCCOLI_DESKTOP_WEBSOCKET_PATH" = "/ws/listening/" }
+        -WorkingDirectory $desktopRoot
     Wait-ForUnauthenticatedResponse `
         -Uri "http://127.0.0.1:$DesktopPort/health" `
         -Process $desktopProcess `

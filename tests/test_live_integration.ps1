@@ -13,16 +13,15 @@ try {
     }
 }
 
-$probe = "import os, sys; raise SystemExit(0 if sys.argv[1] == 'two words' and os.getcwd() == sys.argv[2] and os.environ['BROCCOLI_DESKTOP_WEBSOCKET_PATH'] == '/ws/listening/' else 1)"
+$probe = "import os, sys; raise SystemExit(0 if sys.argv[1] == 'two words' and os.getcwd() == sys.argv[2] else 1)"
 $process = Start-ChildProcess `
     -FilePath $desktopPython `
     -Arguments @("-c", $probe, "two words", $desktopRoot) `
-    -WorkingDirectory $desktopRoot `
-    -Environment @{ "BROCCOLI_DESKTOP_WEBSOCKET_PATH" = "/ws/listening/" }
+    -WorkingDirectory $desktopRoot
 
 $process.WaitForExit()
 if ($process.ExitCode -ne 0) {
-    throw "The child process did not receive its quoted arguments, working directory, and child-only WebSocket path."
+    throw "The child process did not receive its quoted arguments and working directory."
 }
 
 Write-Output "live-integration child process construction passed."

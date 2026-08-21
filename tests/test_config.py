@@ -6,8 +6,9 @@ import types
 import pytest
 
 from broccoli_desktop.config import (
-    BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE,
+    DEVELOPMENT_SERVER_URL,
     PRODUCTION_SERVER_URL,
+    WEBSOCKET_PATH,
     parse_runtime_config,
 )
 from broccoli_desktop.models import ConnectionState, SessionSummary, validate_title
@@ -20,12 +21,24 @@ def test_local_flag_overrides_the_embedded_production_url() -> None:
     assert config.environment == "local"
 
 
-def test_dev_flag_uses_the_local_development_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BROCCOLI_DESKTOP_DEV_URL", "https://desktop.dev.example")
+def test_local_flag_takes_the_port_the_platform_is_serving_on() -> None:
+    """The one thing that genuinely varies between machines running a backend."""
+    config = parse_runtime_config(["--local", "9000"])
 
+    assert config.server_url == "http://127.0.0.1:9000"
+    assert config.environment == "local"
+
+
+def test_local_flag_rejects_a_port_that_is_not_one() -> None:
+    for port in ("0", "65536", "-1", "eight-thousand"):
+        with pytest.raises(SystemExit):
+            parse_runtime_config(["--local", port])
+
+
+def test_dev_flag_uses_the_compiled_development_url() -> None:
     config = parse_runtime_config(["--dev"])
 
-    assert config.server_url == "https://desktop.dev.example"
+    assert config.server_url == DEVELOPMENT_SERVER_URL
     assert config.environment == "development"
 
 
@@ -37,25 +50,25 @@ def test_default_config_uses_the_compiled_production_url() -> None:
     assert config.environment == "production"
 
 
-def test_config_reads_the_backend_owned_websocket_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The launcher carries the supplied route without guessing a remote endpoint."""
-    monkeypatch.setenv(BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE, "/backend/listening")
+def test_every_environment_carries_the_same_compiled_websocket_path() -> None:
+    for argv in ([], ["--local"], ["--dev"]):
+        assert parse_runtime_config(argv).websocket_path == "/ws/listening/"
 
-    config = parse_runtime_config([])
 
-    assert config.websocket_path == "/backend/listening"
+def test_no_environment_variable_can_redirect_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both routes now ship in the binary, so neither is an injection point."""
+    monkeypatch.setenv("BROCCOLI_DESKTOP_WEBSOCKET_PATH", "/somewhere-else/")
+    monkeypatch.setenv("BROCCOLI_DESKTOP_DEV_URL", "https://elsewhere.example")
+
+    assert parse_runtime_config([]).websocket_path == WEBSOCKET_PATH
+    assert parse_runtime_config(["--dev"]).server_url == DEVELOPMENT_SERVER_URL
 
 
 def test_config_rejects_conflicting_local_and_dev_flags() -> None:
     with pytest.raises(SystemExit):
         parse_runtime_config(["--local", "--dev"])
-
-
-def test_dev_flag_requires_a_development_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BROCCOLI_DESKTOP_DEV_URL", raising=False)
-
-    with pytest.raises(SystemExit):
-        parse_runtime_config(["--dev"])
 
 
 def test_main_parses_the_config_before_lazily_starting_runtime(

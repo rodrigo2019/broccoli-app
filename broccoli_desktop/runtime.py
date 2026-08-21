@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import signal
 import socket
@@ -10,7 +11,6 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 import pyaudiowpatch
@@ -18,16 +18,18 @@ import uvicorn
 
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app, create_uvicorn_config
 from broccoli_desktop.capture import PyAudioCaptureBackend
-from broccoli_desktop.config import (
-    BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE,
-    RuntimeConfig,
-)
+from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.credentials import CredentialStore
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
 from broccoli_desktop.settings import LocalDeviceSettings, LocalProxySettings
 
+logger = logging.getLogger(__name__)
+
 HEALTH_PATH = "/health"
+#: The only size the window takes outside its maximized state. The user cannot
+#: reach any other one -- the window is created with resizable=False.
+COMPACT_WINDOW_SIZE = (1100, 600)
 STARTUP_TIMEOUT_SECONDS = 10
 CONSOLE_SHUTDOWN_JOIN_TIMEOUT_SECONDS = 0.25
 
@@ -46,6 +48,12 @@ class WindowProtocol(Protocol):
     def destroy(self) -> None: ...
 
     def bind_closing(self, handler: Callable[[], bool]) -> None: ...
+
+    def compact(self) -> None: ...
+
+    def expand(self) -> None: ...
+
+    def bind_size_changed(self, handler: Callable[[bool], None]) -> None: ...
 
 
 class TrayProtocol(Protocol):
@@ -86,6 +94,8 @@ class LoopbackServerProtocol(Protocol):
     def run_coroutine(self, coroutine: Awaitable[None]) -> bool | None: ...
 
     def shutdown(self) -> None: ...
+
+    def bind_window_mode(self, handler: Callable[[bool], None]) -> None: ...
 
 
 class WindowsDialog:
@@ -132,6 +142,21 @@ class PyWebViewWindow:
     def bind_closing(self, handler: Callable[[], bool]) -> None:
         self._window.events.closing += lambda *_arguments: handler()
 
+    def compact(self) -> None:
+        # restore() first: the backend resizes with SetWindowPos, which moves a
+        # maximized form without clearing FormWindowState.Maximized, so the
+        # window would snap back to full size on the next repaint.
+        self._window.restore()
+        self._window.resize(*COMPACT_WINDOW_SIZE)
+
+    def expand(self) -> None:
+        self._window.maximize()
+
+    def bind_size_changed(self, handler: Callable[[bool], None]) -> None:
+        """Report title-bar maximize and restore, whoever caused them."""
+        self._window.events.maximized += lambda: handler(True)
+        self._window.events.restored += lambda: handler(False)
+
 
 class UvicornLoopbackServer:
     """Run the local FastAPI app on one selected loopback port in a worker thread."""
@@ -170,6 +195,15 @@ class UvicornLoopbackServer:
     @property
     def controller(self) -> SessionProtocol | None:
         return self._services.controller
+
+    def bind_window_mode(self, handler: Callable[[bool], None]) -> None:
+        """Let the served UI move the window it is rendered inside.
+
+        Bound after construction because the window does not exist yet when the
+        server is built -- same reason capability_token is assigned here rather
+        than passed in.
+        """
+        self._services.window_mode = handler
 
     def start(self) -> bool:
         if self._thread is not None:
@@ -247,6 +281,7 @@ class DesktopRuntime:
         self._shutdown_in_progress = False
         self._shutdown_owner: threading.Thread | None = None
         self._shutdown_requested = False
+        self._window_maximized = False
 
     @property
     def session(self) -> SessionProtocol | None:
@@ -261,6 +296,7 @@ class DesktopRuntime:
 
     def start(self) -> None:
         self.window.bind_closing(self.on_window_closing)
+        self.window.bind_size_changed(self._remember_window_mode)
         self._tray.start()
 
     def on_window_closing(self) -> bool:
@@ -271,9 +307,29 @@ class DesktopRuntime:
         return False
 
     def show_window(self) -> None:
+        # Read before restoring, never after: restore() puts the window back in
+        # its Normal state, and the native backend reports that as a size
+        # change, so _window_maximized is False by the time restore() returns.
+        maximized = self._window_maximized
         self.window.show()
         self.window.restore()
+        # That same restore() is how a maximized window loses its size on the
+        # way back from the tray, so re-apply what it was before.
+        if maximized:
+            self.window.expand()
         self.window.focus()
+
+    def set_window_mode(self, *, maximized: bool) -> None:
+        """Move the window between its only two sizes and remember which one."""
+        self._window_maximized = maximized
+        if maximized:
+            self.window.expand()
+        else:
+            self.window.compact()
+
+    def _remember_window_mode(self, maximized: bool) -> None:
+        """Track sizes the user chose from the title bar, not just ours."""
+        self._window_maximized = maximized
 
     def stop_capture(self) -> None:
         """Schedule the same controller stop coroutine used by the local API."""
@@ -435,6 +491,7 @@ def start_runtime(
         runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=runtime_dialog)
         if hasattr(tray, "set_runtime"):
             tray.set_runtime(runtime)
+        server.bind_window_mode(lambda maximized: runtime.set_window_mode(maximized=maximized))
         runtime.start()
     except Exception:
         if runtime is None:
@@ -569,8 +626,6 @@ def _stop_browser_only_server(server: LoopbackServerProtocol) -> None:
 def _create_production_server(
     config: RuntimeConfig, *, port: int | None = None
 ) -> UvicornLoopbackServer:
-    websocket_path = _configured_websocket_path(config.websocket_path)
-
     def create_services(port: int) -> Services:
         # `services` is read inside the lambda, not passed to it -- the remote
         # is only built once a token exists (login, or a token change), which
@@ -583,7 +638,7 @@ def _create_production_server(
             remote_factory=lambda token: HttpListeningRemote(
                 config.server_url,
                 token,
-                websocket_path=websocket_path,
+                websocket_path=config.websocket_path,
                 proxy=services.proxy_url(),
             ),
             capture_backend=PyAudioCaptureBackend(pyaudiowpatch.PyAudio()),
@@ -595,30 +650,6 @@ def _create_production_server(
         return services
 
     return UvicornLoopbackServer(create_services, port=port)
-
-
-def _configured_websocket_path(path: str | None) -> str:
-    """Accept the caller-supplied external path only, never a guessed route."""
-    if path is None:
-        raise RuntimeError(
-            f"{BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE} must contain the backend-provided "
-            "WebSocket path as a normalized absolute URI path."
-        )
-    parts = urlsplit(path)
-    if (
-        not path.startswith("/")
-        or path.startswith("//")
-        or parts.scheme
-        or parts.netloc
-        or parts.query
-        or parts.fragment
-        or parts.path != path
-    ):
-        raise RuntimeError(
-            f"{BACKEND_WEBSOCKET_PATH_ENVIRONMENT_VARIABLE} must contain the backend-provided "
-            "WebSocket path as a normalized absolute URI path."
-        )
-    return path
 
 
 def _available_loopback_port() -> int:
@@ -650,7 +681,52 @@ def _validated_loopback_port(port: int) -> int:
 def _create_pywebview_window(title: str, url: str) -> PyWebViewWindow:
     import webview
 
-    return PyWebViewWindow(webview.create_window(title, url, js_api=None))
+    width, height = COMPACT_WINDOW_SIZE
+    native = webview.create_window(
+        title,
+        url,
+        js_api=None,
+        width=width,
+        height=height,
+        # No drag handles and no title-bar double click: the window has two
+        # sizes and no others. The maximize button comes back below -- see
+        # _enable_native_maximize for why that is not a contradiction.
+        resizable=False,
+    )
+    # Only once the form exists; the instance registry is empty until then.
+    native.events.shown += lambda: _enable_native_maximize(native)
+    return PyWebViewWindow(native)
+
+
+def _enable_native_maximize(native: Any) -> None:
+    """Give the fixed-size window its title-bar maximize button back.
+
+    ``resizable=False`` switches off MaximizeBox along with the draggable
+    border, which is one control too many. The border must stay fixed, but the
+    maximize button is exactly the two-state toggle this app wants: Windows
+    restores to the size the window was created at, so the button moves between
+    COMPACT_WINDOW_SIZE and maximized and nowhere else.
+
+    PyWebView exposes no setting for MaximizeBox, so this reaches the form
+    through its private instance registry. Guarded on purpose: an upgrade may
+    move that registry, and the cost of losing this is a missing button, which
+    must never be the reason the application fails to open. The events that
+    keep DesktopRuntime in sync are public API and are unaffected either way.
+    """
+    try:
+        from System import Action
+        from webview.platforms.winforms import BrowserView
+
+        form = BrowserView.instances[native.uid]
+        # Assigning MaximizeBox recreates the window handle, so it has to run
+        # on the UI thread that owns it.
+        form.Invoke(Action(lambda: setattr(form, "MaximizeBox", True)))
+    except Exception:
+        logger.warning(
+            "Could not re-enable the native maximize button; the window still "
+            "follows sign-in and stays fixed at its two sizes.",
+            exc_info=True,
+        )
 
 
 def _start_pywebview(runtime: DesktopRuntime) -> None:
