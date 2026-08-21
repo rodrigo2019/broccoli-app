@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from pytest import fixture, raises
 
 from broccoli_desktop.api import Services, create_app
+from broccoli_desktop.browser_only import print_window_url
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
@@ -400,9 +402,13 @@ def test_browser_only_command_reuses_runtime_config_and_forwards_the_port(
     """The browser-only command must select the same local backend as the desktop launcher."""
     browser_only = import_module("broccoli_desktop.browser_only")
     received: list[tuple[RuntimeConfig, int]] = []
+    announcers: list[object] = []
 
-    def start(config: RuntimeConfig, *, port: int) -> None:
+    def start(
+        config: RuntimeConfig, *, port: int, announce: Callable[[str], None] | None = None
+    ) -> None:
         received.append((config, port))
+        announcers.append(announce)
 
     monkeypatch.setattr(browser_only, "start_browser_only", start)
 
@@ -418,6 +424,73 @@ def test_browser_only_command_reuses_runtime_config_and_forwards_the_port(
             8765,
         )
     ]
+    assert announcers == [browser_only.print_window_url]
+
+
+def test_the_native_window_opens_the_url_that_carries_the_launch_key(
+    fake_server: FakeServer,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+) -> None:
+    """The single line the whole capability-token mechanism hangs on.
+
+    server.url and server.window_url differ only by the `?k=` the page reads
+    once and then strips. Opening `url` instead would leave the window with no
+    key at all: the shell would render and every /api/* would answer 403.
+    Nothing else catches that -- the visual check drives tests/visual_server.py
+    directly, not start_runtime.
+    """
+    opened: list[tuple[str, str]] = []
+
+    def create_window(title: str, url: str) -> FakeWindow:
+        opened.append((title, url))
+        return FakeWindow()
+
+    start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=create_window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+
+    assert opened == [("Broccoli Desktop", fake_server.window_url)]
+    assert opened[0][1] != fake_server.url
+
+
+def test_browser_only_prints_the_launch_url_the_operator_needs(
+    fake_browser_only_server_factory: FakeBrowserOnlyServerFactory,
+    capsys: Any,
+) -> None:
+    """Every /api/* request needs the per-launch capability token. The native
+    runtime hands it to the window it creates; this entry point has no window,
+    so without printing it nobody outside the process can obtain it -- which is
+    what made the acceptance procedure in docs/desktop-live-integration.md
+    impossible to run.
+
+    The URL, not the bare token: it is what the operator pastes into the
+    browser, and it is exactly what start_runtime opens.
+    """
+    start_browser_only(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        port=8765,
+        server_factory=fake_browser_only_server_factory,
+        wait_for_interrupt=lambda: None,
+        announce=print_window_url,
+    )
+
+    printed = capsys.readouterr().out.strip()
+    assert printed == fake_browser_only_server_factory.server.window_url
+    assert "?k=" in printed
 
 
 def test_console_interrupt_runs_the_complete_runtime_teardown(

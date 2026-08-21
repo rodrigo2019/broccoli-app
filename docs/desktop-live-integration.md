@@ -12,13 +12,15 @@ does not alter the backend, delete retained records, or put credentials in files
 - A human operator supplies local administrator credentials only through the headed browser UI.
 - Agent-browser 0.34.0 is installed. Do not use a Chrome profile, `--restore`, a state file, HAR,
   video recording, browser auto-connect, or a non-loopback desktop endpoint.
-- **Known gap:** the local API now requires every `/api/*` request to carry a capability token
-  generated fresh at each launch (Origin check plus `X-Broccoli-Key` or a `?k=` query parameter —
-  see `runtime.py`'s `UvicornLoopbackServer`). The native runtime reads this from `window_url` and
-  the page strips it from the address bar; `broccoli_desktop.browser_only` does not currently print
-  or otherwise expose it, so step 3 below cannot succeed against the app as it stands today without
-  a code change to surface the token to the operator. This is a known, unresolved gap, not a step to
-  work around by guessing at the value.
+- The local API requires every `/api/*` request to carry a capability token generated fresh at each
+  launch (Origin check plus `X-Broccoli-Key` or a `?k=` query parameter — see `runtime.py`'s
+  `UvicornLoopbackServer`). The native runtime reads it from `window_url`;
+  `broccoli_desktop.browser_only` has no window, so it prints that URL to standard output the moment
+  the service is healthy. The runner below inherits the child's console, so the line appears in the
+  same terminal, just above the "ready" message. Open that exact URL in step 3 — the page reads the
+  key once, keeps it in `sessionStorage` for the life of the window, and strips it from the address
+  bar, so a later reload of `http://127.0.0.1:8765/` keeps working. Never guess or hand-edit the
+  value.
 
 Start the controlled processes in one PowerShell terminal and leave it running until acceptance is
 finished:
@@ -47,9 +49,10 @@ agent-browser --session broccoli-desktop-live-integration --headed --allowed-dom
 2. Create a token named `desktop-integration-<timestamp>` with validity `30`, and use the UI copy
    control. While the token modal or field is visible, do not take a screenshot or snapshot, read
    DOM text, use `get value`, collect a HAR, or record video. Close the modal after copying.
-3. Open `http://127.0.0.1:8765/` in another tab of the same session. Focus the token field, paste
-   with `Control+V`, and submit. Once the capture UI appears, verify that the input is empty without
-   printing its value.
+3. Open the launch URL the desktop process printed (`http://127.0.0.1:8765/?k=…`) in another tab of
+   the same session — not the bare address, which carries no key on a first load. Focus the token
+   field, paste with `Control+V`, and submit. Once the capture UI appears, verify that the input is
+   empty without printing its value.
 4. Select the first visible microphone and the first visible system-loopback device by label. Do
    not record opaque device IDs. Save the settings, return to the capture view, then start capture.
 5. In a third tab, play a public spoken-word video at

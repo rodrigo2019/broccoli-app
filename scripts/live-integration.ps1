@@ -141,7 +141,13 @@ try {
         -Process $desktopProcess `
         -Description "The desktop browser-only service"
 
-    Write-Output "Local platform and desktop browser-only service are ready. Press Ctrl+C to stop both process trees."
+    # The desktop child inherits this console, so the launch URL it prints on
+    # startup -- the only place the per-launch capability token is exposed --
+    # has already appeared above this line. Say so, rather than leaving an
+    # operator to wonder which of the two URLs on screen to open.
+    Write-Output "Local platform and desktop browser-only service are ready."
+    Write-Output "Open the http://127.0.0.1:$DesktopPort/?k=... URL printed above; the bare address carries no launch key."
+    Write-Output "Press Ctrl+C to stop both process trees."
     while ($true) {
         if ($backendProcess.HasExited -or $desktopProcess.HasExited) {
             throw "A live integration child process exited unexpectedly."

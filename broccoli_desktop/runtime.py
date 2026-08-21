@@ -505,13 +505,25 @@ def start_browser_only(
     port: int,
     server_factory: Callable[[RuntimeConfig, int], LoopbackServerProtocol] | None = None,
     wait_for_interrupt: Callable[[], None] | None = None,
+    announce: Callable[[str], None] | None = None,
 ) -> LoopbackServerProtocol:
-    """Serve the production loopback UI without constructing a native window or tray."""
+    """Serve the production loopback UI without constructing a native window or tray.
+
+    ``announce`` receives the window URL once the service is healthy. Without it
+    there is no way for an operator to obtain the per-launch capability token
+    every /api/* request now requires: the native runtime reads it off
+    ``window_url`` and the page strips it from the address bar, and this entry
+    point has no window to read it from. See broccoli_desktop.browser_only,
+    which prints it, and docs/desktop-live-integration.md, whose acceptance
+    procedure depends on it.
+    """
     loopback_port = _validated_loopback_port(port)
     server = (server_factory or _create_browser_only_server)(config, loopback_port)
     try:
         if not server.start():
             raise RuntimeError("Broccoli Desktop could not start its local service.")
+        if announce is not None:
+            announce(server.window_url)
         try:
             (wait_for_interrupt or _wait_for_interrupt)()
         except KeyboardInterrupt:
