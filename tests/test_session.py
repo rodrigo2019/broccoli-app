@@ -9,7 +9,12 @@ from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.events import EVENT_HISTORY_MAX, EventHub
 from broccoli_desktop.models import AudioFrame, ConnectionState, SessionSummary, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
-from broccoli_desktop.remote import RemoteFailure, RemoteProtocolError, RemoteRequestError
+from broccoli_desktop.remote import (
+    CreditWarning,
+    RemoteFailure,
+    RemoteProtocolError,
+    RemoteRequestError,
+)
 from broccoli_desktop.session import (
     AUDIO_QUEUE_MAX_FRAMES,
     FRAME_DURATION_MS,
@@ -661,6 +666,68 @@ async def test_capture_teardown_from_a_remote_end_does_not_freeze_the_event_loop
 
     assert controller.state is ConnectionState.STOPPED
     assert fake_capture.closed_sources == {"mic-1", "system-1"}
+
+
+@pytest.mark.asyncio
+async def test_the_audio_sender_survives_a_failure_outside_the_frame_handler(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """_send_audio_forever's try only wrapped _forward_frame.
+
+    Anything raised outside it -- queue.get(), the per-iteration rebinding, a
+    task_done() that disagrees with its queue -- killed the task for the rest of
+    the run. The session then transmitted nothing while the interface still said
+    "Transmitindo", with only a "never retrieved" line in the log to say so: a
+    silently mute meeting, the worst outcome this file has.
+
+    Both frames arriving is the discriminating assertion. The first is forwarded
+    before task_done runs, so it lands either way; the second only lands if the
+    loop survived to dequeue it.
+    """
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    inner_task_done = controller._audio_queue.task_done
+    calls: list[int] = []
+
+    def exploding_task_done() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("task_done disagreed with its queue")
+        inner_task_done()
+
+    controller._audio_queue.task_done = exploding_task_done  # type: ignore[method-assign]
+
+    await capture_frames(controller, 2)
+    await drain(fake_remote.streams[-1], expected=2)
+
+    sender = controller._sender_task
+    assert sender is not None and not sender.done()
+    assert [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames] == [
+        0,
+        FRAME_DURATION_MS,
+    ]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_low_credit_warning_reaches_the_interface_in_portuguese(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """`warning` is one of the two event types whose message the interface
+    renders verbatim, so an English string here is an English toast on a pt-BR
+    screen. This file already published its drop warning in Portuguese, so it
+    shipped both conventions at once."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await fake_remote.streams[-1].emit(CreditWarning())
+    await settle()
+
+    warnings = [event for event in controller.events.snapshot() if event.type == "warning"]
+    assert [event.message for event in warnings] == ["Os créditos desta sessão estão acabando."]
+
+    await controller.stop()
 
 
 @pytest.mark.asyncio

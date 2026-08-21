@@ -106,6 +106,10 @@ class DesktopSessionController:
         self._stream: RemoteStream | None = None
         self._recovery_stream: RemoteStream | None = None
         self._pipeline: AudioPipeline | None = None
+        # Set alongside the pipeline by _set_pipeline; declared here so the
+        # attribute exists for the whole object lifetime rather than appearing
+        # at the first _open.
+        self._pipeline_base_offset_ms = 0
         self._session: SessionSummary | None = None
         self._session_uuid: str | None = None
         self._choices: CaptureChoices | None = None
@@ -469,7 +473,17 @@ class DesktopSessionController:
             self.events.publish(UiEvent(type="segment", segment=segment))
             return
         if isinstance(event, CreditWarning):
-            self.events.publish(UiEvent(type="warning", message="Session credits are running low."))
+            # pt-BR, like every other message this file publishes for the user
+            # to read. `warning` and `error` are the only event types whose
+            # `message` the interface renders verbatim (see handleEvent in
+            # app.js), and this file already published the drop warning below in
+            # Portuguese -- so it shipped both conventions at once. The English
+            # strings that remain here ride on `status` events, whose `message`
+            # the interface never reads; they are diagnostics, and the interface
+            # derives its own pt-BR text from the state enum.
+            self.events.publish(
+                UiEvent(type="warning", message="Os créditos desta sessão estão acabando.")
+            )
             return
         if isinstance(event, SessionEnded):
             await self._end_from_remote()
@@ -587,7 +601,10 @@ class DesktopSessionController:
                 except Exception:
                     await self._discard_recovery_stream(stream)
                     self.events.publish(
-                        UiEvent(type="recoverable_error", message="Connection retry failed.")
+                        UiEvent(
+                            type="recoverable_error",
+                            message="A tentativa de reconexão falhou.",
+                        )
                     )
             await self._discard_recovery_stream(self._recovery_stream)
             await self._stop_capture_off_loop()
@@ -679,20 +696,33 @@ class DesktopSessionController:
         single place to apply backpressure.
         """
         while True:
-            # Bound once per iteration: _reset_audio_queue re-binds the attribute
-            # between runs, and a get() and a task_done() that disagree about
-            # which queue they belong to corrupt the other one's counter -- or
-            # raise, on the way out of a cancel, where the error is swallowed.
-            queue = self._audio_queue
-            frame = await queue.get()
+            # The inner try only covers _forward_frame. Anything raised outside
+            # it -- queue.get(), the rebinding above, task_done() disagreeing
+            # with its queue -- used to kill this task for the rest of the run,
+            # leaving a session that transmitted nothing while the interface
+            # still said "Transmitindo" and only a "never retrieved" line in the
+            # log said otherwise. A mute meeting is the worst outcome this file
+            # has, so the loop survives and says so instead.
             try:
-                await self._forward_frame(frame)
+                # Bound once per iteration: _reset_audio_queue re-binds the
+                # attribute between runs, and a get() and a task_done() that
+                # disagree about which queue they belong to corrupt the other
+                # one's counter -- or raise, on the way out of a cancel, where
+                # the error is swallowed.
+                queue = self._audio_queue
+                frame = await queue.get()
+                try:
+                    await self._forward_frame(frame)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("[session] Failed to forward an audio frame")
+                finally:
+                    queue.task_done()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("[session] Failed to forward an audio frame")
-            finally:
-                queue.task_done()
+                logger.exception("[session] The audio sender hit an unexpected failure")
 
     async def _forward_frame(self, frame: AudioFrame) -> None:
         stream = self._stream or self._recovery_stream
