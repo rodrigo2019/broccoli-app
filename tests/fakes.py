@@ -31,6 +31,10 @@ from broccoli_desktop.remote import (
 
 VISUAL_TEST_TOKEN = "visual-test-token"
 
+#: Fixed instant the fake handshake reports, so a test can assert ordering
+#: against a known value instead of whatever the clock said.
+SESSION_STARTED_AT = "2026-08-21T12:00:00Z"
+
 #: Matches DESKTOP_SESSION_PAGE_SIZE on the backend, so a fake page boundary
 #: falls where a real one would.
 SESSION_PAGE_SIZE = 20
@@ -360,7 +364,18 @@ class FakeSessionRemote:
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
         self.stream_languages.append(language)
-        await stream.emit(SessionStarted(uuid_code, next_sequences, 14_400))
+        # Stamped like the real server does: the client builds its history
+        # row straight off this event, so a fake that omitted the timestamps
+        # would let the row sort and render wrongly without any test noticing.
+        await stream.emit(
+            SessionStarted(
+                uuid_code,
+                next_sequences,
+                14_400,
+                started_at=SESSION_STARTED_AT,
+                last_activity_at=SESSION_STARTED_AT,
+            )
+        )
         if stream_index < len(self.stream_event_scripts):
             for event in self.stream_event_scripts[stream_index]:
                 await stream.emit(event)
@@ -547,6 +562,8 @@ def resumed_session_started() -> SessionStarted:
         uuid_code="session-1",
         next_sequence_by_channel={"mic": 12, "system": 8},
         max_duration_s=14_400,
+        started_at=SESSION_STARTED_AT,
+        last_activity_at=SESSION_STARTED_AT,
     )
 
 

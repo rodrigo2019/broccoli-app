@@ -92,6 +92,12 @@ class SessionStarted:
     uuid_code: str
     next_sequence_by_channel: Mapping[str, int]
     max_duration_s: int
+    #: Server-stamped, so the history entry this event produces sorts and
+    #: renders like the ones the list endpoint returns. Optional because an
+    #: older platform does not send them; the client then falls back to what
+    #: it knew before, which is how it behaved all along.
+    started_at: str | None = None
+    last_activity_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +420,8 @@ class _WebSocketRemoteStream:
                 uuid_code=_required_string(values, "uuid_code"),
                 next_sequence_by_channel=MappingProxyType(sequences),
                 max_duration_s=_required_integer(values, "max_duration_s"),
+                started_at=_optional_string(values, "started_at"),
+                last_activity_at=_optional_string(values, "last_activity_at"),
             )
         if event_type == "transcript.segment":
             channel = _channel(values)

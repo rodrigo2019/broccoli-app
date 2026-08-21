@@ -24,6 +24,7 @@ from broccoli_desktop.session import (
     DesktopSessionController,
 )
 from tests.fakes import (
+    SESSION_STARTED_AT,
     FakeCaptureBackend,
     FakeClock,
     FakeListeningRemote,
@@ -132,7 +133,14 @@ async def test_start_new_builds_a_local_summary_without_fetching_or_patching_a_r
 
     assert summary.uuid_code == "session-1"
     assert summary.title == "Daily"
-    assert summary.started_at is None
+    # These used to be asserted as None, which pinned a real defect as if it
+    # were the contract: the history sorts by last activity and renders a date
+    # from these fields, so a summary without them put the session the user had
+    # just created at the very bottom of the list, undated, until a reload
+    # replaced it. They come from the server's own session.started event now --
+    # the client has no clock it can trust for a row the server just made.
+    assert summary.started_at == SESSION_STARTED_AT
+    assert summary.last_activity_at == SESSION_STARTED_AT
     assert summary.segment_count == 0
     assert controller.pipeline_base_offset_ms == 0
 

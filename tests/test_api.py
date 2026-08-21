@@ -2328,3 +2328,42 @@ def test_an_unreachable_platform_does_not_sign_the_user_out(
 
     assert payload["authenticated"] is True
     assert fake_credentials.load_token() == "test-token"
+
+
+def test_a_newly_created_session_sorts_to_the_top_not_the_bottom(
+    tokened_client: TestClient,
+) -> None:
+    """The row the user just made must land where they expect it.
+
+    The controller builds this entry from the session.started event, before
+    the history is listed again. It used to carry no timestamps at all -- the
+    client has no clock it can trust for a row the server just created -- and
+    since the history sorts by last activity, an absent timestamp parses to 0
+    and sank the new session below every existing one. A reload then fixed it,
+    which is exactly what made it look like a rendering glitch rather than a
+    missing field.
+    """
+    app_js = tokened_client.get("/static/app.js").text
+    result = _run_history_order(
+        app_js,
+        [
+            {
+                "uuid_code": "older",
+                "started_at": "2026-08-21T09:00:00Z",
+                "last_activity_at": "2026-08-21T09:00:00Z",
+                "is_pinned": False,
+            },
+            # Just created: what POST /api/sessions hands back, now stamped by
+            # the server rather than left empty.
+            {
+                "uuid_code": "just-created",
+                "started_at": "2026-08-21T12:00:00Z",
+                "last_activity_at": "2026-08-21T12:00:00Z",
+                "is_pinned": False,
+            },
+        ],
+        [],
+        [],
+    )
+
+    assert result["order"] == ["just-created", "older"]

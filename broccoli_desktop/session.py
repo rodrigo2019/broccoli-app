@@ -372,8 +372,16 @@ class DesktopSessionController:
                 if title is not None
                 else (previous_session.title if previous_session else ""),
                 status="live",
-                started_at=previous_session.started_at if previous_session else None,
+                # Prefer what the server just stamped. A brand-new session has
+                # no previous_session to inherit from, so this used to be None
+                # for exactly the row the user had just created: the history
+                # sorts by activity, an absent timestamp parses to 0, and the
+                # new session sank to the bottom of the list and rendered with
+                # no date until the next reload put it right.
+                started_at=started.started_at
+                or (previous_session.started_at if previous_session else None),
                 ended_at=None,
+                last_activity_at=started.last_activity_at,
                 device_label=self._device_label,
                 segment_count=resumed_segment_count,
                 is_live=True,
