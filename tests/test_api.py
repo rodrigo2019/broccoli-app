@@ -498,6 +498,20 @@ def test_devices_and_logout_use_local_dependencies_only(
     assert fake_credentials.token is None
 
 
+def test_device_enumeration_is_cached_between_calls(
+    client: TestClient, fake_capture: FakeCaptureBackend
+) -> None:
+    """Windows device enumeration routinely takes hundreds of milliseconds, and
+    it ran on every /api/devices, every bootstrap and every session start --
+    each one freezing the event socket and the meter stream with it."""
+    login(client)
+
+    client.get("/api/devices")
+    client.get("/api/devices")
+
+    assert fake_capture.list_devices_calls == 1
+
+
 def test_audio_level_stream_requires_a_credential(client: TestClient) -> None:
     assert client.get("/api/audio-levels/stream").status_code == 401
     assert (
@@ -661,7 +675,7 @@ async def test_background_recovery_auth_failure_clears_the_service_credential(
         ),
     )
     fake_credentials.save_token("candidate")
-    controller, _remote = services.authenticated()  # type: ignore[misc]
+    controller, _remote = await services.authenticated()  # type: ignore[misc]
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="")
     fake_remote_factory.remote.revoke_token()
 

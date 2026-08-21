@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,10 @@ from broccoli_desktop.settings import DeviceSettings, InMemoryDeviceSettings
 LOOPBACK_HOST = "127.0.0.1"
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 
+#: Long enough that a burst of calls costs one enumeration, short enough that
+#: plugging in a headset shows up without a restart.
+DEVICE_CACHE_TTL_SECONDS = 5.0
+
 
 class CredentialStoreProtocol(Protocol):
     """The credential operations the local API needs."""
@@ -87,14 +92,38 @@ class Services:
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
+    _device_cache: tuple[float, list[DeviceDescriptor]] | None = field(
+        default=None, init=False, repr=False
+    )
     audio_levels: AudioLevelMonitor = field(init=False)
 
     def __post_init__(self) -> None:
         self.audio_levels = AudioLevelMonitor(self.capture_backend)
 
-    def authenticated(self) -> tuple[DesktopSessionController, ListeningRemote] | None:
-        """Return the controller and remote for the persisted token, if any."""
-        token = self.credentials.load_token()
+    async def list_devices(self) -> list[DeviceDescriptor]:
+        """Enumerate capture devices off the loop, at most once per TTL.
+
+        Windows device enumeration routinely takes hundreds of milliseconds, and
+        without this it ran on every /api/devices call, every bootstrap and
+        every session start -- each one freezing the event socket and the meter
+        stream with it.
+        """
+        cached = self._device_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < DEVICE_CACHE_TTL_SECONDS:
+            return cached[1]
+        devices = await asyncio.to_thread(self.capture_backend.list_devices)
+        self._device_cache = (now, devices)
+        return devices
+
+    async def authenticated(self) -> tuple[DesktopSessionController, ListeningRemote] | None:
+        """Return the controller and remote for the persisted token, if any.
+
+        Reads the Windows Credential Manager off the loop -- this runs on every
+        request, including each /api/events connect, and a vault read is not
+        instant.
+        """
+        token = await asyncio.to_thread(self.credentials.load_token)
         if token is None:
             return None
         if self._token != token or self._remote is None or self.controller is None:
@@ -456,17 +485,17 @@ def create_app(services: Services) -> FastAPI:
         the title that gets persisted, and so a meeting nobody renames is still
         findable in the history.
         """
-        _require_authenticated(services)
+        await _require_authenticated(services)
         return {"title": services.session_titles()}
 
     @app.get("/api/devices")
     async def devices() -> dict[str, object]:
-        return {"devices": _device_payloads(services)}
+        return {"devices": await _device_payloads(services)}
 
     @app.put("/api/devices/selection", status_code=204)
     async def save_device_selection(request: SessionRequest) -> Response:
         choices = _validated_choices(services.capture_backend, request)
-        controller, _remote = _require_authenticated(services)
+        controller, _remote = await _require_authenticated(services)
         if _capture_is_active(controller):
             raise ApiError(409, "Stop the active capture before changing audio devices.")
         services.save_selected_devices(choices)
@@ -475,7 +504,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.delete("/api/devices/selection", status_code=204)
     async def clear_device_selection() -> Response:
-        controller, _remote = _require_authenticated(services)
+        controller, _remote = await _require_authenticated(services)
         if _capture_is_active(controller):
             raise ApiError(409, "Stop the active capture before changing audio devices.")
         services.clear_selected_devices()
@@ -492,7 +521,7 @@ def create_app(services: Services) -> FastAPI:
         window that disappears cannot leave a microphone running. Without them
         the stream is a passive observer of whatever the capture is feeding.
         """
-        controller, _remote = _require_authenticated(services)
+        controller, _remote = await _require_authenticated(services)
         if not microphone_id and not system_device_id:
             return _audio_level_response(services, test_choices=None)
 
@@ -506,20 +535,20 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/api/sessions")
     async def list_sessions(request: Request) -> dict[str, object]:
-        _controller, remote = _require_authenticated(services)
+        _controller, remote = await _require_authenticated(services)
         cursor = request.query_params.get("cursor") or None
         query = (request.query_params.get("q") or "").strip()
         return _session_page_payload(await remote.list_sessions(cursor, query))
 
     @app.get("/api/sessions/{uuid_code}/segments")
     async def list_segments(request: Request, uuid_code: str) -> dict[str, object]:
-        _controller, remote = _require_authenticated(services)
+        _controller, remote = await _require_authenticated(services)
         cursor = request.query_params.get("cursor") or None
         return _segment_page_payload(await remote.list_segments(uuid_code, cursor))
 
     @app.patch("/api/sessions/{uuid_code}")
     async def update_session(uuid_code: str, request: SessionUpdateRequest) -> dict[str, object]:
-        controller, remote = _require_authenticated(services)
+        controller, remote = await _require_authenticated(services)
         changes = request.model_dump(exclude_unset=True)
         if not changes:
             raise ApiError(422, "Choose a session property to update.")
@@ -543,7 +572,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.delete("/api/sessions/{uuid_code}", status_code=204)
     async def delete_session(uuid_code: str) -> Response:
-        _controller, remote = _require_authenticated(services)
+        _controller, remote = await _require_authenticated(services)
         try:
             await remote.delete_session(uuid_code)
         except RemoteConflictError:
@@ -556,7 +585,7 @@ def create_app(services: Services) -> FastAPI:
         # request must not be what leaves a meeting with no title at all.
         title = _validate_title(request.title) or services.session_titles()
         choices = _validated_choices(services.capture_backend, request)
-        controller, _remote = _require_authenticated(services)
+        controller, _remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
             session = await controller.start_new(choices, title)
@@ -570,7 +599,7 @@ def create_app(services: Services) -> FastAPI:
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
     async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
         choices = _validated_choices(services.capture_backend, request)
-        controller, remote = _require_authenticated(services)
+        controller, remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
             existing = await remote.get_session(uuid_code)
@@ -584,7 +613,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/api/sessions/stop", status_code=204)
     async def stop_session() -> Response:
-        controller, _remote = _require_authenticated(services)
+        controller, _remote = await _require_authenticated(services)
         await controller.stop()
         return Response(status_code=204)
 
@@ -597,9 +626,12 @@ def create_app(services: Services) -> FastAPI:
         one channel instead of a second HTTP route repeating the same payload.
         """
         await websocket.accept()
-        authenticated = services.authenticated()
+        authenticated = await services.authenticated()
         controller = authenticated[0] if authenticated is not None else None
-        bootstrap = {"type": "bootstrap", "bootstrap": _bootstrap_payload(services, controller)}
+        bootstrap = {
+            "type": "bootstrap",
+            "bootstrap": await _bootstrap_payload(services, controller),
+        }
         if controller is None:
             # Nothing to subscribe to. The UI reconnects once a login succeeds.
             await websocket.send_json(bootstrap)
@@ -696,8 +728,10 @@ def _remote_unavailable() -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": "The remote service is unavailable."})
 
 
-def _require_authenticated(services: Services) -> tuple[DesktopSessionController, ListeningRemote]:
-    authenticated = services.authenticated()
+async def _require_authenticated(
+    services: Services,
+) -> tuple[DesktopSessionController, ListeningRemote]:
+    authenticated = await services.authenticated()
     if authenticated is None:
         raise ApiError(401, "Authentication is required.")
     return authenticated
@@ -740,13 +774,13 @@ def _validate_title(title: str) -> str:
         raise ApiError(422, "The session title is invalid.") from None
 
 
-def _bootstrap_payload(
+async def _bootstrap_payload(
     services: Services, controller: DesktopSessionController | None
 ) -> dict[str, object]:
     choices = controller.selected_devices if controller is not None else None
     return {
         "authenticated": controller is not None,
-        "devices": _device_payloads(services),
+        "devices": await _device_payloads(services),
         "selected_devices": (
             {
                 "microphone_id": choices.microphone_id,
@@ -762,8 +796,8 @@ def _bootstrap_payload(
     }
 
 
-def _device_payloads(services: Services) -> list[dict[str, str]]:
-    return [_device_payload(device) for device in services.capture_backend.list_devices()]
+async def _device_payloads(services: Services) -> list[dict[str, str]]:
+    return [_device_payload(device) for device in await services.list_devices()]
 
 
 def _device_payload(device: DeviceDescriptor) -> dict[str, str]:
@@ -831,7 +865,11 @@ async def _audio_level_events(
     finally:
         monitor.unsubscribe(enqueue)
         if test_choices is not None:
-            services.stop_audio_level_test()
+            # stop_audio_level_test joins two capture workers with a 1-second
+            # timeout each -- off the loop, so a closing SSE stream cannot
+            # freeze the transcript socket and the rest of the interface with
+            # it while that join is pending.
+            await asyncio.to_thread(services.stop_audio_level_test)
 
 
 def _sse_event(event: str, data: dict[str, object]) -> str:

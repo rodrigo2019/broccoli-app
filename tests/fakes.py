@@ -557,8 +557,10 @@ class FakeCaptureBackend:
     require_listed_devices: bool = False
     closed_sources: set[str] = field(default_factory=set)
     handles: dict[str, FakeCaptureHandle] = field(default_factory=dict)
+    list_devices_calls: int = 0
 
     def list_devices(self) -> list[DeviceDescriptor]:
+        self.list_devices_calls += 1
         return list(self.devices)
 
     def open_microphone(self, device_id: str, on_pcm: Callable[[bytes], None]) -> FakeCaptureHandle:

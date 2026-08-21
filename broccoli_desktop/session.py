@@ -285,7 +285,10 @@ class DesktopSessionController:
                 on_audio_level=self._on_audio_level,
                 on_capture_state=self._on_capture_state,
             )
-            self._capture.start()
+            # Opens two WASAPI endpoints synchronously; off the loop so a
+            # session start cannot freeze the transcript socket and the meter
+            # stream while Windows takes its time handing back the streams.
+            await asyncio.to_thread(self._capture.start)
         except DeviceUnavailableError:
             await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
