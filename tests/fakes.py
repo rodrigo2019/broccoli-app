@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 import pyaudiowpatch
+from keyring.errors import PasswordDeleteError
 
 from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.models import (
@@ -33,6 +34,39 @@ VISUAL_TEST_TOKEN = "visual-test-token"
 #: Matches DESKTOP_SESSION_PAGE_SIZE on the backend, so a fake page boundary
 #: falls where a real one would.
 SESSION_PAGE_SIZE = 20
+
+
+@dataclass
+class RealisticFakeKeyring:
+    """Mirrors the real Windows Credential Manager backend's strictness.
+
+    A naive in-memory fake -- including the plain FakeKeyring this one is
+    a stricter sibling of, and the hand-rolled FakeCredentials/VisualCredentials
+    used at the API layer -- lets ``delete_password`` on an entry that was
+    never stored succeed silently. The real backend
+    (``keyring.backends.Windows.WinVaultKeyring``) does not: it raises
+    ``PasswordDeleteError``, and every lenient fake in this codebase let a
+    genuine 503-on-ordinary-save regression through undetected because none
+    of them modelled that. This one exists so CredentialStore's delete paths
+    are tested against the behaviour Windows actually has, not the behaviour
+    that happens to be convenient to fake.
+    """
+
+    values: dict[tuple[str, str], str] = field(default_factory=dict)
+    deleted: list[tuple[str, str]] = field(default_factory=list)
+
+    def get_password(self, service_name: str, username: str) -> str | None:
+        return self.values.get((service_name, username))
+
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        self.values[(service_name, username)] = password
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        key = (service_name, username)
+        if key not in self.values:
+            raise PasswordDeleteError("The specified item could not be found in the keyring.")
+        del self.values[key]
+        self.deleted.append(key)
 
 
 class FakeRemoteClosedError(Exception):

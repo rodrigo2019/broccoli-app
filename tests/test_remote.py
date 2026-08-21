@@ -375,16 +375,25 @@ async def test_stream_includes_nonempty_resume_in_the_handshake_query(
 
 def test_the_remote_uses_the_configured_proxy() -> None:
     """Injection is the point of the whole feature -- a remote built with a
-    proxy has to expose it, or nothing downstream can ever route through it."""
+    proxy has to expose it, or nothing downstream can ever route through it.
+
+    websocket_path is passed explicitly (unlike the brief's literal snippet):
+    this repo deliberately keeps it a required keyword so a caller can never
+    silently connect to the server root -- _configured_websocket_path raises
+    rather than defaulting, and the constructor should not undo that.
+    """
     remote = HttpListeningRemote(
-        base_url="https://example.invalid", token="t", proxy="http://user:pass@proxy.local:8080"
+        base_url="https://example.invalid",
+        token="t",
+        websocket_path="",
+        proxy="http://user:pass@proxy.local:8080",
     )
 
     assert remote.client_proxy == "http://user:pass@proxy.local:8080"
 
 
 def test_a_remote_built_without_a_proxy_has_none() -> None:
-    remote = HttpListeningRemote(base_url="https://example.invalid", token="t")
+    remote = HttpListeningRemote(base_url="https://example.invalid", token="t", websocket_path="")
 
     assert remote.client_proxy is None
 

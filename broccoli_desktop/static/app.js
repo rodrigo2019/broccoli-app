@@ -685,6 +685,8 @@
     "Local host required.": "Esta ação só pode partir do aplicativo.",
     "Local origin required.": "Esta ação só pode partir do aplicativo.",
     "Local key required.": "Esta ação só pode partir do aplicativo.",
+    "Proxy host and port are required.": "Informe o endereço e a porta do proxy.",
+    "Credential storage is unavailable.": "O armazenamento de credenciais não está disponível.",
   };
 
   function translateApiMessage(detail) {

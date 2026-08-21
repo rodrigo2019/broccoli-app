@@ -196,7 +196,7 @@ class HttpListeningRemote:
         token: str,
         transport: httpx.AsyncBaseTransport | None = None,
         *,
-        websocket_path: str = "",
+        websocket_path: str,
         socket_factory: SocketFactory | None = None,
         proxy: str | None = None,
     ) -> None:

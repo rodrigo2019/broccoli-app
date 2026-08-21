@@ -69,6 +69,21 @@ function Assert-TranscriptClearsTheDock {
     }
 }
 
+function Assert-NoLeakedSecret {
+    param(
+        [Parameter(Mandatory = $true)][string]$Secret,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    # Scans every localStorage key, not a named one -- the secret must never
+    # reach *any* key, including one reintroduced under a different name.
+    $check = "(() => { const keys = Object.keys(localStorage); const inStorage = keys.some((key) => (localStorage.getItem(key) || '').includes('$Secret')); return [document.documentElement.innerText.includes('$Secret'), inStorage]; })()"
+    $result = Invoke-Browser -BrowserArguments @("eval", $check) | ConvertFrom-Json
+    if (@($result).Count -ne 2 -or $result[0] -ne $false -or $result[1] -ne $false) {
+        throw "A fake secret leaked into page text or localStorage ($Context)."
+    }
+}
+
 function Stop-ProcessTree {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
@@ -349,6 +364,12 @@ try {
         "document.getElementById('proxyPassword').value === ''"
     )
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    # Checked here, on the settings screen, straight after the save round trip
+    # -- not only after the later reload. app.js scrubs the panel's legacy
+    # localStorage key on every load, which would erase the evidence of a
+    # reintroduced persistSettings() write moments before a post-reload-only
+    # check ran. This is the check that actually catches that regression.
+    Assert-NoLeakedSecret -Secret $fakeProxyPassword -Context "immediately after saving the proxy, before any reload"
 
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Voltar para a captura")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
@@ -467,11 +488,26 @@ try {
     )
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("set", "media", "dark")
+    # Seeded here, right before the reload below, so the scrub app.js runs on
+    # every load is covered by an assertion of its own instead of silently
+    # covering for the checks around the settings save above: a value under
+    # the panel's old key must survive up to the reload and be gone after it.
+    Invoke-Browser -BrowserArguments @(
+        "eval",
+        "localStorage.setItem('broccoli-desktop-settings', JSON.stringify({ proxyPassword: 'legacy-scrub-sentinel' }))"
+    ) | Out-Null
     # A bare reload would hit the URL app.js already stripped the launch key
     # from, and the loopback API refuses every /api/* request without it --
     # reopening the same launch URL is what a real relaunch would do instead.
     Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/?k=visual-capability-token")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
+    $legacyKeyRemaining = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "localStorage.getItem('broccoli-desktop-settings')"
+    ) | ConvertFrom-Json)
+    if ($null -ne $legacyKeyRemaining) {
+        throw "The legacy broccoli-desktop-settings localStorage key survived a reload instead of being scrubbed."
+    }
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-stopped-dark.png"))
     $errorsJson = Invoke-Browser -BrowserArguments @("errors", "--json")

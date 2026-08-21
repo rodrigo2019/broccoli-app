@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -13,11 +14,12 @@ from starlette.websockets import WebSocketDisconnect
 from broccoli_desktop.api import (
     Services,
     _audio_level_events,
+    _default_proxy_prober,
     _RedactCapabilityKeyFilter,
     create_app,
     create_uvicorn_config,
 )
-from broccoli_desktop.credentials import CredentialStorageError
+from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
 from broccoli_desktop.models import (
     ConnectionState,
     SegmentPage,
@@ -32,6 +34,7 @@ from tests.fakes import (
     FakeCaptureBackend,
     FakeClock,
     FakeSessionRemote,
+    RealisticFakeKeyring,
     visual_test_remote,
 )
 from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
@@ -1296,6 +1299,12 @@ def test_enabling_the_proxy_without_a_host_or_port_is_rejected(
     response = client.post("/api/settings", json={"proxy": {"enabled": True}})
 
     assert response.status_code == 422
+    # English, machine-readable, matching every other ApiError detail in this
+    # file -- app.js's API_MESSAGES table maps English keys to pt-BR text, and
+    # a detail written in Portuguese here would fall through untranslated to
+    # the generic fallback toast, making this specific, actionable message
+    # unreachable through the UI.
+    assert response.json() == {"detail": "Proxy host and port are required."}
     assert services.credentials.load_proxy_password() is None
 
 
@@ -1387,6 +1396,31 @@ def test_proxy_url_omits_credentials_when_no_username_is_configured(
     assert services.proxy_url() == "http://proxy.local:8080"
 
 
+def test_proxy_url_fails_closed_when_a_username_is_configured_but_no_password_is_stored(
+    client: TestClient, services: Services
+) -> None:
+    """An enabled proxy config with a username but no vault password behind it
+    is an inconsistent state -- a local settings write that landed without its
+    matching vault write, or the vault entry removed out from under this
+    process -- never "this proxy needs no password". proxy_url() must refuse
+    rather than silently building an unauthenticated http://user@host:port."""
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "host": "proxy.local",
+                "port": 8080,
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+    services.credentials.delete_proxy_password()
+
+    assert services.proxy_url() is None
+
+
 def test_test_proxy_reports_success(client: TestClient, services: Services) -> None:
     prober = FakeProxyProber(result=True)
     services.proxy_prober = prober
@@ -1452,6 +1486,7 @@ def test_test_proxy_requires_a_host_and_port(client: TestClient) -> None:
     response = client.post("/api/settings/test-proxy", json={"host": "", "port": 0})
 
     assert response.status_code == 422
+    assert response.json() == {"detail": "Proxy host and port are required."}
 
 
 def test_test_proxy_checks_the_submitted_values_not_the_saved_ones(
@@ -1553,3 +1588,84 @@ def test_a_failed_vault_delete_does_not_leave_the_proxy_disabled_locally(
 
     assert response.status_code == 503
     assert services.proxy_settings.load().enabled is True
+
+
+def test_saving_disabled_settings_succeeds_when_no_proxy_password_was_ever_stored(
+    fake_capture: FakeCaptureBackend, fake_remote_factory: FakeRemoteFactory
+) -> None:
+    """Reproduces the real-world failure directly: on Windows,
+    keyring.delete_password raises PasswordDeleteError when nothing matches,
+    and {"enabled": false} -- the ordinary Save for everyone who never
+    configured a proxy -- used to call delete_proxy_password() unconditionally.
+    FakeCredentials (used by the `client`/`services` fixtures everywhere else
+    in this file) is lenient exactly where the real backend is strict, so this
+    test wires the real CredentialStore against a keyring fake that models
+    Windows' actual behaviour instead.
+    """
+    services = Services(
+        credentials=CredentialStore(RealisticFakeKeyring()),
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+
+    response = client.post("/api/settings", json={"proxy": {"enabled": False}})
+
+    assert response.status_code == 204
+
+
+def test_logout_succeeds_when_no_token_was_ever_stored(
+    fake_capture: FakeCaptureBackend, fake_remote_factory: FakeRemoteFactory
+) -> None:
+    """The same delete-on-missing hazard applies to the token: a double logout,
+    or a logout after the token was already cleared some other way, must not
+    503 just because there was nothing left to delete."""
+    services = Services(
+        credentials=CredentialStore(RealisticFakeKeyring()),
+        remote_factory=fake_remote_factory,
+        capture_backend=fake_capture,
+    )
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1"})
+
+    response = client.delete("/api/login")
+
+    assert response.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_default_proxy_prober_treats_a_407_response_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong proxy password on a plain-HTTP target comes back as an ordinary
+    407 response rather than a raised exception -- httpx only raises for a
+    rejected HTTPS CONNECT tunnel, not for a proxy relaying its own rejection
+    on a forwarded HTTP request. Mapping that 407 to the same False an
+    unreachable host already produces adds no new distinguishing signal --
+    it only corrects the false positive."""
+
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        return httpx.Response(407, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    result = await _default_proxy_prober(
+        "http://backend.example", "http://user:wrong@proxy.local:8080"
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_default_proxy_prober_succeeds_for_a_non_407_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get(self: httpx.AsyncClient, url: str) -> httpx.Response:
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    result = await _default_proxy_prober(
+        "http://backend.example", "http://user:pass@proxy.local:8080"
+    )
+
+    assert result is True

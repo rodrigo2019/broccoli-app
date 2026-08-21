@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
+from tests.fakes import RealisticFakeKeyring
 
 
 class FakeKeyring:
@@ -162,3 +163,51 @@ def test_proxy_password_backend_failures_do_not_propagate_credential_material(
     assert secret not in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__suppress_context__
+
+
+def test_deleting_a_token_that_was_never_saved_does_not_raise() -> None:
+    """The real Windows backend raises PasswordDeleteError here, unlike every
+    lenient in-memory fake -- and logout, the invalid-token cleanup, and the
+    background auth-failure handler all call delete_token() unconditionally,
+    whether or not a token was ever actually stored."""
+    keyring = RealisticFakeKeyring()
+    store = CredentialStore(keyring)
+
+    store.delete_token()  # must not raise
+
+    assert keyring.values == {}
+
+
+def test_deleting_a_proxy_password_that_was_never_saved_does_not_raise() -> None:
+    """Disabling the proxy calls delete_proxy_password() unconditionally, and
+    disabling is the default for everyone who never configured one -- this is
+    the ordinary case, not an edge case."""
+    keyring = RealisticFakeKeyring()
+    store = CredentialStore(keyring)
+
+    store.delete_proxy_password()  # must not raise
+
+    assert keyring.values == {}
+
+
+def test_deleting_a_token_that_does_exist_still_deletes_it() -> None:
+    """The not-found tolerance must not become a silent no-op for the ordinary
+    case where an entry genuinely needs removing."""
+    keyring = RealisticFakeKeyring()
+    keyring.set_password("Broccoli Desktop", "api-token", "candidate-token")
+    store = CredentialStore(keyring)
+
+    store.delete_token()
+
+    assert keyring.values == {}
+    assert keyring.deleted == [("Broccoli Desktop", "api-token")]
+
+
+def test_a_genuine_backend_failure_on_delete_still_propagates() -> None:
+    """Only "not found" is tolerated -- a real backend failure during delete
+    (vault locked, service unavailable) must still surface as
+    CredentialStorageError, not be swallowed alongside the not-found case."""
+    store = CredentialStore(FailingKeyring("irrelevant"))
+
+    with pytest.raises(CredentialStorageError):
+        store.delete_token()

@@ -93,15 +93,24 @@ async def _default_proxy_prober(target_url: str, proxy_url: str) -> bool:
     more specific would let this become a credential oracle for whoever can
     reach the loopback API: a caller could tell "wrong password" apart from
     "host unreachable" by the shape of the answer alone.
+
+    A proxy auth rejection does not always arrive as an exception: for an
+    HTTPS target httpx tunnels through a CONNECT request, and a rejected
+    CONNECT does raise (httpx.ProxyError, a subclass of httpx.HTTPError,
+    already handled below) -- but for a plain HTTP target the proxy simply
+    forwards the request and relays its own 407 back as an ordinary response.
+    Checking the status here does not reopen the oracle: it maps that 407 to
+    the same False an unreachable host already produces, adding no new
+    distinguishing signal, only correcting a false positive on HTTP targets.
     """
     if not target_url:
         return False
     try:
         async with httpx.AsyncClient(proxy=proxy_url, timeout=PROXY_TEST_TIMEOUT) as client:
-            await client.get(target_url)
+            response = await client.get(target_url)
     except httpx.HTTPError:
         return False
-    return True
+    return response.status_code != 407
 
 
 class CredentialStoreProtocol(Protocol):
@@ -249,6 +258,14 @@ class Services:
         if not settings.enabled or not settings.host or not settings.port:
             return None
         password = self.credentials.load_proxy_password()
+        if settings.username and password is None:
+            # A configured username with no vault password behind it is an
+            # inconsistent state -- a local file write that landed while the
+            # matching vault write did not (see save_proxy_settings's
+            # ordering), or the vault entry removed out from under this
+            # process -- never "this proxy needs no password". Refusing here
+            # fails closed instead of silently connecting unauthenticated.
+            return None
         return _build_proxy_url(settings.host, settings.port, settings.username, password)
 
     def save_proxy_settings(self, settings: ProxySettings, *, password: str | None) -> None:
@@ -631,7 +648,7 @@ def create_app(services: Services) -> FastAPI:
         host = proxy.host.strip()
         username = proxy.username.strip()
         if not host or not proxy.port:
-            raise ApiError(422, "Informe o endereço e a porta do proxy.")
+            raise ApiError(422, "Proxy host and port are required.")
         services.save_proxy_settings(
             ProxySettings(host=host, port=proxy.port, username=username, enabled=True),
             password=proxy.password,
@@ -645,7 +662,7 @@ def create_app(services: Services) -> FastAPI:
         for why the answer never says more than that."""
         host = request.host.strip()
         if not host or not request.port:
-            raise ApiError(422, "Informe o endereço e a porta do proxy.")
+            raise ApiError(422, "Proxy host and port are required.")
         proxy_url = _build_proxy_url(host, request.port, request.username.strip(), request.password)
         ok = await services.proxy_prober(services.backend_url, proxy_url)
         return {"ok": ok}

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Protocol, TypeVar
 
 import keyring
+from keyring.errors import PasswordDeleteError
 
 SERVICE_NAME = "Broccoli Desktop"
 ACCOUNT_NAME = "api-token"
@@ -50,10 +51,15 @@ class CredentialStore:
         )
 
     def delete_token(self) -> None:
-        """Remove the stored API token."""
-        self._run_backend_operation(
-            lambda: self._backend.delete_password(SERVICE_NAME, ACCOUNT_NAME)
-        )
+        """Remove the stored API token.
+
+        Treats an already-missing entry as success. The real Windows backend
+        raises PasswordDeleteError when nothing matches -- unlike a naive
+        in-memory fake -- and callers here (logout, an invalid-token cleanup,
+        a background auth failure) call this unconditionally. "No token in
+        the vault" is the goal of every one of them, and it is already true.
+        """
+        self._delete_ignoring_missing(ACCOUNT_NAME)
 
     def load_proxy_password(self) -> str | None:
         """Return the stored proxy password, if one was saved."""
@@ -75,10 +81,22 @@ class CredentialStore:
         )
 
     def delete_proxy_password(self) -> None:
-        """Remove the stored proxy password."""
-        self._run_backend_operation(
-            lambda: self._backend.delete_password(SERVICE_NAME, PROXY_PASSWORD_ACCOUNT_NAME)
-        )
+        """Remove the stored proxy password.
+
+        Disabling the proxy calls this unconditionally, and disabling is the
+        default for everyone who never configured one -- see delete_token for
+        why an already-missing entry must not be treated as a failure here.
+        """
+        self._delete_ignoring_missing(PROXY_PASSWORD_ACCOUNT_NAME)
+
+    def _delete_ignoring_missing(self, account_name: str) -> None:
+        def operation() -> None:
+            try:
+                self._backend.delete_password(SERVICE_NAME, account_name)
+            except PasswordDeleteError:
+                pass
+
+        self._run_backend_operation(operation)
 
     @staticmethod
     def _run_backend_operation(operation: Callable[[], _Result]) -> _Result:
