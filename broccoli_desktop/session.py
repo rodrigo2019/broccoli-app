@@ -48,9 +48,15 @@ FRAME_DURATION_MS = 100
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 15)
 AUTO_DETECT_LANGUAGE = ""
 
+#: The reconnect buffer's bound, in frames. Named rather than recomputed at the
+#: one place that trims, so that a test about the trim can size its buffer from
+#: the same constant the trim reads instead of from something that merely
+#: happens to equal it.
+MAX_BUFFERED_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
+
 #: The in-flight bound, deliberately equal to the reconnect buffer's: both are
 #: "ten seconds of audio", and if they drift apart one of them is wrong.
-AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
+AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_FRAMES
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,7 @@ class DesktopSessionController:
         self.state = ConnectionState.IDLE
         self.pending_deltas: dict[str, TranscriptDelta] = {}
         self._buffered_frames: list[AudioFrame] = []
+        self._buffer_generation = 0
         self._capture: CaptureSession | None = None
         self._stream: RemoteStream | None = None
         self._recovery_stream: RemoteStream | None = None
@@ -274,7 +281,7 @@ class DesktopSessionController:
         """Keep a bounded, offset-ordered reconnect buffer of encoded frames."""
         self._buffered_frames.extend(frames)
         self._buffered_frames.sort(key=lambda frame: frame.offset_ms)
-        excess = len(self._buffered_frames) - MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
+        excess = len(self._buffered_frames) - MAX_BUFFERED_FRAMES
         if excess > 0:
             del self._buffered_frames[:excess]
 
@@ -574,6 +581,17 @@ class DesktopSessionController:
                     # a socket that just completed a handshake; a socket too
                     # slow for that never converges anywhere, and stop()
                     # cancels the task this runs in.
+                    #
+                    # The generation is read before the detach so the `finally`
+                    # can tell "nothing else touched the buffer" from "another
+                    # path emptied it while I was sending". Detaching costs the
+                    # one property the old cursor had for free: a concurrent
+                    # _clear_buffered_frames() -- a device loss landing while
+                    # this is RECONNECTING -- now empties only the fresh list,
+                    # and a `finally` that re-enqueued regardless would put the
+                    # dropped frames back into a buffer somebody deliberately
+                    # cleared.
+                    generation = self._buffer_generation
                     pending, self._buffered_frames = self._buffered_frames, []
                     try:
                         while pending:
@@ -598,8 +616,11 @@ class DesktopSessionController:
                         # the detached list would otherwise have thrown away.
                         # enqueue_audio_frames re-sorts and re-trims, so this
                         # merges correctly with anything that arrived while the
-                        # replay was running. Empty on the success path.
-                        if pending:
+                        # replay was running. Empty on the success path, and
+                        # skipped entirely once the buffer has been cleared out
+                        # from under this replay -- that clear is a decision,
+                        # not a gap to fill in.
+                        if pending and self._buffer_generation == generation:
                             self.enqueue_audio_frames(pending)
                     self._set_state(ConnectionState.STREAMING, session=self._session)
                     # Cancel before overwriting: a reader left over from the
@@ -985,7 +1006,16 @@ class DesktopSessionController:
         await self._close_stream(stream)
 
     def _clear_buffered_frames(self) -> None:
+        """Drop the reconnect buffer, and record that it was dropped.
+
+        The counter exists for the replay in _recover, which detaches the
+        buffer before sending it and therefore cannot see a clear that lands
+        while it is in flight -- it would only empty the fresh list left
+        behind. Bumping here is what lets that replay's `finally` tell an
+        interrupted send from a buffer somebody else deliberately emptied.
+        """
         self._buffered_frames.clear()
+        self._buffer_generation += 1
 
     def _notify_authentication_failure(self) -> None:
         callback = self._on_authentication_failure

@@ -18,6 +18,8 @@ from broccoli_desktop.remote import (
 from broccoli_desktop.session import (
     AUDIO_QUEUE_MAX_FRAMES,
     FRAME_DURATION_MS,
+    MAX_BUFFERED_AUDIO_MS,
+    MAX_BUFFERED_FRAMES,
     CaptureChoices,
     DesktopSessionController,
 )
@@ -398,8 +400,16 @@ async def test_frames_arriving_mid_replay_neither_skip_nor_drop_buffered_audio(
     A full buffer plus one arrival at the first replay send is the smallest
     reproduction: with the old code offset 100 is sent, the arrival shifts the
     list, and offset 200 is never sent at all.
+
+    Everything below is sized from MAX_BUFFERED_FRAMES -- the bound
+    enqueue_audio_frames actually trims against -- and not from
+    AUDIO_QUEUE_MAX_FRAMES, which equals it only because session.py sets them
+    from the same expression. Sized off the queue's bound instead, decoupling
+    the two would leave the buffer short of its cap, the arrival would stop
+    triggering a trim, and this test would quietly start passing against the
+    code it was written to fail against.
     """
-    injected = [AudioFrame("system", (AUDIO_QUEUE_MAX_FRAMES + 1) * 100, b"\x00\x00")]
+    injected = [AudioFrame("system", (MAX_BUFFERED_FRAMES + 1) * 100, b"\x00\x00")]
 
     class InjectingStream:
         """Stand in for the sender reaching enqueue_audio_frames at one of the
@@ -427,24 +437,87 @@ async def test_frames_arriving_mid_replay_neither_skip_nor_drop_buffered_audio(
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
     buffered = [
         AudioFrame("system", offset_ms, b"\x00\x00")
-        for offset_ms in range(100, (AUDIO_QUEUE_MAX_FRAMES + 1) * 100, 100)
+        for offset_ms in range(100, (MAX_BUFFERED_FRAMES + 1) * 100, 100)
     ]
     controller.enqueue_audio_frames(buffered)
-    assert controller.buffered_audio_ms == AUDIO_QUEUE_MAX_FRAMES * FRAME_DURATION_MS
+    # At the cap, not merely at a number that used to be the cap: the trim is
+    # the skip mechanism, so a buffer with room left over reproduces nothing.
+    # Asserted in both units the bound is expressed in, so a change to either
+    # fails here instead of silently defusing the reproduction.
+    assert len(buffered) == MAX_BUFFERED_FRAMES
+    assert controller.buffered_audio_ms == MAX_BUFFERED_AUDIO_MS
 
     await fake_remote.emit_failure()
     await settle()
 
     replayed = [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames]
-    assert replayed == [frame.offset_ms for frame in buffered] + [
-        (AUDIO_QUEUE_MAX_FRAMES + 1) * 100
-    ]
+    assert replayed == [frame.offset_ms for frame in buffered] + [(MAX_BUFFERED_FRAMES + 1) * 100]
     assert len(replayed) == len(set(replayed))
     assert replayed == sorted(replayed)
     assert controller.buffered_audio_ms == 0
     assert controller.state is ConnectionState.STREAMING
 
     await controller.stop()
+
+
+# Two hops in flight: _handle_device_loss's capture teardown and settle's own.
+@pytest.mark.parametrize("default_executor_workers", [4])
+@pytest.mark.asyncio
+async def test_a_buffer_cleared_during_a_replay_is_not_refilled_when_the_replay_unwinds(
+    fake_clock: FakeClock, fake_capture: FakeCaptureBackend
+) -> None:
+    """Detaching the buffer to replay it cost one property the old cursor had.
+
+    The old form walked the live list, so a concurrent _clear_buffered_frames()
+    ended the loop and nothing came back. The detached form cannot see that
+    clear at all -- it empties only the fresh list left behind -- so the
+    `finally`, which exists to put an interrupted replay back for the next
+    retry, put the frames into a buffer a device loss had just emptied on
+    purpose. buffered_audio_ms then reported audio that no longer had a session
+    to belong to, all the way through stop().
+    """
+    fake_remote = FakeSessionRemote()
+    real_connect = fake_remote.connect_stream
+
+    async def connect_and_park(**kwargs: object) -> FakeLiveRemoteStream:
+        # The reconnect's socket accepts the connection and then never drains,
+        # which parks the replay on its first send with the buffer detached --
+        # the window this test needs to reach into.
+        stream = await real_connect(**kwargs)  # type: ignore[arg-type]
+        stream.block_sends()
+        return stream
+
+    fake_remote.connect_stream = connect_and_park  # type: ignore[method-assign]
+
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames(make_frames(300))
+    assert controller.buffered_audio_ms == 300
+
+    await fake_remote.emit_failure()
+    for _ in range(2_000):
+        if len(fake_remote.streams) == 2 and controller.buffered_audio_ms == 0:
+            break
+        await asyncio.sleep(0)
+    assert len(fake_remote.streams) == 2, "the reconnect never opened its stream"
+    assert fake_remote.streams[1].frames == [], "the replay was not parked on its first send"
+
+    # The capture device disappears mid-replay. _handle_device_loss is a real
+    # concurrent caller of _clear_buffered_frames while the state is
+    # RECONNECTING, and it is the one the buffer was written to survive.
+    fake_capture.handles["system-1"].lose_device()
+    for _ in range(2_000):
+        if controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED:
+            break
+        await asyncio.sleep(0)
+    assert controller.state is ConnectionState.DEVICE_SELECTION_REQUIRED
+    assert controller.buffered_audio_ms == 0
+
+    # stop() is what unwinds the parked replay: _cancel_tasks cancels the reader
+    # driving it, and the cancel lands on the send, inside the try.
+    await controller.stop()
+
+    assert controller.buffered_audio_ms == 0
 
 
 @pytest.mark.asyncio
