@@ -122,6 +122,13 @@ try {
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
+    $focused = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.activeElement.tagName + '#' + document.activeElement.id"
+    ) | ConvertFrom-Json)
+    if ($focused -eq "BODY#") {
+        throw "Focus was left on the body after entering the capture screen."
+    }
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-ready.png"))
 
@@ -144,6 +151,26 @@ try {
     if ($firstRow -notlike "*44") {
         throw "The newest session is not at the top of the list: $firstRow"
     }
+
+    # Opening a session from the sidebar is the case the reviewer traced the
+    # bug to: the list used to be rebuilt from scratch on selection, which tore
+    # out whatever row -- or its "..." menu trigger -- held focus. Clicked here,
+    # before the list has anything to scroll, so the row is on screen without
+    # relying on the infinite-scroll behaviour the next block exercises.
+    Invoke-Browser -BrowserArguments @("find", "testid", "session-row-history-44", "click")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#sessionTitle').value === 'Reuni$([char]0x00E3)o arquivada 44'"
+    )
+    $focused = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.activeElement.tagName + '#' + document.activeElement.id"
+    ) | ConvertFrom-Json)
+    if ($focused -eq "BODY#") {
+        throw "Focus was left on the body after opening a session from the sidebar."
+    }
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
     # Infinite scroll. The list is three pages deep and nothing here clicks:
     # reaching the end is the whole trigger.

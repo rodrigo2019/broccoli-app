@@ -692,6 +692,24 @@
 
   // ------------------------------------------------------------------------ views
 
+  /** Move focus into a screen that just became visible.
+   *
+   * Every view change used to leave focus on <body>, so the next Tab restarted
+   * from the top of a document with ~96 focusable elements -- about 82 of them
+   * sidebar rows -- and a screen reader was told nothing had happened. The rename
+   * dialog already does this correctly; this is the same behaviour everywhere
+   * else. */
+  function focusScreen(container) {
+    if (!container) return;
+    const heading = container.querySelector("h1, h2");
+    const target =
+      heading ||
+      container.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+    if (!target) return;
+    if (target === heading) target.setAttribute("tabindex", "-1");
+    target.focus();
+  }
+
   function renderView() {
     const settingsOpen = state.authenticated && state.activeView === "settings";
     elements.loginView.classList.toggle("hidden", state.authenticated);
@@ -780,12 +798,14 @@
     closeDrawer();
     renderView();
     renderSettings();
+    focusScreen(elements.settingsView);
   }
 
   function showTranscript() {
     state.activeView = "transcript";
     renderView();
     stopAudioTest();
+    focusScreen(elements.mainView);
   }
 
   function collectSettings() {
@@ -901,7 +921,7 @@
   }
 
   function closeSessionMenu(trigger) {
-    trigger?.blur();
+    trigger?.focus();
   }
 
   function addSessionMenuAction(menu, { label, iconName, className = "", disabled = false, onClick }) {
@@ -910,36 +930,49 @@
     action.type = "button";
     action.className = `session-menu-action ${className}`.trim();
     action.disabled = disabled;
+    const iconElement = icon(iconName);
     const text = document.createElement("span");
     text.textContent = label;
-    action.append(icon(iconName), text);
+    action.append(iconElement, text);
     action.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (!disabled) onClick();
+      // Read the live property, not the `disabled` this closed over: the row
+      // that owns this button is reused across renders (see renderSessions),
+      // and updateSessionActionMenu flips it directly on the element.
+      if (!action.disabled) onClick();
     });
     item.append(action);
     menu.append(item);
+    return { action, iconElement, text };
   }
 
-  function sessionActionMenu(session) {
+  /**
+   * Build the "..." menu for one row.
+   *
+   * `holder` carries the row's current session so these click handlers always
+   * act on the latest data even after the row's DOM is reused for an updated
+   * session (see buildSessionRow/updateSessionRow) -- closing over `session`
+   * itself would go stale the moment a rename or pin toggle replaces that
+   * object in state.sessions.
+   */
+  function sessionActionMenu(holder) {
     const dropdown = document.createElement("div");
     dropdown.className = "dropdown dropdown-end session-row-actions";
     const trigger = document.createElement("button");
     trigger.type = "button";
     trigger.className = "session-menu-trigger btn btn-sm h-[30px] w-[30px] min-h-0 bg-transparent";
-    trigger.setAttribute("aria-label", `Opções para ${sessionLabel(session)}`);
     trigger.title = "Opções da sessão";
     trigger.append(icon("three-dots"));
     const menu = document.createElement("ul");
     menu.className = "dropdown-content menu z-[1] w-36 rounded-box bg-base-100 p-1 shadow";
     menu.tabIndex = 0;
 
-    addSessionMenuAction(menu, {
-      label: session.is_pinned ? "Desafixar" : "Fixar",
-      iconName: session.is_pinned ? "pin-angle" : "pin-angle-fill",
+    const pinRefs = addSessionMenuAction(menu, {
+      label: "Fixar",
+      iconName: "pin-angle-fill",
       onClick: () => {
         closeSessionMenu(trigger);
-        updateSessionMetadata(session, { is_pinned: !session.is_pinned }).catch(reportError);
+        updateSessionMetadata(holder.session, { is_pinned: !holder.session.is_pinned }).catch(reportError);
       },
     });
     addSessionMenuAction(menu, {
@@ -947,24 +980,18 @@
       iconName: "pencil",
       onClick: () => {
         closeSessionMenu(trigger);
-        openRenameSession(session);
+        openRenameSession(holder.session);
       },
     });
-    addSessionMenuAction(menu, {
-      label: session.is_live ? "Excluir sessão ativa" : "Excluir",
+    const deleteRefs = addSessionMenuAction(menu, {
+      label: "Excluir",
       iconName: "trash",
       className: "text-error",
-      disabled: session.is_live,
       onClick: () => {
         closeSessionMenu(trigger);
-        openDeleteSession(session);
+        openDeleteSession(holder.session);
       },
     });
-    if (session.is_live) {
-      menu.lastElementChild
-        ?.querySelector("button")
-        ?.setAttribute("title", "Pare a captura antes de excluir esta sessão.");
-    }
 
     dropdown.append(trigger, menu);
     const preventSessionSelection = (event) => event.stopPropagation();
@@ -972,7 +999,26 @@
     dropdown.addEventListener("mousedown", preventSessionSelection);
     dropdown.addEventListener("mouseup", preventSessionSelection);
     dropdown.addEventListener("click", preventSessionSelection);
-    return dropdown;
+    return { dropdown, trigger, pinRefs, deleteRefs };
+  }
+
+  /**
+   * Refresh the parts of the "..." menu that can change after the row was
+   * built: the trigger's label, the pin action's label/icon, and whether
+   * delete is blocked by a live capture.
+   */
+  function updateSessionActionMenu(menuRefs, session) {
+    const label = sessionLabel(session);
+    menuRefs.trigger.setAttribute("aria-label", `Opções para ${label}`);
+    menuRefs.pinRefs.text.textContent = session.is_pinned ? "Desafixar" : "Fixar";
+    menuRefs.pinRefs.iconElement.className = `bi bi-${session.is_pinned ? "pin-angle" : "pin-angle-fill"}`;
+    menuRefs.deleteRefs.text.textContent = session.is_live ? "Excluir sessão ativa" : "Excluir";
+    menuRefs.deleteRefs.action.disabled = session.is_live;
+    if (session.is_live) {
+      menuRefs.deleteRefs.action.title = "Pare a captura antes de excluir esta sessão.";
+    } else {
+      menuRefs.deleteRefs.action.removeAttribute("title");
+    }
   }
 
   function sessionListPlaceholder({ iconName, title, description, spinner = false }) {
@@ -1007,14 +1053,94 @@
     return item;
   }
 
+  /**
+   * Build one sidebar row's DOM.
+   *
+   * Only structure -- updateSessionRow fills in everything that can change
+   * across a render, and runs immediately after this for a freshly built row
+   * too, so nothing here needs to duplicate that content.
+   */
+  function buildSessionRow(session) {
+    // The click/keydown handlers below close over `holder`, not `session`:
+    // this row's DOM is kept and reused by renderSessions on every later
+    // render (that reuse is what keeps a focused row from being torn out from
+    // under the keyboard), and updateSessionRow repoints holder.session to
+    // the latest object so a stale rename or pin state is never acted on.
+    const holder = { session };
+
+    const item = document.createElement("li");
+    item.className =
+      "session-library-item flex min-w-0 items-center rounded-md text-md transition-all duration-200 hover:bg-base-300/50";
+    item.dataset.sessionId = session.uuid_code;
+
+    const content = document.createElement("div");
+    content.className = "session-row-content flex w-full min-w-0 items-center";
+    content.dataset.testid = `session-row-${session.uuid_code}`;
+    content.setAttribute("role", "button");
+    content.tabIndex = 0;
+    content.addEventListener("click", () => {
+      selectSession(holder.session).catch(reportError);
+    });
+    content.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      selectSession(holder.session).catch(reportError);
+    });
+
+    const rowContent = document.createElement("span");
+    rowContent.className = "session-title-wrap flex min-w-0 grow flex-col overflow-hidden";
+    const titleLine = document.createElement("span");
+    titleLine.className = "flex min-w-0 items-center gap-1";
+    const title = document.createElement("span");
+    title.className = "block min-w-0 whitespace-nowrap overflow-hidden text-ellipsis";
+    titleLine.append(title);
+    rowContent.append(titleLine);
+    content.append(rowContent);
+
+    const menu = sessionActionMenu(holder);
+    content.append(menu.dropdown);
+    item.append(content);
+
+    item.sessionRefs = { holder, content, titleLine, title, menu };
+    return item;
+  }
+
+  /** Patch an already-built row so it matches the given session's current data. */
+  function updateSessionRow(item, session) {
+    const refs = item.sessionRefs;
+    refs.holder.session = session;
+    item.classList.toggle("is-active", state.selectedSession?.uuid_code === session.uuid_code);
+    const label = sessionLabel(session);
+    refs.content.setAttribute("aria-label", `Abrir sessão ${label}`);
+    refs.title.title = label;
+    refs.title.textContent = label;
+    const existingPin = refs.titleLine.querySelector(".session-row-pin");
+    if (session.is_pinned && !existingPin) {
+      refs.titleLine.prepend(pinIcon());
+    } else if (!session.is_pinned && existingPin) {
+      existingPin.remove();
+    }
+    updateSessionActionMenu(refs.menu, session);
+  }
+
+  /**
+   * Sync the sidebar list to state.sessions, in place.
+   *
+   * A row -- and the "..." trigger inside it -- can hold keyboard focus.
+   * Rebuilding the `<ul>` from scratch on every render (the previous
+   * behaviour) tore that node down and replaced it with a lookalike, so
+   * activating a row left focus stranded on <body>: the reviewer captured the
+   * focused node before the click and found `document.contains(node)` false
+   * afterwards. Keying rows by uuid_code and reusing their DOM nodes here is
+   * what keeps the focused node alive across a re-render.
+   */
   function renderSessions() {
-    elements.sessionLibrary.replaceChildren();
     // The sentinel is both the trigger for the next page and the only loading
     // affordance the list needs; with no cursor left there is nothing to watch.
     elements.sessionsSentinel.classList.toggle("hidden", !state.nextCursor);
 
     if (!state.sessions.length) {
-      elements.sessionLibrary.append(
+      elements.sessionLibrary.replaceChildren(
         state.sessionsLoading
           ? sessionListPlaceholder({ title: "Carregando sessões…", spinner: true })
           : sessionListPlaceholder({
@@ -1029,42 +1155,39 @@
     }
 
     sortSessions();
-    for (const session of state.sessions) {
-      const item = document.createElement("li");
-      item.className =
-        "session-library-item flex min-w-0 items-center rounded-md text-md transition-all duration-200 hover:bg-base-300/50";
-      item.classList.toggle("is-active", state.selectedSession?.uuid_code === session.uuid_code);
-      const content = document.createElement("div");
-      content.className = "session-row-content flex w-full min-w-0 items-center";
-      content.dataset.testid = `session-row-${session.uuid_code}`;
-      content.setAttribute("role", "button");
-      content.tabIndex = 0;
-      const label = sessionLabel(session);
-      content.setAttribute("aria-label", `Abrir sessão ${label}`);
-      const rowContent = document.createElement("span");
-      rowContent.className = "session-title-wrap flex min-w-0 grow flex-col overflow-hidden";
-      const titleLine = document.createElement("span");
-      titleLine.className = "flex min-w-0 items-center gap-1";
-      const title = document.createElement("span");
-      title.className = "block min-w-0 whitespace-nowrap overflow-hidden text-ellipsis";
-      title.title = label;
-      title.textContent = label;
-      if (session.is_pinned) titleLine.append(pinIcon());
-      titleLine.append(title);
-      rowContent.append(titleLine);
-      content.append(rowContent);
-      content.addEventListener("click", () => {
-        selectSession(session).catch(reportError);
-      });
-      content.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        selectSession(session).catch(reportError);
-      });
-      content.append(sessionActionMenu(session));
-      item.append(content);
-      elements.sessionLibrary.append(item);
+
+    // Index the rows already on screen by their key. Anything here without a
+    // key is a leftover placeholder from the empty/loading state above, not a
+    // row -- it gets dropped rather than indexed, since nothing will claim it.
+    const existingRows = new Map();
+    for (const child of Array.from(elements.sessionLibrary.children)) {
+      if (child.dataset.sessionId) existingRows.set(child.dataset.sessionId, child);
+      else child.remove();
     }
+
+    let previousItem = null;
+    for (const session of state.sessions) {
+      let item = existingRows.get(session.uuid_code);
+      if (item) {
+        existingRows.delete(session.uuid_code);
+        updateSessionRow(item, session);
+      } else {
+        item = buildSessionRow(session);
+        updateSessionRow(item, session);
+      }
+      const expectedNext = previousItem
+        ? previousItem.nextElementSibling
+        : elements.sessionLibrary.firstElementChild;
+      if (expectedNext !== item) {
+        if (previousItem) previousItem.after(item);
+        else elements.sessionLibrary.prepend(item);
+      }
+      previousItem = item;
+    }
+
+    // Whatever is left in the map fell out of state.sessions -- filtered out
+    // by a search, or actually removed -- and does not belong on screen.
+    for (const stale of existingRows.values()) stale.remove();
   }
 
   function mergeSession(session) {
@@ -1458,6 +1581,7 @@
     closeDrawer();
     renderSessions();
     renderSessionDetails();
+    focusScreen(elements.mainView);
     state.segments = { cursor: null, loading: false, requestId: 0 };
     setTimelineLoading("Carregando transcrição…");
     try {
@@ -1701,6 +1825,11 @@
     renderSessions();
     renderSessionDetails();
     renderConnectionState();
+    // Only the login -> capture transition, not every reconnect bootstrap: a
+    // reconnect resends the same message to an already-authenticated window,
+    // and yanking focus back to the transcript heading mid-read would be its
+    // own regression.
+    if (!wasAuthenticated && state.authenticated) focusScreen(elements.mainView);
     if (!state.authenticated) {
       clearTimeline();
       return;
@@ -1826,6 +1955,7 @@
       setLoginError(
         error.message === "Authentication is required." ? "Token inválido." : error.message,
       );
+      elements.tokenInput.focus();
     }
   });
   elements.settingsButton.addEventListener("click", showSettings);

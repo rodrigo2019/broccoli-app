@@ -81,6 +81,31 @@
 }
 
 @layer components {
+  /* The document's first focusable element, and the only <a> in it. Off-screen
+   * by position, not by `display`/`visibility`, so it still receives focus on
+   * the first Tab and reads to a screen reader -- the whole point is to let
+   * keyboard and AT users jump past the sidebar's ~80 rows straight to the
+   * screen's main content instead of tabbing through all of them first. */
+  .skip-link {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 2000;
+    transform: translateY(-120%);
+    padding: 0.65rem 1.1rem;
+    border-radius: 0 0 0.5rem 0;
+    background: var(--color-primary);
+    color: var(--color-primary-content);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-decoration: none;
+    transition: transform 0.15s ease;
+  }
+
+  .skip-link:focus {
+    transform: translateY(0);
+  }
+
   /* Shares its element with DaisyUI's `.drawer`. No `overflow: hidden` here:
      the blobs are already clipped by the fixed backdrop below, and an
      overflow-hidden ancestor is what silently breaks `position: sticky` on the
