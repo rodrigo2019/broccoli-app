@@ -380,6 +380,73 @@ async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_f
 
 
 @pytest.mark.asyncio
+async def test_frames_arriving_mid_replay_neither_skip_nor_drop_buffered_audio(
+    fake_clock: FakeClock, fake_capture: FakeCaptureBackend
+) -> None:
+    """The replay used to walk the very list it was being appended to.
+
+    While the state is RECONNECTING, the sender takes _forward_frame's
+    RECONNECTING branch and calls enqueue_audio_frames, which extends, re-sorts
+    and -- once the buffer is at its 10-second cap, which is exactly what a
+    reconnect long enough to need a replay produces -- trims it with
+    `del self._buffered_frames[:excess]`. Deleting from the front under a live
+    `for` cursor shifts every remaining element left by one, so the loop steps
+    straight over a frame; the clear() that followed then discarded whatever
+    had been appended. Frames went missing with no counter and no warning.
+
+    A full buffer plus one arrival at the first replay send is the smallest
+    reproduction: with the old code offset 100 is sent, the arrival shifts the
+    list, and offset 200 is never sent at all.
+    """
+    injected = [AudioFrame("system", (AUDIO_QUEUE_MAX_FRAMES + 1) * 100, b"\x00\x00")]
+
+    class InjectingStream:
+        """Stand in for the sender reaching enqueue_audio_frames at one of the
+        replay's awaits."""
+
+        def __init__(self, inner: FakeLiveRemoteStream) -> None:
+            self._inner = inner
+
+        async def send_bytes(self, frame: bytes) -> None:
+            if injected:
+                controller.enqueue_audio_frames([injected.pop()])
+            await self._inner.send_bytes(frame)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    class InjectingRemote(FakeSessionRemote):
+        async def connect_stream(self, **kwargs: object) -> object:
+            stream = await super().connect_stream(**kwargs)  # type: ignore[arg-type]
+            # Only the reconnect's stream: the first one is the live run.
+            return InjectingStream(stream) if len(self.streams) > 1 else stream
+
+    fake_remote = InjectingRemote()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    buffered = [
+        AudioFrame("system", offset_ms, b"\x00\x00")
+        for offset_ms in range(100, (AUDIO_QUEUE_MAX_FRAMES + 1) * 100, 100)
+    ]
+    controller.enqueue_audio_frames(buffered)
+    assert controller.buffered_audio_ms == AUDIO_QUEUE_MAX_FRAMES * FRAME_DURATION_MS
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    replayed = [decode_audio_frame(frame).offset_ms for frame in fake_remote.streams[-1].frames]
+    assert replayed == [frame.offset_ms for frame in buffered] + [
+        (AUDIO_QUEUE_MAX_FRAMES + 1) * 100
+    ]
+    assert len(replayed) == len(set(replayed))
+    assert replayed == sorted(replayed)
+    assert controller.buffered_audio_ms == 0
+    assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_recovery_keeps_local_offsets_when_backend_omits_next_offset_ms(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

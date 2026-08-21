@@ -506,14 +506,61 @@ class DesktopSessionController:
                         raise RemoteProtocolError("Remote resumed an unexpected session.")
                     self._stream = stream
                     self._recovery_stream = None
-                    for frame in self._buffered_frames:
-                        await stream.send_bytes(
-                            encode_audio_frame(
-                                channel=frame.channel, offset_ms=frame.offset_ms, pcm=frame.pcm
+                    # Detach the buffer before replaying it. The state is still
+                    # RECONNECTING here, and at every await below the sender
+                    # task -- still running, because this recovery can be
+                    # driven by the reader -- can dequeue a frame, take
+                    # _forward_frame's RECONNECTING branch and call
+                    # enqueue_audio_frames, which extends, re-*sorts* and trims
+                    # the list. Mutating and re-sorting under a `for` cursor
+                    # skips and repeats elements, and the clear() that used to
+                    # follow discarded whatever had been appended during the
+                    # loop: frames left out of order and some never left at
+                    # all, with no counter and no warning -- the opposite of
+                    # the ordering-by-construction this buffer exists for.
+                    #
+                    # Draining until nothing new has arrived is what closes the
+                    # handover without a gap. It terminates because each pass
+                    # only carries what the capture produced during the
+                    # previous one, at 20 frames per second per channel against
+                    # a socket that just completed a handshake; a socket too
+                    # slow for that never converges anywhere, and stop()
+                    # cancels the task this runs in.
+                    pending, self._buffered_frames = self._buffered_frames, []
+                    try:
+                        while pending:
+                            # Dropped only once the send has returned: a frame
+                            # removed first and then failed to send is a frame
+                            # nobody replays.
+                            frame = pending[0]
+                            await stream.send_bytes(
+                                encode_audio_frame(
+                                    channel=frame.channel,
+                                    offset_ms=frame.offset_ms,
+                                    pcm=frame.pcm,
+                                )
                             )
-                        )
-                    self._buffered_frames.clear()
+                            pending.pop(0)
+                            if not pending:
+                                pending, self._buffered_frames = self._buffered_frames, []
+                    finally:
+                        # A replay that did not finish -- a send that failed
+                        # partway through, a cancel -- puts what is left back
+                        # so the next retry replays it, which is the behaviour
+                        # the detached list would otherwise have thrown away.
+                        # enqueue_audio_frames re-sorts and re-trims, so this
+                        # merges correctly with anything that arrived while the
+                        # replay was running. Empty on the success path.
+                        if pending:
+                            self.enqueue_audio_frames(pending)
                     self._set_state(ConnectionState.STREAMING, session=self._session)
+                    # Cancel before overwriting: a reader left over from the
+                    # connection that just failed would otherwise keep running
+                    # unreferenced against a closed stream, and _cancel_tasks
+                    # only ever sees the handle stored here.
+                    previous_reader = self._reader_task
+                    if previous_reader is not None and not previous_reader.done():
+                        previous_reader.cancel()
                     self._reader_task = asyncio.create_task(self._listen(iterator))
                     return
                 except RemoteUnauthorizedError:
