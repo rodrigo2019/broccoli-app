@@ -207,6 +207,22 @@
     background: color-mix(in oklch, var(--color-base-300) 48%, transparent);
   }
 
+  /* Nested inside `#transcriptTimeline` (`.transcript-surface`), holding only
+     in-progress (`aria-live="off"`) ASR deltas -- see app.js renderDelta /
+     renderSegment. It is a flex item of `.transcript-surface` itself, so it
+     needs its own column layout to lay out concurrent provisional rows (one
+     per channel) the same way; `:empty` drops it out of flow entirely so an
+     idle transcript does not carry a stray gap where no delta is in flight. */
+  .transcript-provisional {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .transcript-provisional:empty {
+    display: none;
+  }
+
   /* Same bubble the platform draws for the live transcript panel
      (chat/css/chat.css). The two surfaces show the same utterances, so they
      read the same; what the desktop adds on top is the speaker avatar and the

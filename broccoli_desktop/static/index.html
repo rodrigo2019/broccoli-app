@@ -28,7 +28,7 @@
     </script>
   </head>
   <body class="min-h-screen bg-base-100 text-base-content">
-    <a id="skipLink" href="#mainView" class="skip-link" data-testid="skip-to-main">Pular para o conteúdo</a>
+    <a id="skipLink" href="#mainView" class="skip-link hidden" data-testid="skip-to-main">Pular para o conteúdo</a>
     <div class="app-shell drawer lg:drawer-open min-h-screen">
       <div class="app-shell__backdrop" aria-hidden="true">
         <span class="app-shell__blob app-shell__blob--one"></span>
@@ -59,7 +59,7 @@
               </button>
               <span id="sessionMeta" class="hidden text-xs text-base-content/60 xl:inline">Inicie uma captura para gerar um código local.</span>
             </div>
-            <h3 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold">Configurações</h3>
+            <h1 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold">Configurações</h1>
           </div>
           <div id="headerActions" class="header-actions flex shrink-0 items-center gap-2">
             <span id="captureIndicator" class="badge badge-sm badge-outline gap-1" data-testid="capture-indicator">
@@ -129,9 +129,21 @@
                 <p class="text-sm leading-6 text-base-content/70">Use seu token do Broccoli para conectar microfone, áudio do sistema e transcrição ao vivo.</p>
                 <form id="loginForm" class="space-y-4">
                   <fieldset class="fieldset">
-                    <legend class="fieldset-legend text-sm">Token de acesso</legend>
-                    <input id="tokenInput" class="input w-full" type="password" autocomplete="off" aria-label="Broccoli access token" data-testid="token-input" required />
-                    <p class="fieldset-label leading-snug">Guardado somente no Gerenciador de Credenciais do Windows.</p>
+                    <!--
+                      A <legend> names the <fieldset> ("group") it belongs to; it is
+                      not, by itself, wired to a sibling <input>'s accessible name --
+                      confirmed against this app's own renameSessionInput, which uses
+                      the same fieldset/legend shape and gets its name from
+                      `placeholder` alone. tokenInput has no placeholder, so without
+                      aria-labelledby here it would end up completely unnamed once the
+                      old (wrong-language) aria-label is removed. Pointing
+                      aria-labelledby at the legend's own id, rather than adding a
+                      second aria-label, keeps the accessible name and the visible
+                      text identical -- not just overlapping -- for WCAG 2.5.3.
+                    -->
+                    <legend id="tokenInputLegend" class="fieldset-legend text-sm">Token de acesso</legend>
+                    <input id="tokenInput" class="input w-full" type="password" autocomplete="off" aria-labelledby="tokenInputLegend" aria-describedby="tokenInputHelp" data-testid="token-input" required />
+                    <p id="tokenInputHelp" class="fieldset-label leading-snug">Guardado somente no Gerenciador de Credenciais do Windows.</p>
                   </fieldset>
                   <p id="loginError" class="hidden text-sm text-error" role="alert" data-testid="login-error"></p>
                   <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">Entrar</button>
@@ -264,13 +276,22 @@
             <div class="mb-5 flex items-end justify-between gap-4">
               <div>
                 <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary">Registro ao vivo</p>
-                <h2 class="mt-2 text-2xl font-semibold tracking-tight">Transcrição</h2>
+                <h1 class="mt-2 text-2xl font-semibold tracking-tight">Transcrição</h1>
               </div>
             </div>
 
             <div class="relative flex min-h-0 flex-1 flex-col">
               <div id="transcriptTimeline" class="transcript-surface min-h-0 flex-1 overflow-y-auto px-1 sm:px-5" aria-live="polite" role="log" data-testid="transcript-timeline">
                 <p id="emptyTimeline" class="transcript-preview__empty">A transcrição aparecerá aqui.</p>
+                <!--
+                  In-progress ASR deltas render here instead of directly in the
+                  `role="log"` above: aria-live="off" means a screen reader does not
+                  re-announce the whole utterance on every partial update while
+                  someone is still speaking. renderSegment() moves the row into the
+                  log -- as a single append -- once the utterance is finalized, which
+                  is the only point it should be announced.
+                -->
+                <div id="transcriptProvisional" class="transcript-provisional" aria-live="off" data-testid="transcript-provisional"></div>
               </div>
               <button id="jumpToLatestButton" class="btn btn-sm btn-circle absolute bottom-3 left-1/2 hidden -translate-x-1/2 shadow-lg" type="button" data-testid="jump-to-latest" aria-label="Ir para o fim da transcrição" title="Ir para o fim">
                 <i class="bi bi-arrow-down" aria-hidden="true"></i>

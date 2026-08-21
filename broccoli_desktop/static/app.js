@@ -86,6 +86,7 @@
     microphoneHistogram: document.querySelector("#microphoneHistogram"),
     systemHistogram: document.querySelector("#systemHistogram"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
+    transcriptProvisional: document.querySelector("#transcriptProvisional"),
     drawerToggle: document.querySelector("#drawer-toggle"),
   };
 
@@ -715,6 +716,12 @@
     const settingsOpen = state.authenticated && state.activeView === "settings";
     elements.loginView.classList.toggle("hidden", state.authenticated);
     elements.mainView.classList.toggle("hidden", !state.authenticated || settingsOpen);
+    // #mainView is what the skip link jumps to, and it carries `hidden` on the
+    // login screen -- focusing a heading inside a display:none ancestor is a
+    // silent no-op. Keeping the link itself hidden pre-login means there is
+    // nothing to skip to yet, and it also drops out of tab order, so the very
+    // first Tab on the login screen lands on the token field, not a dead link.
+    elements.skipLink.classList.toggle("hidden", !state.authenticated);
     elements.settingsView.classList.toggle("hidden", !settingsOpen);
     elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
     elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
@@ -1432,9 +1439,34 @@
     elements.jumpToLatestButton.classList.remove("hidden");
   }
 
+  /**
+   * Append a finalized row directly into the `role="log"` region.
+   *
+   * Inserted *before* `#transcriptProvisional`, not appended at the very end,
+   * so a still-growing delta (a different channel, still speaking) stays
+   * pinned below every finalized row instead of finalized text landing under
+   * it. `insertBefore` with a `null` reference falls back to appending, so
+   * this is still safe if the provisional container is ever absent.
+   */
   function appendTimelineRow(row) {
     elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
-    elements.transcriptTimeline.append(row);
+    elements.transcriptTimeline.insertBefore(row, elements.transcriptProvisional || null);
+    noteTranscriptActivity();
+    scrollTranscriptToLatest();
+  }
+
+  /**
+   * Append (or update) a provisional row inside the `aria-live="off"` region.
+   *
+   * A live capture calls this on every ASR delta -- several times a second
+   * while someone is speaking. Because the container is aria-live="off", none
+   * of those updates are announced; the only announcement is the single
+   * append `appendTimelineRow` makes into the `role="log"` region, once the
+   * utterance is finalized.
+   */
+  function appendProvisionalRow(row) {
+    elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
+    elements.transcriptProvisional.append(row);
     noteTranscriptActivity();
     scrollTranscriptToLatest();
   }
@@ -1486,18 +1518,27 @@
     state.pendingDeltas.get(delta.utterance_id)?.remove();
     const row = transcriptRow(delta, true);
     state.pendingDeltas.set(delta.utterance_id, row);
-    appendTimelineRow(row);
+    appendProvisionalRow(row);
   }
 
+  /**
+   * Promote a finalized segment from the provisional (aria-live="off") region
+   * into the log.
+   *
+   * The old code did `pending.replaceWith(row)` in place, inside the log
+   * itself -- correct for a one-time promotion, but `renderDelta` above was
+   * doing the same remove+append *inside the log* on every partial update,
+   * which is what made a growing delta re-announce repeatedly. Now the
+   * pending row lives outside the log (removing it is silent), and this is
+   * the only point a row is ever added to the log -- exactly one `polite`
+   * announcement per finalized utterance, whether or not a delta preceded it.
+   */
   function renderSegment(segment) {
     const pending = state.pendingDeltas.get(segment.utterance_id);
     const row = transcriptRow(segment, false);
     if (pending) {
-      pending.replaceWith(row);
+      pending.remove();
       state.pendingDeltas.delete(segment.utterance_id);
-      noteTranscriptActivity();
-      scrollTranscriptToLatest();
-      return;
     }
     appendTimelineRow(row);
   }
@@ -1507,12 +1548,13 @@
     state.segments = { cursor: null, loading: false, requestId: 0 };
     state.transcriptHasNewContent = false;
     setFollowTranscript(true);
+    elements.transcriptProvisional.replaceChildren();
     elements.transcriptTimeline.replaceChildren();
     const empty = document.createElement("p");
     empty.id = "emptyTimeline";
     empty.className = "transcript-preview__empty";
     empty.textContent = "A transcrição aparecerá aqui.";
-    elements.transcriptTimeline.append(empty);
+    elements.transcriptTimeline.append(empty, elements.transcriptProvisional);
   }
 
   function setTimelineLoading(message) {
@@ -1525,7 +1567,7 @@
     label.className = "text-sm text-base-content/60";
     label.textContent = message;
     block.append(spinner, label);
-    elements.transcriptTimeline.append(block);
+    elements.transcriptTimeline.append(block, elements.transcriptProvisional);
   }
 
   function renderSegmentLoadMore(session) {
@@ -1544,7 +1586,7 @@
         reportError(error);
       });
     });
-    elements.transcriptTimeline.append(button);
+    elements.transcriptTimeline.insertBefore(button, elements.transcriptProvisional || null);
   }
 
   /**
@@ -1567,11 +1609,14 @@
       if (state.selectedSession?.uuid_code !== session.uuid_code) return;
       // The first page replaces the spinner; later pages append below the rows
       // already on screen.
-      if (first) elements.transcriptTimeline.replaceChildren();
+      if (first) {
+        elements.transcriptTimeline.replaceChildren();
+        elements.transcriptTimeline.append(elements.transcriptProvisional);
+      }
       document.querySelector("#loadMoreSegments")?.remove();
       elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
       for (const segment of page.segments) {
-        elements.transcriptTimeline.append(transcriptRow(segment, false));
+        elements.transcriptTimeline.insertBefore(transcriptRow(segment, false), elements.transcriptProvisional || null);
       }
       state.segments.cursor = page.next_cursor;
       renderSegmentLoadMore(session);
@@ -1580,7 +1625,7 @@
         empty.id = "emptyTimeline";
         empty.className = "transcript-preview__empty";
         empty.textContent = "Esta sessão não tem transcrição registrada.";
-        elements.transcriptTimeline.append(empty);
+        elements.transcriptTimeline.insertBefore(empty, elements.transcriptProvisional || null);
       }
     } finally {
       if (requestId === state.segments.requestId) state.segments.loading = false;

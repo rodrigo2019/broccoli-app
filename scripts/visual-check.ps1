@@ -27,6 +27,19 @@ function Assert-NoAccessibilityViolations {
     if ($violations.Count -ne 0) {
         throw "Accessibility violations were reported on $Screen`: $json"
     }
+
+    # Heading structure (each screen has exactly one <h1>, in the right order
+    # relative to its sub-headings) is covered by axe's best-practice tag, not
+    # wcag2a/wcag2aa -- run it separately and check specifically for the two
+    # rules the heading-structure fix targets, rather than failing on any
+    # best-practice violation, since that tag also covers things out of scope
+    # here (e.g. region, landmark-one-main).
+    $bestPracticeJson = Invoke-Browser -BrowserArguments @("a11y", "--tags", "best-practice", "--json")
+    $bestPracticeViolations = @((($bestPracticeJson | ConvertFrom-Json).data).violations)
+    $headingViolations = @($bestPracticeViolations | Where-Object { $_.id -in @("page-has-heading-one", "heading-order") })
+    if ($headingViolations.Count -ne 0) {
+        throw "Heading structure violations were reported on $Screen`: $($headingViolations | ConvertTo-Json -Depth 6)"
+    }
 }
 
 function Get-PaintedHistogramPixels {

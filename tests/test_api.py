@@ -255,7 +255,18 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="sessions-sentinel"' in response.text
     assert 'data-testid="load-more"' not in response.text
     assert 'data-testid="transcript-timeline"' in response.text
-    assert 'aria-label="Broccoli access token"' in response.text
+    # The token field's accessible name must come from its visible Portuguese
+    # <legend>, not an overriding English aria-label (WCAG 2.5.3 Label in
+    # Name). A bare <legend> does not, by itself, name a sibling <input> (this
+    # app's own rename-session field uses the same fieldset/legend shape and
+    # gets its name from `placeholder` alone), so aria-labelledby points the
+    # field at the legend's own id explicitly. Its helper text is wired in via
+    # aria-describedby so a screen reader announces it too.
+    assert 'aria-label="Broccoli access token"' not in response.text
+    assert 'id="tokenInputLegend"' in response.text
+    assert 'aria-labelledby="tokenInputLegend"' in response.text
+    assert 'aria-describedby="tokenInputHelp"' in response.text
+    assert 'id="tokenInputHelp"' in response.text
     assert 'data-testid="session-search"' in response.text
     assert 'id="drawer-toggle"' in response.text
     assert 'data-testid="capture-indicator"' in response.text
