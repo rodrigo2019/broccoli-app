@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import pathlib
+import subprocess
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -1063,16 +1065,34 @@ def test_the_window_can_recover_its_launch_key_after_a_reload(
     sessionStorage is the recovery, and it is the right scope: it is per window
     and dropped when the window closes, so the key still lives exactly one
     launch, unlike localStorage which would hand a stale key to the next one.
-    The behavioural check -- a real reload with no key in the URL -- lives in
-    scripts/visual-check.ps1; this pins the mechanism against a silent revert.
-    """
-    source = tokened_client.get("/static/app.js").text
 
-    assert '"broccoli-desktop-launch-key"' in source
-    assert "sessionStorage.setItem(CAPABILITY_STORAGE_KEY" in source
-    assert "sessionStorage.getItem(CAPABILITY_STORAGE_KEY)" in source
+    This runs the shipped readCapabilityKey rather than grepping for it. The
+    grep it replaces would have passed against a setItem that stored the wrong
+    value -- the key, the store it goes into and the value written are all
+    things only a run can tell apart, and a window that recovers the *wrong*
+    key is exactly as dead as one that recovers nothing.
+    """
+    results = _run_launch_key_scenarios(tokened_client.get("/static/app.js").text)
+
+    keyed = results["keyed"]
+    assert keyed["key"] == "launch-key"
+    # The value, not merely a write: this is the assertion the source grep
+    # could not make. Also the store and the name, because the shim exposes
+    # sessionStorage and nothing else -- a switch to localStorage would leave
+    # this empty and the reload below with nothing to find, which is the
+    # per-launch property the token exists for.
+    assert keyed["entries"] == {"broccoli-desktop-launch-key": "launch-key"}
     # Still stripped from the address bar -- recovery, not a rollback.
-    assert 'window.history.replaceState(null, "", clean)' in source
+    assert keyed["replaced"] == ["/"]
+
+    # The reload the finding was about: same window, no key in the URL.
+    assert results["reload"]["key"] == "launch-key"
+    assert results["reload"]["replaced"] == []
+
+    # Storage denied is best effort in both directions: this load still works,
+    # and the reload after it fails quietly rather than throwing on the way in.
+    assert results["denied_keyed"]["key"] == "launch-key"
+    assert results["denied_reload"]["key"] == ""
 
 
 def test_the_event_socket_requires_the_capability_token(
@@ -1890,6 +1910,95 @@ async def test_default_proxy_prober_succeeds_for_a_non_407_response(
     )
 
     assert result is True
+
+
+#: Drives the shipped readCapabilityKey through four loads. Written as a
+#: template rather than assembled in Python so the harness reads as the JavaScript
+#: it is; `%s` is where the slice of app.js goes.
+_LAUNCH_KEY_HARNESS = """%s
+
+// Stand-ins for the two Web APIs readCapabilityKey depends on, kept at least
+// as strict as the real ones: Storage coerces to string, answers null -- not
+// undefined -- for a key it does not hold, and throws outright where storage
+// is disabled, which is the case the try/catch in readCapabilityKey exists
+// for. Only sessionStorage is exposed, so a switch to localStorage fails here
+// rather than passing quietly.
+function makeStorage(entries, denied) {
+  return {
+    getItem(key) {
+      if (denied) throw new Error("SecurityError: storage is disabled");
+      return Object.prototype.hasOwnProperty.call(entries, String(key))
+        ? entries[String(key)]
+        : null;
+    },
+    setItem(key, value) {
+      if (denied) throw new Error("SecurityError: storage is disabled");
+      entries[String(key)] = String(value);
+    },
+    removeItem(key) {
+      if (denied) throw new Error("SecurityError: storage is disabled");
+      delete entries[String(key)];
+    },
+  };
+}
+
+function load(search, entries, denied) {
+  const replaced = [];
+  globalThis.window = {
+    location: { search, pathname: "/", hash: "" },
+    sessionStorage: makeStorage(entries, denied),
+    history: {
+      replaceState(state, title, url) {
+        if (arguments.length !== 3) {
+          throw new Error("replaceState takes three arguments");
+        }
+        replaced.push(url);
+      },
+    },
+  };
+  return { key: readCapabilityKey(), entries, replaced };
+}
+
+const stored = { "broccoli-desktop-launch-key": "launch-key" };
+console.log(
+  JSON.stringify({
+    keyed: load("?k=launch-key", {}, false),
+    reload: load("", stored, false),
+    denied_keyed: load("?k=launch-key", {}, true),
+    denied_reload: load("", {}, true),
+  }),
+);
+"""
+
+
+def _run_launch_key_scenarios(app_js: str) -> dict[str, dict[str, object]]:
+    """Run app.js's own readCapabilityKey under a scripted window.
+
+    The function is lifted out of the file by text because it is the first
+    thing in app.js's IIFE and touches no DOM -- everything below it queries
+    elements that only exist in the shell. Node is already a build dependency
+    of this project (the stylesheet does not exist without it) and CI installs
+    it before this suite runs, so this is deliberately not skipped when node is
+    missing: a skip would be the same thing as the source grep it replaces.
+    """
+    start = app_js.index("const CAPABILITY_STORAGE_KEY =")
+    opening = app_js.index("{", app_js.index("function readCapabilityKey()", start))
+    depth = 0
+    index = opening
+    while True:
+        depth += {"{": 1, "}": -1}.get(app_js[index], 0)
+        index += 1
+        if depth == 0:
+            break
+
+    with tempfile.TemporaryDirectory() as directory:
+        script = pathlib.Path(directory) / "launch-key.js"
+        script.write_text(_LAUNCH_KEY_HARNESS % app_js[start:index], encoding="utf-8")
+        completed = subprocess.run(
+            ["node", str(script)], capture_output=True, text=True, check=False
+        )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
 
 
 class _LabelledFields(HTMLParser):
