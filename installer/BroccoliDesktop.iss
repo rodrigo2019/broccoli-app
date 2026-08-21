@@ -43,7 +43,7 @@ var
 begin
   Result := RegQueryStringValue(
     RootKey,
-    SubKey + '\\' + WebView2RuntimeClientId,
+    SubKey + '\' + WebView2RuntimeClientId,
     'pv',
     Version
   ) and (Version <> '');
@@ -52,9 +52,9 @@ end;
 function IsWebView2Installed(): Boolean;
 begin
   Result :=
-    HasWebView2Runtime(HKLM32, 'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients') or
-    HasWebView2Runtime(HKLM64, 'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients') or
-    HasWebView2Runtime(HKCU, 'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients');
+    HasWebView2Runtime(HKLM32, 'SOFTWARE\Microsoft\EdgeUpdate\Clients') or
+    HasWebView2Runtime(HKLM64, 'SOFTWARE\Microsoft\EdgeUpdate\Clients') or
+    HasWebView2Runtime(HKCU, 'SOFTWARE\Microsoft\EdgeUpdate\Clients');
 end;
 
 function InitializeSetup(): Boolean;

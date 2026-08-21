@@ -69,8 +69,10 @@ function Stop-ProcessTree {
 
 try {
     $version = (& agent-browser --version).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "agent-browser 0.34.0") {
-        throw "Expected agent-browser 0.34.0, received '$version'."
+    if ($LASTEXITCODE -ne 0) { throw "agent-browser is not available." }
+    $parsed = [Version](($version -replace '^agent-browser\s+', '') -replace '-.*$', '')
+    if ($parsed -lt [Version]"0.34.0") {
+        throw "Expected agent-browser 0.34.0 or newer, received '$version'."
     }
 
     New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null

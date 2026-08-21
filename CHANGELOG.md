@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Session pinning to keep important sessions at the top of the library.
+- Session deletion from the session library.
+- Automatic session naming.
+- Audio level metering with a per-channel histogram.
+- Session search.
+- Infinite scroll in the session history.
+
 ## [0.1.0] - 2026-08-19
 
 ### Added
