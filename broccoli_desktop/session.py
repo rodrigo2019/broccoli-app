@@ -64,6 +64,21 @@ class CaptureChoices:
     system_device_id: str
 
 
+class _RunReclaimed(Exception):
+    """Internal signal: a concurrent stop() already finished while _open was
+    suspended on a network call, before this run had touched any state stop()
+    inspects (`_capture`, `_stream`).
+
+    Not a failure of this run -- the user's stop already won -- so it must
+    not be reported through the normal FAILED/DEVICE_SELECTION_REQUIRED
+    transitions the other `except` clauses in `_open` use. Caught by its own
+    clause, which ends whatever remote stream this run opened and re-raises
+    as the same `RuntimeError` the later capture-identity check already
+    raises for the same underlying scenario, so callers see one consistent
+    outcome regardless of which check caught it.
+    """
+
+
 class DesktopSessionController:
     """Coordinate capture, encoded audio transport, and local transcript events."""
 
@@ -250,6 +265,14 @@ class DesktopSessionController:
         # from before that queue is replaced.
         await self._cancel_tasks()
         self._reset_audio_queue()
+        # Captured after the bump above, not before: this is the generation
+        # this run owns. A concurrent stop() bumps it again (its own
+        # _reset_audio_queue() call) strictly before it can reach STOPPED, so
+        # a mismatch below reliably means stop() already finished tearing
+        # down a run that, from its perspective, had nothing to tear down yet
+        # -- self._stream and self._capture are both still unset at that
+        # check, exactly where stop() looks.
+        run_generation = self._run_generation
         stream = None
         remote_period_started = False
         try:
@@ -266,7 +289,20 @@ class DesktopSessionController:
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
-            previous_offset_ms = await self._resume_offset_ms(previous_session, resume_code)
+            previous_offset_ms, resumed_segment_count = await self._resume_state(
+                previous_session, resume_code
+            )
+            if self._run_generation != run_generation:
+                # A concurrent stop() finished while the line above was
+                # awaiting the network -- see _RunReclaimed. Checked here,
+                # before this run touches any state stop() looks at, rather
+                # than only relying on the capture-identity check further
+                # down: that check exists for the thread-hop window below,
+                # not this one, and letting this run construct a
+                # CaptureSession and open real WASAPI devices first just to
+                # discard them would be needless work on a run that has
+                # already lost.
+                raise _RunReclaimed
             self._set_pipeline(previous_offset_ms)
             summary = SessionSummary(
                 uuid_code=started.uuid_code,
@@ -277,7 +313,7 @@ class DesktopSessionController:
                 started_at=previous_session.started_at if previous_session else None,
                 ended_at=None,
                 device_label=self._device_label,
-                segment_count=previous_session.segment_count if previous_session else 0,
+                segment_count=resumed_segment_count,
                 is_live=True,
             )
             self._session = summary
@@ -300,6 +336,17 @@ class DesktopSessionController:
             # concurrent stop() -- which is why this keeps its own reference
             # to `capture` rather than only reading it back off `self` below.
             await asyncio.to_thread(capture.start)
+        except _RunReclaimed:
+            # No _stop_capture()/_clear_buffered_frames()/_set_state() here,
+            # unlike the clauses below: stop() already did all three (that is
+            # what the generation bump we just detected means), and this run
+            # never got far enough to touch any of that state itself --
+            # self._capture, self._session and self._stream are all still
+            # whatever they were before this open began. All that is left
+            # for this run to clean up is the remote stream it opened, which
+            # stop() could not have known about.
+            await self._close_open_stream(stream, remote_period_started)
+            raise RuntimeError("The session was stopped while it was starting.") from None
         except DeviceUnavailableError:
             await self._close_open_stream(stream, remote_period_started)
             self._stop_capture()
@@ -319,14 +366,20 @@ class DesktopSessionController:
             self._set_state(ConnectionState.FAILED, message="Unable to start the session.")
             raise
         if self._capture is not capture:
-            # capture.start() succeeded, but self._capture no longer points at
-            # the CaptureSession this run just opened: a concurrent stop()
-            # reclaimed the run while it was opening. _stop_capture() nulls
-            # self._capture (and stops this exact object) as the very first
-            # thing stop() does, off its own thread, so this can be true well
-            # before stop() finishes -- a run-generation counter bumped later
-            # in stop() would not reliably catch it, which is why this checks
-            # capture identity instead. Declaring STREAMING now would
+            # The second of two concurrent-stop checks in this method -- see
+            # _RunReclaimed above for the first, earlier one. Different
+            # mechanism on purpose: capture.start() succeeded, but
+            # self._capture no longer points at the CaptureSession this run
+            # just opened, meaning a concurrent stop() reclaimed the run
+            # while it was opening. _stop_capture() nulls self._capture (and
+            # stops this exact object) as the very first thing stop() does,
+            # off its own thread, so this can be true well before stop()
+            # finishes -- a run-generation counter bumped later in stop()
+            # would not reliably catch it *at this specific point*, which is
+            # why this checks capture identity instead. (The earlier
+            # generation check is reliable at its own, earlier point, before
+            # self._capture is touched at all -- see _RunReclaimed.)
+            # Declaring STREAMING now would
             # resurrect a session stop() is already tearing down, and starting
             # a sender/reader pair here would run them straight into the first
             # send() failure against a stream stop() is closing, with nobody
@@ -667,18 +720,26 @@ class DesktopSessionController:
         if capture is not None:
             capture.stop()
 
-    async def _resume_offset_ms(
+    async def _resume_state(
         self, previous_session: SessionSummary | None, resume_code: str | None
-    ) -> int:
-        """Where this run's captured audio must start counting from.
+    ) -> tuple[int, int]:
+        """Return `(base_offset_ms, segment_count)` for the run about to start.
 
-        Kept in-memory -- no round trip -- when this controller already had
-        the session open: `_pipeline.next_offset_ms` already accounts for
-        every frame captured so far this run. Opening a session from the
-        library gives this controller no history for it, so the base has to
-        come from what the backend already stored; without this, new speech
-        would land back at offset 0, on top of what the meeting already has
-        recorded there.
+        `base_offset_ms` is where this run's captured audio must start
+        counting from. Kept in-memory -- no round trip -- when this
+        controller already had the session open: `_pipeline.next_offset_ms`
+        already accounts for every frame captured so far this run. Opening a
+        session from the library gives this controller no history for it,
+        so the base has to come from what the backend already stored;
+        without this, new speech would land back at offset 0, on top of what
+        the meeting already has recorded there.
+
+        `segment_count` rides along on the same round trip rather than being
+        looked up separately: a library resume already has to fetch the
+        session's real segment count to compute `base_offset_ms` (the
+        cursor jump below needs it), so the local `SessionSummary` `_open`
+        builds afterward can use that real count instead of hardcoding 0
+        until new segments stream in over the live connection.
 
         Called only after the remote stream has confirmed which session it
         resumed (`started.uuid_code == resume_code`, checked by the caller),
@@ -688,11 +749,14 @@ class DesktopSessionController:
         `connect_stream` and the handshake read just above it.
         """
         if previous_session is not None and self._pipeline is not None:
-            return self._pipeline.next_offset_ms
+            return self._pipeline.next_offset_ms, previous_session.segment_count
         if resume_code is None:
-            return 0
+            return 0, 0
         remote_session = await self._remote.get_session(resume_code)
-        return await self._remote.last_segment_offset_ms(resume_code, remote_session.segment_count)
+        offset_ms = await self._remote.last_segment_offset_ms(
+            resume_code, remote_session.segment_count
+        )
+        return offset_ms, remote_session.segment_count
 
     def _set_pipeline(self, base_offset_ms: int) -> None:
         self._pipeline = AudioPipeline(base_offset_ms=base_offset_ms)

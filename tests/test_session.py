@@ -7,7 +7,7 @@ import pytest
 
 from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.events import EVENT_HISTORY_MAX, EventHub
-from broccoli_desktop.models import AudioFrame, ConnectionState, UiEvent
+from broccoli_desktop.models import AudioFrame, ConnectionState, SessionSummary, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
 from broccoli_desktop.remote import RemoteFailure, RemoteProtocolError, RemoteRequestError
 from broccoli_desktop.session import (
@@ -223,9 +223,13 @@ async def test_resuming_a_stored_session_starts_after_its_last_segment(
     fake_remote.seed_segments("history-1", count=250, last_ended_offset_ms=1_240_000)
     controller = DesktopSessionController(fake_remote, fake_capture)
 
-    await controller.resume("history-1", CaptureChoices("mic-1", "system-1"))
+    resumed = await controller.resume("history-1", CaptureChoices("mic-1", "system-1"))
 
     assert controller.pipeline_base_offset_ms == 1_240_000
+    # The count fetched to compute the offset above is reused here rather than
+    # discarded: a library resume used to hardcode 0, showing "0 segmentos" in
+    # the UI for a 250-segment meeting until new segments streamed in.
+    assert resumed.segment_count == 250
 
     await controller.stop()
 
@@ -247,6 +251,53 @@ async def test_resuming_a_stored_session_with_no_segments_makes_no_request(
     assert controller.pipeline_base_offset_ms == 0
 
     await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_landing_during_the_library_resume_lookup_does_not_resurrect_the_run(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """The library-resume offset lookup added an await between connect_stream
+    succeeding and this run touching any state stop() inspects. A stop()
+    landing in that window used to find self._capture and self._stream still
+    None -- both no-ops -- flip straight to STOPPED, and have nothing left to
+    do; without a check, this run would then sail on to STREAMING right over
+    it, and the remote stream it opened would never be told to end."""
+    fake_remote.seed_segments("history-1", count=250, last_ended_offset_ms=1_240_000)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    entered_get_session = asyncio.Event()
+    release_get_session = asyncio.Event()
+    real_get_session = fake_remote.get_session
+
+    async def blocking_get_session(uuid_code: str) -> SessionSummary:
+        entered_get_session.set()
+        await release_get_session.wait()
+        return await real_get_session(uuid_code)
+
+    fake_remote.get_session = blocking_get_session  # type: ignore[method-assign]
+
+    resume_task = asyncio.create_task(
+        controller.resume("history-1", CaptureChoices("mic-1", "system-1"))
+    )
+    await asyncio.wait_for(entered_get_session.wait(), timeout=1)
+    assert controller.state is ConnectionState.STARTING
+
+    await controller.stop()
+    assert controller.state is ConnectionState.STOPPED
+    assert controller._capture is None
+    assert controller._stream is None
+
+    release_get_session.set()
+
+    with pytest.raises(RuntimeError, match="stopped while it was starting"):
+        await asyncio.wait_for(resume_task, timeout=1)
+
+    assert controller.state is ConnectionState.STOPPED
+    assert controller._capture is None
+    assert controller._stream is None
+    assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[-1].closed is True
 
 
 @pytest.mark.asyncio
