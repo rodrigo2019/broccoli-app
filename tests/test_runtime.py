@@ -746,7 +746,7 @@ def test_server_start_failure_never_creates_a_window() -> None:
     assert result is None
     assert created_windows == []
     assert server.shutdown_calls == 1
-    assert dialog.errors == ["Broccoli Desktop could not start its local service."]
+    assert dialog.errors == ["O Broccoli Desktop não conseguiu iniciar o serviço local."]
 
 
 def test_window_start_failure_stops_the_loopback_server() -> None:
@@ -768,7 +768,7 @@ def test_window_start_failure_stops_the_loopback_server() -> None:
 
     assert result is None
     assert server.shutdown_calls == 1
-    assert dialog.errors == ["Broccoli Desktop could not open its window."]
+    assert dialog.errors == ["O Broccoli Desktop não conseguiu abrir a janela."]
 
 
 def test_production_server_rejects_a_missing_configured_websocket_path() -> None:

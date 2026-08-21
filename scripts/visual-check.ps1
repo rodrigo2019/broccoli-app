@@ -340,7 +340,7 @@ try {
     Invoke-Browser -BrowserArguments @("eval", "document.querySelector('#sessionTitle').value = '$overlongTitle'")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
-    Invoke-Browser -BrowserArguments @("wait", "--text", "The session title is invalid.")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "O t$([char]0x00ED)tulo da reuni$([char]0x00E3)o n$([char]0x00E3)o $([char]0x00E9) v$([char]0x00E1)lido.")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     $startEnabled = (Invoke-Browser -BrowserArguments @("is", "enabled", "#captureToggleButton") | Select-Object -Last 1).Trim()
     if ($startEnabled -ne "true") {

@@ -605,13 +605,15 @@
 
     source.addEventListener("device_error", (event) => {
       if (state.audioLevelSource !== source) return;
-      let detail = "Não foi possível iniciar o teste de áudio.";
+      let detail = null;
       try {
-        detail = JSON.parse(event.data).detail || detail;
+        detail = JSON.parse(event.data).detail || null;
       } catch {
         // Keep the generic message; the stream is ending either way.
       }
-      finishAudioTest(detail);
+      // `detail` is the API's English text, so it has to go through the same
+      // lookup as every other API error before it reaches the screen.
+      finishAudioTest(detail ? translateApiMessage(detail) : "Não foi possível iniciar o teste de áudio.");
       // The server closes the stream after this, and a completed stream is one
       // EventSource happily reopens -- which would retry the dead device on a
       // loop. Reopen the passive observer instead.
@@ -670,6 +672,27 @@
 
   // ------------------------------------------------------------------------ fetch
 
+  // The API keeps returning machine-readable English detail strings -- that is the
+  // right contract for an API. The interface is pt-BR, so the mapping lives here.
+  const API_MESSAGES = {
+    "The session title is invalid.": "O título da reunião não é válido.",
+    "A capture is active.": "Já existe uma captura em andamento.",
+    "Local host required.": "Esta ação só pode partir do aplicativo.",
+    "Local origin required.": "Esta ação só pode partir do aplicativo.",
+    "Local key required.": "Esta ação só pode partir do aplicativo.",
+  };
+
+  function translateApiMessage(detail) {
+    const message = API_MESSAGES[detail];
+    if (!message) {
+      // Every detail the table above does not cover lands here. The fallback
+      // has to say something a user can act on, and the gap has to stay
+      // discoverable instead of silently showing a generic toast forever.
+      console.warn(`Unmapped API error detail: ${JSON.stringify(detail)}`);
+    }
+    return message || "Não foi possível concluir a ação. Tente novamente.";
+  }
+
   async function localFetch(path, options = {}) {
     const response = await fetch(apiUrl(path), {
       headers: { "Content-Type": "application/json", ...apiHeaders(options.headers || {}) },
@@ -680,11 +703,17 @@
     }
     if (response.status === 401) closeAudioLevelStream();
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || "Não foi possível concluir esta ação.");
+    // The raw English detail travels on the error itself so reportError can
+    // route it through translateApiMessage -- a client-side validation error
+    // (already pt-BR) is not tagged and passes through untouched instead.
+    const error = new Error(payload.detail || "");
+    error.isApiDetail = true;
+    throw error;
   }
 
   function reportError(error) {
-    showNotification(error.message, "error");
+    const message = error?.isApiDetail ? translateApiMessage(error.message) : error.message;
+    showNotification(message, "error");
   }
 
   function setLoginError(message = "") {
@@ -2177,8 +2206,13 @@
       // route to ask.
       connectEvents();
     } catch (error) {
+      // "Authentication is required." is the wrong-token case, common enough to
+      // deserve its own wording; anything else routes through the same lookup
+      // reportError uses so no other API detail reaches the screen in English.
       setLoginError(
-        error.message === "Authentication is required." ? "Token inválido." : error.message,
+        error.message === "Authentication is required."
+          ? "Token inválido."
+          : translateApiMessage(error.message),
       );
       elements.tokenInput.focus();
     }

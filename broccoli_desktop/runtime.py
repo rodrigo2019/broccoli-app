@@ -96,7 +96,7 @@ class WindowsDialog:
 
         result = windll.user32.MessageBoxW(
             None,
-            "A capture is active. Stop it and quit Broccoli Desktop?",
+            "Há uma captura em andamento. Deseja pará-la e sair do Broccoli Desktop?",
             "Broccoli Desktop",
             0x00000024,
         )
@@ -419,11 +419,11 @@ def start_runtime(
     try:
         server = (server_factory or _create_production_server)(config)
     except RuntimeError:
-        runtime_dialog.show_error("Broccoli Desktop could not start its local service.")
+        runtime_dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
         return None
     if not server.start():
         server.shutdown()
-        runtime_dialog.show_error("Broccoli Desktop could not start its local service.")
+        runtime_dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
         return None
 
     runtime: DesktopRuntime | None = None
@@ -441,7 +441,7 @@ def start_runtime(
             server.shutdown()
         else:
             runtime.shutdown()
-        runtime_dialog.show_error("Broccoli Desktop could not open its window.")
+        runtime_dialog.show_error("O Broccoli Desktop não conseguiu abrir a janela.")
         return None
 
     previous_interrupt_handler = _install_interrupt_handler(runtime)

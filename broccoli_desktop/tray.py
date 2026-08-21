@@ -83,10 +83,10 @@ def build_system_tray(runtime: RuntimeProtocol) -> TrayController:
     from PIL import Image
 
     menu = pystray.Menu(
-        pystray.MenuItem("Show Broccoli Desktop", lambda _icon: controller.show_window()),
+        pystray.MenuItem("Abrir o Broccoli Desktop", lambda _icon: controller.show_window()),
         pystray.MenuItem(lambda _item: controller.status_text, None, enabled=False),
-        pystray.MenuItem("Stop capture", lambda _icon: controller.stop_capture()),
-        pystray.MenuItem("Quit", lambda _icon: controller.request_quit()),
+        pystray.MenuItem("Parar captura", lambda _icon: controller.stop_capture()),
+        pystray.MenuItem("Sair", lambda _icon: controller.request_quit()),
     )
     icon = pystray.Icon(
         "broccoli-desktop",
