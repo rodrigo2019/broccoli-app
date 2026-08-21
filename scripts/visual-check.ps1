@@ -163,6 +163,22 @@ try {
     if ($preLoginSettings[1] -ne $true -or $preLoginSettings[2] -ne $true) {
         throw "The pre-login settings screen showed sections that need an authenticated session."
     }
+    # focusScreen takes the screen's first heading, and #settingsView's first
+    # <h2> is "Dispositivos de áudio" -- inside the section the two checks
+    # above just confirmed is hidden. .focus() under a display:none ancestor is
+    # a silent no-op, and #loginView is hidden by the same render, so focus
+    # fell back to <body>: the next Tab restarted from the top of the document
+    # and a screen reader was told nothing had happened. The axe scan below
+    # cannot see this -- axe does not check focus management -- so this is the
+    # only guard the screen gets.
+    $settingsFocus = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const active = document.activeElement; return [active.tagName + '#' + active.id + '.' + active.className, document.getElementById('settingsView').contains(active), active.getClientRects().length > 0]; })()"
+    ) | ConvertFrom-Json
+    $settingsFocus = @($settingsFocus)
+    if ($settingsFocus[1] -ne $true -or $settingsFocus[2] -ne $true) {
+        throw "Opening the pre-login settings screen left focus on $($settingsFocus[0]) instead of a visible element inside it."
+    }
     # Expanded, so the four proxy fields are actually in the tree the scan
     # walks -- the post-login settings scan below runs while #proxyFields is
     # collapsed and structurally cannot see them.

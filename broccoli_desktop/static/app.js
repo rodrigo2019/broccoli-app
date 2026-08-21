@@ -818,13 +818,30 @@
    * from the top of a document with ~96 focusable elements -- about 82 of them
    * sidebar rows -- and a screen reader was told nothing had happened. The rename
    * dialog already does this correctly; this is the same behaviour everywhere
-   * else. */
+   * else.
+   *
+   * Every candidate is filtered for visibility, because a screen is not
+   * uniformly visible: renderView hides sections *inside* the screen it just
+   * showed. #settingsView is the case that proved it -- pre-login its first
+   * <h2> is "Dispositivos de áudio", inside the #settingsDevicesSection that
+   * renderView has just hidden, and .focus() inside a display:none ancestor is
+   * a silent no-op. #loginView is hidden by the same render, so focus fell
+   * back to <body>: exactly the defect this function exists to prevent, and
+   * the same rule the skip link already follows. getClientRects() is the check
+   * because it answers for the whole ancestor chain, not just this element's
+   * own class list, and an sr-only heading -- clipped, but laid out -- still
+   * counts as a target. */
   function focusScreen(container) {
     if (!container) return;
-    const heading = container.querySelector("h1, h2");
+    const shown = (element) => element.getClientRects().length > 0;
+    const heading = [...container.querySelectorAll("h1, h2")].find(shown);
     const target =
       heading ||
-      container.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      [
+        ...container.querySelectorAll(
+          "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+        ),
+      ].find(shown);
     if (!target) return;
     if (target === heading) target.setAttribute("tabindex", "-1");
     target.focus();
