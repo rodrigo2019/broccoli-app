@@ -31,6 +31,20 @@ jobs:
         run: .\scripts\check.ps1
       - name: Build onedir package
         run: .\scripts\package.ps1
+      - name: Verify the packaged tree carries its data files
+        shell: pwsh
+        run: |
+          $root = "dist/BroccoliDesktop/_internal/broccoli_desktop"
+          foreach ($required in @(
+            "static/app.js",
+            "static/index.html",
+            "static/output.css",
+            "static/vendor/bootstrap-icons/bootstrap-icons.css"
+          )) {
+            if (-not (Test-Path (Join-Path $root $required))) {
+              throw "Packaged build is missing $required"
+            }
+          }
       - name: Build Windows installer
         run: .\scripts\installer.ps1
       - name: Upload installer

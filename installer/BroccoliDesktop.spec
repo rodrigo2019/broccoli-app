@@ -7,7 +7,6 @@ import PyInstaller
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
-HOOKS_DIRECTORY = PROJECT_ROOT / "installer" / "hooks"
 APPLICATION_ICON = (
     Path(PyInstaller.__file__).resolve().parent / "bootloader" / "images" / "icon-windowed.ico"
 )
@@ -49,7 +48,6 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[str(HOOKS_DIRECTORY)],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

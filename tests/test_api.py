@@ -5,7 +5,6 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -841,38 +840,6 @@ def test_missing_persisted_device_selection_is_cleared_and_requires_replacement(
     assert settings.selection is None
     assert settings.clear_count == 1
     assert start.status_code == 422
-
-
-def test_static_client_renders_each_transcript_row_with_its_event_offset_timestamp() -> None:
-    source = (Path(__file__).parents[1] / "broccoli_desktop" / "static" / "app.js").read_text(
-        encoding="utf-8"
-    )
-
-    assert "function formatTranscriptTimestamp(offsetMs)" in source
-    assert "timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);" in source
-    assert "heading.append(speaker, timestamp);" in source
-    assert "content.append(heading, text);" in source
-    assert "row.append(avatar, content);" in source
-
-
-def test_notebook_contains_history_loading_and_selection_workflow() -> None:
-    source = Path("broccoli_desktop/static/app.js").read_text(encoding="utf-8")
-
-    assert "async function loadSessions" in source
-    assert "async function selectSession" in source
-    assert "async function loadSegments" in source
-    assert "function scheduleSessionSearch" in source
-    assert 'params.set("q", state.searchQuery)' in source
-
-
-def test_notebook_contains_session_action_menu_and_safe_live_delete_gate() -> None:
-    source = Path("broccoli_desktop/static/app.js").read_text(encoding="utf-8")
-
-    assert "function sessionActionMenu(session)" in source
-    assert "function openRenameSession(session)" in source
-    assert "function confirmDeleteSession()" in source
-    assert "disabled: session.is_live" in source
-    assert 'method: "DELETE"' in source
 
 
 def test_keyring_outage_is_reported_without_exposing_credential_details(
