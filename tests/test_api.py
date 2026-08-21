@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
+import pathlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -11,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+import broccoli_desktop
 from broccoli_desktop.api import (
     Services,
     _audio_level_events,
@@ -1871,3 +1874,109 @@ async def test_default_proxy_prober_succeeds_for_a_non_407_response(
     )
 
     assert result is True
+
+
+def _backend_error_details() -> set[str]:
+    """Every `detail` string this application can put on the wire.
+
+    Derived from the source rather than listed here, because a hand-kept list
+    rots exactly the way the table it checks did: the next ApiError is added,
+    nobody remembers the list, and the guard goes on passing. Three shapes
+    cover every producer -- `ApiError(status, "...")`, any `{"detail": "..."}`
+    literal (the exception handlers' JSONResponses, `_remote_unavailable`, and
+    the SSE `device_error` payload), and a `detail=` keyword (the capability
+    middleware's `_reject`). Whole package, not just api.py, so moving a detail
+    into another module cannot quietly drop it out of the check.
+    """
+    details: set[str] = set()
+    for path in sorted(pathlib.Path(broccoli_desktop.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "detail"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ):
+                        details.add(value.value)
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id == "ApiError":
+                    details.update(
+                        argument.value
+                        for argument in node.args
+                        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                    )
+                details.update(
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "detail"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                )
+    return details
+
+
+def _translated_error_details(source: str) -> set[str]:
+    """Read the keys of app.js's API_MESSAGES out of the file itself.
+
+    A string literal is a key when the next non-space character after it is a
+    `:` -- unambiguous inside an object literal, where values are followed by a
+    comma or the closing brace -- which is what lets this survive the comments
+    and the wrapped multi-line entries the table actually contains.
+    """
+    opening = "const API_MESSAGES = {"
+    start = source.index(opening) + len(opening)
+    depth = 1
+    index = start
+    while depth:
+        depth += {"{": 1, "}": -1}.get(source[index], 0)
+        index += 1
+    body = source[start : index - 1]
+
+    keys: set[str] = set()
+    position = 0
+    while position < len(body):
+        if body.startswith("//", position):
+            position = body.index("\n", position) + 1
+            continue
+        if body[position] != '"':
+            position += 1
+            continue
+        characters: list[str] = []
+        cursor = position + 1
+        while body[cursor] != '"':
+            if body[cursor] == "\\":
+                characters.append(body[cursor + 1])
+                cursor += 2
+                continue
+            characters.append(body[cursor])
+            cursor += 1
+        cursor += 1
+        after = cursor
+        while body[after].isspace():
+            after += 1
+        if body[after] == ":":
+            keys.add("".join(characters))
+        position = cursor
+    return keys
+
+
+def test_every_error_detail_the_backend_can_send_has_a_portuguese_message(
+    tokened_client: TestClient,
+) -> None:
+    """The table was right, and nothing was keeping it right.
+
+    translateApiMessage falls back to a generic toast and reports the gap with
+    console.warn -- which the visual gate's `errors --json` check does not
+    collect. Emptying API_MESSAGES entirely leaves the suite green, so the next
+    ApiError silently reopens the finding that fifteen of twenty-two details
+    reached a pt-BR surface untranslated. Both sides are derived from source, so
+    this cannot be satisfied by editing a list in this file.
+    """
+    details = _backend_error_details()
+    translated = _translated_error_details(tokened_client.get("/static/app.js").text)
+
+    # Both extractors have to have found something: two empty sets are equal.
+    assert len(details) >= 20
+    assert details == translated
