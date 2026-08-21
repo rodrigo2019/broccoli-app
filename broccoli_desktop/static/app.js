@@ -872,6 +872,9 @@
     // Same reasoning covers the settings screen, where #mainView is hidden too.
     elements.skipLink.classList.toggle("hidden", !state.authenticated || settingsOpen);
     elements.settingsView.classList.toggle("hidden", !settingsOpen);
+    // The dock only has a box once #mainView is on screen, so this is the
+    // first moment it can be measured at all -- see measureCaptureDock.
+    if (!elements.mainView.classList.contains("hidden")) measureCaptureDock();
     // Audio devices and appearance both act on an authenticated session (the
     // device endpoints answer 401 without one), so the pre-login visit shows
     // only the network section it was opened for.
@@ -1736,17 +1739,30 @@
    * moment the panel changed height at a breakpoint. Measuring it means the last
    * line is never the one hidden behind the controls.
    */
+  /**
+   * Publish the dock's real height so .capture-view can reserve room for it.
+   *
+   * Called from renderView() as well as from the observer below, and that is
+   * the point: at boot the dock sits inside a hidden #mainView, so it has no
+   * box and this measures 0. Everything then depended on the ResizeObserver
+   * delivering a callback when the element gained a box -- and the CSS
+   * fallback it falls back to, 5.5rem, is 88px against a dock that measures
+   * 92px, so the reservation was riding on the extra 2rem of slack rather than
+   * on any measurement. Measuring again the moment the view is shown does not
+   * need the observer to be right.
+   */
+  function measureCaptureDock() {
+    const height = elements.captureDock.getBoundingClientRect().height;
+    if (height) document.documentElement.style.setProperty("--capture-dock-height", `${height}px`);
+  }
+
   function watchCaptureDockHeight() {
-    const apply = () => {
-      const height = elements.captureDock.getBoundingClientRect().height;
-      if (height) document.documentElement.style.setProperty("--capture-dock-height", `${height}px`);
-    };
     if ("ResizeObserver" in window) {
-      new ResizeObserver(apply).observe(elements.captureDock);
+      new ResizeObserver(measureCaptureDock).observe(elements.captureDock);
       return;
     }
-    apply();
-    window.addEventListener("resize", apply);
+    measureCaptureDock();
+    window.addEventListener("resize", measureCaptureDock);
   }
 
   function scheduleSessionSearch() {

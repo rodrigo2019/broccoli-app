@@ -27,9 +27,19 @@
       })();
     </script>
   </head>
-  <body class="min-h-screen bg-base-100 text-base-content">
+  <!--
+    h-screen, not min-h-screen, all the way down to .drawer-content.
+    min-height lets the column grow past the viewport, so every flex-1
+    descendant sizes to its content and the inner overflow-y-auto on
+    #transcriptTimeline never gets a height to overflow within: the *page*
+    scrolled instead, scrollTop on the timeline was a silent no-op (its
+    scrollHeight equalled its clientHeight), and .capture-view's
+    padding-bottom reserved space below the fold rather than above the fixed
+    capture dock. One unbounded chain, both symptoms.
+  -->
+  <body class="h-screen overflow-hidden bg-base-100 text-base-content">
     <a id="skipLink" href="#mainView" class="skip-link hidden" data-testid="skip-to-main">Pular para o conteúdo</a>
-    <div class="app-shell drawer lg:drawer-open min-h-screen">
+    <div class="app-shell drawer lg:drawer-open h-screen">
       <div class="app-shell__backdrop" aria-hidden="true">
         <span class="app-shell__blob app-shell__blob--one"></span>
         <span class="app-shell__blob app-shell__blob--two"></span>
@@ -40,7 +50,7 @@
 
       <input id="drawer-toggle" type="checkbox" class="drawer-toggle" />
 
-      <div class="drawer-content flex min-h-screen min-w-0 flex-col">
+      <div class="drawer-content flex h-screen min-h-0 min-w-0 flex-col overflow-hidden">
         <header class="app-topbar header sticky top-0 z-10 flex min-h-16 items-center justify-between gap-4 border-b px-4 py-3 transition-all duration-300 sm:px-6">
           <div class="header-content flex min-w-0 items-center gap-2">
             <label for="drawer-toggle" class="btn-menu-toggle drawer-button btn btn-ghost btn-sm lg:hidden" aria-label="Alternar barra lateral">
@@ -129,7 +139,7 @@
           <form method="dialog" class="modal-backdrop"><button aria-label="Fechar">fechar</button></form>
         </dialog>
 
-        <section id="loginView" class="hero flex-1 px-4 py-12 sm:px-6 lg:px-8">
+        <section id="loginView" class="hero min-h-0 flex-1 overflow-y-auto px-4 py-12 sm:px-6 lg:px-8">
           <div class="hero-content w-full max-w-xl p-0">
             <div class="card w-full border border-base-content/10 bg-base-100/80 shadow-2xl backdrop-blur-xl">
               <div class="card-body gap-5 p-6 sm:p-8">
