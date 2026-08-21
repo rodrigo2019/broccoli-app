@@ -139,6 +139,41 @@ try {
     Invoke-Browser -BrowserArguments @("wait", "--text", "Entrar")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "login.png"))
+    # The login screen never had an axe scan, so the token field's accessible
+    # name -- the whole point of the fieldset/legend/aria-labelledby work --
+    # had no regression guard beyond string assertions, which a typo breaking
+    # the id pairing while keeping both substrings would pass.
+    Assert-NoAccessibilityViolations -Screen "the login screen"
+
+    # /api/settings is deliberately unauthenticated because a corporate proxy
+    # can be what stands between this window and the login request itself. That
+    # is only true if the panel opens before signing in, which it did not: the
+    # sidebar entry point lives in a footer hidden until authentication, and
+    # showSettings returned early.
+    Invoke-Browser -BrowserArguments @("find", "testid", "network-settings", "click")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Conex$([char]0x00E3)o")
+    $preLoginSettings = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "['settingsView', 'settingsDevicesSection', 'settingsAppearanceSection'].map((id) => document.getElementById(id).classList.contains('hidden'))"
+    ) | ConvertFrom-Json
+    $preLoginSettings = @($preLoginSettings)
+    if ($preLoginSettings[0] -ne $false) {
+        throw "The settings screen did not open before login."
+    }
+    if ($preLoginSettings[1] -ne $true -or $preLoginSettings[2] -ne $true) {
+        throw "The pre-login settings screen showed sections that need an authenticated session."
+    }
+    # Expanded, so the four proxy fields are actually in the tree the scan
+    # walks -- the post-login settings scan below runs while #proxyFields is
+    # collapsed and structurally cannot see them.
+    Invoke-Browser -BrowserArguments @("find", "testid", "proxy-toggle", "click")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Assert-NoAccessibilityViolations -Screen "the pre-login network settings screen"
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "settings-pre-login.png"))
+    Invoke-Browser -BrowserArguments @("find", "testid", "proxy-toggle", "click")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Voltar para o login")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Entrar")
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
     Invoke-Browser -BrowserArguments @("find", "testid", "token-input", "fill", "bad-token")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
@@ -350,6 +385,10 @@ try {
     Invoke-Browser -BrowserArguments @("eval", "document.getElementById('proxyUsername').value = 'visual-user'") | Out-Null
     Invoke-Browser -BrowserArguments @("find", "testid", "proxy-password", "fill", $fakeProxyPassword)
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    # The settings scan above ran with #proxyFields still collapsed, so it could
+    # not see these four fields at all -- the gate structurally could not catch
+    # a wrong accessible name on any of them. This one can.
+    Assert-NoAccessibilityViolations -Screen "the settings screen with the proxy panel expanded"
     Invoke-Browser -BrowserArguments @("find", "testid", "test-proxy", "click")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Conex$([char]0x00E3)o bem-sucedida.")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "settings-proxy-dark.png"))
@@ -496,11 +535,18 @@ try {
         "eval",
         "localStorage.setItem('broccoli-desktop-settings', JSON.stringify({ proxyPassword: 'legacy-scrub-sentinel' }))"
     ) | Out-Null
-    # A bare reload would hit the URL app.js already stripped the launch key
-    # from, and the loopback API refuses every /api/* request without it --
-    # reopening the same launch URL is what a real relaunch would do instead.
-    Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/?k=visual-capability-token")
+    # Deliberately the stripped URL, with no key on it: F5/Ctrl-R is enabled by
+    # default in WebView2, a renderer crash reloads, and the context menu offers
+    # it. This used to brick the window -- the shell still rendered, every
+    # /api/* answered 403 and the event socket closed with 1008, with nothing on
+    # screen saying so. Reaching the capture screen here is the whole test: it
+    # means the bootstrap arrived, which means the key was recovered.
+    Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
+    $reloadedUrl = Invoke-Browser -BrowserArguments @("eval", "location.href") | ConvertFrom-Json
+    if ($reloadedUrl -match "[?&]k=") {
+        throw "The reload under test carried a launch key in the URL, so it proved nothing: $reloadedUrl"
+    }
     $legacyKeyRemaining = (Invoke-Browser -BrowserArguments @(
         "eval",
         "localStorage.getItem('broccoli-desktop-settings')"
@@ -520,10 +566,17 @@ try {
     # to write to -- the proxy password must never reach *any* key, and this
     # also has to catch the panel's own legacy key if an old value from before
     # this feature ever got scrubbed on load.
-    $storageCheck = "(() => { const keys = Object.keys(localStorage); const hasInStorage = (needle) => keys.some((key) => (localStorage.getItem(key) || '').includes(needle)); return [document.documentElement.innerText.includes('visual-test-token'), hasInStorage('visual-test-token'), sessionStorage.length, document.documentElement.innerText.includes('visual-capability-token'), document.documentElement.innerText.includes('$fakeProxyPassword'), hasInStorage('$fakeProxyPassword')]; })()"
+    # sessionStorage is no longer required to be empty: the launch key lives
+    # there for the life of the window, which is what makes a reload survivable.
+    # It is required to hold that one key and nothing else, and neither storage
+    # may ever carry the access token or the proxy password.
+    $storageCheck = "(() => { const secrets = ['visual-test-token', '$fakeProxyPassword']; const inStore = (store, needle) => Object.keys(store).some((key) => (store.getItem(key) || '').includes(needle)); return [document.documentElement.innerText.includes('visual-test-token'), inStore(localStorage, 'visual-test-token'), Object.keys(sessionStorage).join(','), document.documentElement.innerText.includes('visual-capability-token'), document.documentElement.innerText.includes('$fakeProxyPassword'), inStore(localStorage, '$fakeProxyPassword'), secrets.some((needle) => inStore(sessionStorage, needle))]; })()"
     $storage = Invoke-Browser -BrowserArguments @("eval", $storageCheck) | ConvertFrom-Json
-    if (@($storage).Count -ne 6 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0 -or $storage[3] -ne $false -or $storage[4] -ne $false -or $storage[5] -ne $false) {
+    if (@($storage).Count -ne 7 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[3] -ne $false -or $storage[4] -ne $false -or $storage[5] -ne $false -or $storage[6] -ne $false) {
         throw "The browser retained fake credential data in page text or web storage."
+    }
+    if ($storage[2] -ne "broccoli-desktop-launch-key") {
+        throw "sessionStorage held something other than the launch key alone: '$($storage[2])'."
     }
     $passed = $true
 } finally {
