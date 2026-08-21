@@ -12,6 +12,7 @@ dependencies = [
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "keyring==25.7.0",
+    "numpy==2.5.2",
     "PyAudioWPatch==0.2.12.8",
     "pyinstaller==6.22.2",
     "pystray==0.19.5",
