@@ -5,13 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
-from math import sqrt
 from queue import Empty, Full, Queue
-from struct import iter_unpack
 from threading import Event, RLock, Thread, current_thread
 from time import monotonic
 from typing import Literal, Protocol
 
+import numpy
 import pyaudiowpatch
 
 from broccoli_desktop.models import CaptureEvent, DeviceDescriptor
@@ -441,12 +440,19 @@ class AudioLevelMonitor:
 
 
 def _pcm_level(pcm: bytes) -> float:
-    """Compute an RMS amplitude from PCM16 without retaining the sample data."""
-    if len(pcm) < 2:
-        return 0.0
+    """Compute an RMS amplitude from PCM16 without retaining the sample data.
+
+    numpy is already in the process via soxr; the pure-Python loop this
+    replaces ran over ~96,000 samples/second across both channels. ``count``
+    truncates a trailing odd byte the same way the old slice did, and the
+    float32 cast happens before squaring so 16-bit samples never wrap the way
+    they would if squared in an integer dtype.
+    """
     sample_count = len(pcm) // 2
-    sum_squares = sum(sample * sample for (sample,) in iter_unpack("<h", pcm[: sample_count * 2]))
-    return min(1.0, sqrt(sum_squares / sample_count) / 32_768)
+    if sample_count == 0:
+        return 0.0
+    samples = numpy.frombuffer(pcm, dtype="<i2", count=sample_count).astype(numpy.float32)
+    return float(min(1.0, numpy.sqrt(numpy.mean(numpy.square(samples))) / 32_768))
 
 
 class CaptureSession:

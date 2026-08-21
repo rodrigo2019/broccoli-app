@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import sqrt
+from struct import iter_unpack, pack
 from threading import Event
 
 import pytest
@@ -12,7 +14,9 @@ from broccoli_desktop.capture import (
     CaptureSession,
     DeviceUnavailableError,
     PyAudioCaptureBackend,
+    _pcm_level,
 )
+from broccoli_desktop.models import CaptureEvent
 from tests.fakes import FakeCaptureBackend, FakePyAudio
 
 
@@ -321,6 +325,39 @@ def test_device_loss_is_not_dropped_when_the_pcm_queue_is_full(fake_pyaudio: Fak
     assert device_lost.wait(timeout=1)
 
 
+def test_a_device_lost_mid_stream_reaches_the_controller_through_the_real_backend(
+    fake_pyaudio: FakePyAudio,
+) -> None:
+    """The paAbort / status_flags branch at capture.py's callback is otherwise
+    only exercised as a side effect of the queue-full backpressure test above.
+    This isolates it: PyAudioCaptureBackend really is what turns PortAudio
+    status flags into a DeviceUnavailableError, and CaptureSession really is
+    what turns that into a device_lost CaptureEvent -- nothing here goes
+    through FakeCaptureBackend/FakeCaptureHandle.lose_device()'s shortcut."""
+    device_lost = Event()
+    events: list[CaptureEvent] = []
+    backend = PyAudioCaptureBackend(fake_pyaudio)
+    devices = backend.list_devices()
+
+    def record_event(event: CaptureEvent) -> None:
+        events.append(event)
+        device_lost.set()
+
+    session = CaptureSession(
+        backend,
+        devices[0].device_id,
+        devices[1].device_id,
+        lambda _, __: None,
+        on_event=record_event,
+    )
+    session.start()
+
+    fake_pyaudio.streams[0].raise_input_overflow_then_device_removed()
+
+    assert device_lost.wait(timeout=1)
+    assert [event.type for event in events] == ["device_lost"]
+
+
 def test_consumer_failure_stops_capture_without_misreporting_device_loss(
     fake_pyaudio: FakePyAudio,
 ) -> None:
@@ -347,3 +384,57 @@ def test_consumer_failure_stops_capture_without_misreporting_device_loss(
     assert processed.wait(timeout=1)
     assert not device_lost.wait(timeout=0.1)
     assert all(stream.closed for stream in fake_pyaudio.streams)
+
+
+def _reference_rms_level(pcm: bytes) -> float:
+    """The RMS definition ``_pcm_level`` must still satisfy, kept here as an
+    independent oracle instead of re-importing the implementation under test:
+    a signed 16-bit little-endian RMS, normalized by 32768 (not 32767), any
+    trailing odd byte silently dropped, clamped to 1.0."""
+    sample_count = len(pcm) // 2
+    if sample_count == 0:
+        return 0.0
+    sum_squares = sum(sample * sample for (sample,) in iter_unpack("<h", pcm[: sample_count * 2]))
+    return min(1.0, sqrt(sum_squares / sample_count) / 32_768)
+
+
+def _pseudo_random_pcm16(count: int) -> bytes:
+    """A deterministic, non-repeating block of int16 samples without random.py."""
+    return pack(f"<{count}h", *(((index * 2654435761) % 65536) - 32768 for index in range(count)))
+
+
+@pytest.mark.parametrize(
+    "pcm",
+    [
+        pytest.param(b"", id="empty_buffer"),
+        pytest.param(b"\x01", id="single_byte_below_one_sample"),
+        pytest.param(pack("<h", 0), id="single_zero_sample"),
+        pytest.param(pack("<h", -32768), id="single_min_sample"),
+        pytest.param(pack("<h", 32767), id="single_max_sample"),
+        pytest.param(b"\x00" * BLOCK_BYTES, id="silent_full_block"),
+        pytest.param(
+            pack(f"<{BLOCK_FRAMES}h", *([-32768] * BLOCK_FRAMES)), id="full_scale_negative"
+        ),
+        pytest.param(
+            pack(f"<{BLOCK_FRAMES}h", *([32767] * BLOCK_FRAMES)), id="full_scale_positive"
+        ),
+        pytest.param(
+            pack("<3h", 1000, -2000, 3000) + b"\x7f", id="odd_length_trailing_byte_dropped"
+        ),
+        pytest.param(
+            _pseudo_random_pcm16(BLOCK_FRAMES) + b"\x7f",
+            id="odd_length_full_block_trailing_byte_dropped",
+        ),
+        pytest.param(_pseudo_random_pcm16(BLOCK_FRAMES), id="pseudo_random_full_block"),
+    ],
+)
+def test_pcm_level_matches_the_rms_definition_it_replaced(pcm: bytes) -> None:
+    assert _pcm_level(pcm) == pytest.approx(_reference_rms_level(pcm), abs=1e-6)
+
+
+def test_pcm_level_never_exceeds_unity_at_full_scale() -> None:
+    assert _pcm_level(pack(f"<{BLOCK_FRAMES}h", *([-32768] * BLOCK_FRAMES))) == 1.0
+
+
+def test_pcm_level_is_exactly_zero_for_silence() -> None:
+    assert _pcm_level(b"\x00" * BLOCK_BYTES) == 0.0

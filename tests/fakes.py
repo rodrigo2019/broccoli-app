@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
+import pyaudiowpatch
+
 from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.models import (
     DeviceDescriptor,
@@ -667,6 +669,20 @@ class FakePyAudioStream:
 
     def emit(self, pcm: bytes, status_flags: int = 0) -> None:
         self.callback(pcm, len(pcm) // 2, {}, status_flags)
+
+    def raise_input_overflow_then_device_removed(self) -> None:
+        """Drive the real capture.py status-flag branch the way WASAPI does
+        mid-stream: a transient input-overflow flag, immediately followed by
+        the flags PortAudio keeps reporting once the endpoint itself is gone.
+
+        PortAudio's callback has no dedicated "device removed" bit -- both a
+        benign xrun and an actual disappearance arrive through the same
+        status_flags word, which is exactly what the production callback at
+        capture.py inspects with `if status_flags:`. The second call reuses
+        real overflow/underflow flags to model that repeated-xrun signature.
+        """
+        self.callback(b"", 0, {}, pyaudiowpatch.paInputOverflow)
+        self.callback(b"", 0, {}, pyaudiowpatch.paInputOverflow | pyaudiowpatch.paInputUnderflow)
 
     def stop_stream(self) -> None:
         self.stopped = True
