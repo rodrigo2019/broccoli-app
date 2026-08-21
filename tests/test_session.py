@@ -676,6 +676,137 @@ async def test_capture_teardown_from_a_remote_end_does_not_freeze_the_event_loop
     assert fake_capture.closed_sources == {"mic-1", "system-1"}
 
 
+class ParkedCaptureTeardown:
+    """Hold one capture handle's close() open.
+
+    The teardown hop is only observable while it is still in progress: it is
+    the window between "the loop is free again" and "this run is over" that the
+    resurrection tests below are about. Parking a close is what holds that
+    window open long enough to hand a frame through it.
+
+    Patched at construction, before the event that triggers the teardown is
+    emitted, because the patch has to be in place by the time the reader
+    reaches it.
+    """
+
+    def __init__(self, fake_capture: FakeCaptureBackend) -> None:
+        self._closing = threading.Event()
+        self._release = threading.Event()
+        handle = fake_capture.handles["mic-1"]
+        inner_close = handle.close
+
+        def blocking_close() -> None:
+            self._closing.set()
+            assert self._release.wait(timeout=5), "the test never released the close"
+            inner_close()
+
+        handle.close = blocking_close  # type: ignore[method-assign]
+
+    async def wait_until_parked(self) -> None:
+        parked = await asyncio.to_thread(self._closing.wait, 5)
+        assert parked, "teardown never reached handle.close"
+
+    def release(self) -> None:
+        self._release.set()
+
+
+async def offer_one_frame_during(controller: DesktopSessionController) -> None:
+    """Hand a single frame over the way the capture thread does, then give the
+    loop room for everything it could set in motion -- the sender's dequeue, a
+    failing send, and the whole of _recover if the controller lets it start."""
+    controller._schedule_forward(frame_at(0))
+    for _ in range(500):
+        await asyncio.sleep(0)
+
+
+# Two hops in flight: the parked capture teardown and the test's own wait on it.
+@pytest.mark.parametrize("default_executor_workers", [4])
+@pytest.mark.asyncio
+async def test_a_frame_offered_while_a_remote_end_tears_down_cannot_reopen_the_session(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend, fake_clock: FakeClock
+) -> None:
+    """Taking the capture teardown off the loop put a suspension point inside
+    _end_from_remote, and the stream detach sat *after* it.
+
+    For the ~2 seconds of the join the loop is free, the state still reads
+    STREAMING and self._stream still points at the socket the backend has just
+    closed. The sender dequeues a frame, sends on it, the send fails, and
+    _forward_frame's handler calls _recover -- which has no state guard at
+    entry, so it opens a *second* remote stream resuming a session the backend
+    already ended. The window then says "Transmitindo" with no capture behind
+    it: silent audio loss, which this file's own comments call its worst
+    outcome.
+
+    _handle_device_loss has always detached the stream before hopping, which is
+    exactly why it was never exposed to this.
+    """
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    parked = ParkedCaptureTeardown(fake_capture)
+    # The socket the backend just closed: a send on it fails, which is what
+    # sends _forward_frame into _recover.
+    fake_remote.streams[0].fail_send = True
+    await fake_remote.emit_ended()
+    await parked.wait_until_parked()
+    await offer_one_frame_during(controller)
+
+    # One stream for the whole run: the frame found nothing to send on, so
+    # nothing failed, so _recover was never reached.
+    assert len(fake_remote.streams) == 1
+    assert controller.state is not ConnectionState.RECONNECTING
+    # ...because the detach happens before the hop, and the teardown it hopped
+    # for is still parked right now.
+    assert controller._stream is None
+    assert controller._recovery_stream is None
+
+    parked.release()
+    reader = controller._reader_task
+    assert reader is not None
+    await reader
+
+    assert controller.state is ConnectionState.STOPPED
+    assert controller._stream is None
+    assert len(fake_remote.streams) == 1
+
+
+# Two hops in flight: the parked capture teardown and the test's own wait on it.
+@pytest.mark.parametrize("default_executor_workers", [4])
+@pytest.mark.asyncio
+async def test_a_frame_offered_while_a_remote_failure_tears_down_cannot_reopen_the_session(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend, fake_clock: FakeClock
+) -> None:
+    """The same race as the remote-end case, through the other door.
+
+    _fail_from_remote is what a credit denial, a duration limit and a remote
+    failure all land in, and it had the same teardown-before-detach ordering.
+    Resurrecting a session the backend refused to keep funding is worse than
+    resurrecting one that merely ended.
+    """
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    parked = ParkedCaptureTeardown(fake_capture)
+    fake_remote.streams[0].fail_send = True
+    await fake_remote.emit_credit_denied()
+    await parked.wait_until_parked()
+    await offer_one_frame_during(controller)
+
+    assert len(fake_remote.streams) == 1
+    assert controller.state is not ConnectionState.RECONNECTING
+    assert controller._stream is None
+    assert controller._recovery_stream is None
+
+    parked.release()
+    reader = controller._reader_task
+    assert reader is not None
+    await reader
+
+    assert controller.state is ConnectionState.FAILED
+    assert controller._stream is None
+    assert len(fake_remote.streams) == 1
+
+
 @pytest.mark.asyncio
 async def test_a_second_concurrent_start_is_refused_rather_than_racing_the_first(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend

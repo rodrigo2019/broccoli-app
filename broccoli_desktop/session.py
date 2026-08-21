@@ -642,11 +642,20 @@ class DesktopSessionController:
             self._recovery_active = False
 
     async def _end_from_remote(self) -> None:
-        await self._stop_capture_off_loop()
-        self._clear_buffered_frames()
+        # Detached first, then the hop -- the order _handle_device_loss uses,
+        # and for the same reason. _stop_capture_off_loop joins two daemon
+        # workers on a thread, so it leaves the loop free for ~2 seconds while
+        # this method is only half done. A self._stream still set across that
+        # window is a socket the backend has already closed: the sender
+        # dequeues a frame, sends on it, the send fails, and _forward_frame's
+        # handler calls _recover -- which has no state guard at entry and would
+        # open a second remote stream resuming the session that just ended.
+        # Cleared beforehand, the same frame finds no stream and is dropped.
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
+        await self._stop_capture_off_loop()
+        self._clear_buffered_frames()
         if stream is not None:
             await self._close_stream(stream)
         self._set_state(ConnectionState.STOPPED)
@@ -654,11 +663,14 @@ class DesktopSessionController:
     async def _fail_from_remote(
         self, message: str = "The remote session could not continue."
     ) -> None:
-        await self._stop_capture_off_loop()
-        self._clear_buffered_frames()
+        # Detached before the teardown hop, for the reason spelled out in
+        # _end_from_remote: a stream left reachable across that window lets a
+        # queued frame reconnect a session the remote has just refused.
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
+        await self._stop_capture_off_loop()
+        self._clear_buffered_frames()
         if stream is not None:
             await self._close_stream(stream)
         self._set_state(ConnectionState.FAILED, message=message)
