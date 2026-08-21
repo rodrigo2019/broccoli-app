@@ -51,8 +51,9 @@ uninstaller. Microsoft Edge WebView2 Runtime must already be installed; the
 installer stops before installation when it is unavailable.
 
 The packaged application uses the exact backend WebSocket path provided by the
-backend owner. Do not include a token, remote endpoint, or production transcript
-in build inputs, CI configuration, or release artifacts.
+backend owner. The production hostname is embedded in the client by design (see
+`config.py`); do not include a token or a production transcript in build
+inputs, CI configuration, or release artifacts.
 
 ## Backend WebSocket configuration
 

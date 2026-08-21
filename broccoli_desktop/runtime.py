@@ -610,6 +610,19 @@ def _configured_websocket_path(path: str | None) -> str:
 
 
 def _available_loopback_port() -> int:
+    """Reserve a free loopback port, then release it for uvicorn to rebind.
+
+    The release and uvicorn's later bind cannot be atomic, so another process
+    can claim the same port in between. Retry the reservation once on
+    ``OSError`` rather than letting one bad draw fail the whole startup.
+    """
+    try:
+        return _reserve_loopback_port()
+    except OSError:
+        return _reserve_loopback_port()
+
+
+def _reserve_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
         reservation.bind((LOOPBACK_HOST, 0))
         return int(reservation.getsockname()[1])

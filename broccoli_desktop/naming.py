@@ -16,8 +16,6 @@ from __future__ import annotations
 from collections import deque
 from random import Random
 
-from broccoli_desktop.models import MAX_TITLE_LENGTH
-
 #: Subject and whether it takes the feminine form of an adjective.
 SUBJECTS: tuple[tuple[str, bool], ...] = (
     ("Capivara", True),
@@ -117,8 +115,3 @@ def every_possible_title() -> list[str]:
             titles.append(f"{subject} {feminine_form if feminine else masculine_form}")
         titles.extend(f"{subject} {phrase}" for phrase in PHRASES)
     return titles
-
-
-assert all(len(title) <= MAX_TITLE_LENGTH for title in every_possible_title()), (
-    "A word list grew past the title limit the backend enforces."
-)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import socket
 import sys
 import threading
 import time
@@ -19,6 +20,7 @@ from broccoli_desktop.runtime import (
     DesktopRuntime,
     PyWebViewWindow,
     UvicornLoopbackServer,
+    _available_loopback_port,
     _configured_websocket_path,
     _create_production_server,
     start_browser_only,
@@ -799,6 +801,62 @@ def test_production_server_rejects_a_websocket_path_with_a_query_or_fragment() -
 def test_production_server_accepts_a_normalized_absolute_websocket_path() -> None:
     """The backend-provided path is preserved when it has no URL components."""
     assert _configured_websocket_path("/backend/listening/") == "/backend/listening/"
+
+
+def test_loopback_port_probe_retries_once_then_starts_cleanly(monkeypatch: Any) -> None:
+    """A racy first reservation must not sink startup: one retry is enough."""
+    attempts = 0
+    real_socket = socket.socket
+
+    class FlakyOnce:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._socket = real_socket(*args, **kwargs)
+
+        def bind(self, address: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                self._socket.close()
+                raise OSError("the port probe raced another process")
+            self._socket.bind(address)
+
+        def getsockname(self) -> Any:
+            return self._socket.getsockname()
+
+        def __enter__(self) -> FlakyOnce:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self._socket.close()
+
+    monkeypatch.setattr(socket, "socket", FlakyOnce)
+
+    port = _available_loopback_port()
+
+    assert attempts == 2
+    assert 1 <= port <= 65535
+
+
+def test_loopback_port_probe_gives_up_after_one_retry(monkeypatch: Any) -> None:
+    """The retry is bounded to one: a second consecutive failure still surfaces."""
+
+    class AlwaysFails:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def bind(self, address: Any) -> None:
+            raise OSError("the port probe raced another process")
+
+        def __enter__(self) -> AlwaysFails:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+    monkeypatch.setattr(socket, "socket", AlwaysFails)
+
+    with raises(OSError, match="raced"):
+        _available_loopback_port()
 
 
 def test_health_endpoint_is_local_and_dependency_free() -> None:

@@ -12,6 +12,13 @@ does not alter the backend, delete retained records, or put credentials in files
 - A human operator supplies local administrator credentials only through the headed browser UI.
 - Agent-browser 0.34.0 is installed. Do not use a Chrome profile, `--restore`, a state file, HAR,
   video recording, browser auto-connect, or a non-loopback desktop endpoint.
+- **Known gap:** the local API now requires every `/api/*` request to carry a capability token
+  generated fresh at each launch (Origin check plus `X-Broccoli-Key` or a `?k=` query parameter —
+  see `runtime.py`'s `UvicornLoopbackServer`). The native runtime reads this from `window_url` and
+  the page strips it from the address bar; `broccoli_desktop.browser_only` does not currently print
+  or otherwise expose it, so step 3 below cannot succeed against the app as it stands today without
+  a code change to surface the token to the operator. This is a known, unresolved gap, not a step to
+  work around by guessing at the value.
 
 Start the controlled processes in one PowerShell terminal and leave it running until acceptance is
 finished:

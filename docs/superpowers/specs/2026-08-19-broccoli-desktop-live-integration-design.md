@@ -36,6 +36,14 @@ segmentos, título remoto ou histórico reutilizável. As rotas HTTP de
 Listening existentes são intencionalmente autenticadas por cookie e não são
 um contrato do cliente desktop.
 
+Atualização: o backend desktop token-autenticado descrito acima já existe
+hoje — `GET /api/listening/desktop/sessions/`, `GET
+/api/listening/desktop/sessions/<uuid_code>/segments/` e `PATCH
+/api/listening/desktop/sessions/<uuid_code>/` (ver "External backend
+prerequisites" em `2026-08-19-broccoli-desktop-design.md`). O parágrafo
+acima registra o estado observado nesta integração pontual contra o backend
+local, não o estado atual do contrato.
+
 ## Design do aplicativo
 
 ### Adaptador remoto e sessão
@@ -59,31 +67,37 @@ transcrição é persistido pelo desktop. Falha de autenticação no handshake o
 durante a leitura remove a credencial do Windows Credential Manager e retorna
 à tela de login.
 
-### Capacidades da interface local
+### Capacidades da interface local (histórico: gating removido)
 
-O bootstrap local publica `capabilities`:
+Esta seção descrevia originalmente um bootstrap que publicava um objeto
+`capabilities` (`history`, `remote_title`, `user_resume`,
+`segment_history`), todas `false`, porque o backend local usado nesta
+integração pontual ainda não oferecia lista de sessões, leitura de
+segmentos ou título remoto autenticados por token. Sob esse esquema, o
+Caderno de reunião mostrava apenas captura, seleção de dispositivos,
+indicador de transmissão, código da sessão ativa, parar e a timeline ao
+vivo; biblioteca, busca, "carregar mais", retomar e edição de título
+apareciam desabilitados com a explicação "Histórico não disponível neste
+backend", e as rotas locais correspondentes respondiam `409`.
 
-```json
-{
-  "history": false,
-  "remote_title": false,
-  "user_resume": false,
-  "segment_history": false
-}
-```
+Esse esquema de bootstrap não existe mais no código. O contrato confirmado
+em "External backend prerequisites"
+(`2026-08-19-broccoli-desktop-design.md`) já cobre as três rotas acima, e o
+desktop as usa incondicionalmente: biblioteca, busca, "carregar mais",
+retomar uma sessão da biblioteca e editar o título remoto estão sempre
+disponíveis, sem nenhuma verificação de capacidade prévia — não há mais
+`capabilities` no bootstrap nem resposta `409` de capacidade indisponível.
+Uma nova captura continua abrindo uma sessão nova por padrão; retomar uma
+sessão da biblioteca é uma ação explícita do usuário, distinta da
+recuperação automática do mesmo socket via `resume`, que continua existindo
+como reconexão.
 
-Com essas capacidades, o Caderno de reunião mostra captura, seleção de
-dispositivos, indicador de transmissão, código da sessão ativa, parar e a
-timeline ao vivo. Biblioteca, busca, carregar mais, retomar, edição de título
-e carregamento de segmentos anteriores aparecem desabilitados com a explicação
-"Histórico não disponível neste backend". Uma nova captura sempre começa uma
-sessão nova. A recuperação automática do mesmo socket continua usando
-`resume`; ela não é a funcionalidade de retomar histórico da UI.
-
-As rotas locais que representavam capacidades ausentes são removidas do uso da
-UI e deixam de acionar o remoto. O servidor local ainda expõe login, bootstrap,
-dispositivos, iniciar, parar e eventos. Respostas de capacidade indisponível
-usam `409` com mensagem segura se chamadas antigas chegarem à API.
+Não confundir com o token de capacidade (`capability_token`, cabeçalho
+`X-Broccoli-Key`, parâmetro de consulta `k`) que a API local hoje exige em
+toda rota `/api/*`: esse é um mecanismo de autenticação por processo local,
+adicionado depois desta integração para impedir que outro processo na
+máquina alcance a API só por conhecer a porta. Não tem relação com o
+esquema de feature-gating descrito acima.
 
 ### Modo browser-only e aceitação real
 
@@ -131,8 +145,9 @@ PCM, áudio ou HAR.
    canal; a contagem local é atualizada.
 4. Reconectar preserva offsets locais e recupera a sessão ativa sem vazar
    áudio de outra sessão.
-5. A UI não tenta biblioteca, título ou histórico contra endpoints que não
-   fazem parte do contrato do token.
+5. A UI usa biblioteca, título remoto e histórico de segmentos apenas contra
+   as rotas confirmadas em "External backend prerequisites" — não há mais
+   gating de capacidade a validar aqui.
 6. A execução local com agent-browser completa o login de plataforma, a
    criação segura de token, o login do app, a captura de áudio do sistema e a
    comprovação de ao menos um segmento não vazio.
