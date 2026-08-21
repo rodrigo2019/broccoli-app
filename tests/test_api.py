@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from tests.fakes import (
     FakeSessionRemote,
     visual_test_remote,
 )
-from tests.visual_server import create_visual_app
+from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
 
 
 @dataclass
@@ -130,20 +131,31 @@ def client(services: Services) -> TestClient:
     return TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
 
 
-def login(client: TestClient, token: str = "candidate") -> None:
-    response = client.post("/api/login", json={"token": token})
+@pytest.fixture
+def tokened_client(services: Services) -> Iterator[TestClient]:
+    services.capability_token = "launch-key"
+    with TestClient(create_app(services), headers={"host": "127.0.0.1:8765"}) as client:
+        yield client
 
+
+def login(client: TestClient, *, key: str | None = None) -> None:
+    headers = {"X-Broccoli-Key": key} if key else {}
+    response = client.post("/api/login", json={"token": "test-token"}, headers=headers)
     assert response.status_code == 204
 
 
 def login_with_visual_token(client: TestClient) -> None:
     """Authenticate an in-process visual server with its fixed fake-only credential."""
-    response = client.post("/api/login", json={"token": VISUAL_TEST_TOKEN})
+    response = client.post(
+        "/api/login",
+        json={"token": VISUAL_TEST_TOKEN},
+        headers={"X-Broccoli-Key": VISUAL_CAPABILITY_TOKEN},
+    )
 
     assert response.status_code == 204
 
 
-def bootstrap_payload(client: TestClient) -> dict:
+def bootstrap_payload(client: TestClient, *, key: str | None = None) -> dict:
     """Read the snapshot the event socket sends on connect.
 
     The bootstrap has one home now: opening the socket is how the UI learns
@@ -153,7 +165,8 @@ def bootstrap_payload(client: TestClient) -> dict:
     reconnect, and it is what caught the gap between the handler speaking and
     the handler listening -- see ``_send_events``.
     """
-    with client.websocket_connect("/api/events") as websocket:
+    path = f"/api/events?k={key}" if key else "/api/events"
+    with client.websocket_connect(path) as websocket:
         message = websocket.receive_json()
         websocket.close()
 
@@ -166,7 +179,7 @@ def test_fake_bootstrap_exposes_the_same_device_contract() -> None:
     client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
     login_with_visual_token(client)
 
-    payload = bootstrap_payload(client)
+    payload = bootstrap_payload(client, key=VISUAL_CAPABILITY_TOKEN)
 
     assert payload["authenticated"] is True
     assert [device["kind"] for device in payload["devices"]] == ["mic", "system"]
@@ -291,8 +304,8 @@ def test_bootstrap_carries_the_devices_the_first_screen_needs(
         "state": "idle",
         "session": None,
     }
-    assert "candidate" not in str(payload)
-    assert fake_credentials.token == "candidate"
+    assert "test-token" not in str(payload)
+    assert fake_credentials.token == "test-token"
 
 
 def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestClient) -> None:
@@ -853,6 +866,54 @@ def test_a_request_without_an_origin_is_allowed(client: TestClient) -> None:
     login(client)
 
     assert client.get("/api/devices").status_code == 200
+
+
+def test_the_api_requires_the_capability_token(tokened_client: TestClient) -> None:
+    """Origin stops a web page. It does not stop another process on the machine,
+    which sends no Origin at all -- that is what this token is for."""
+    login(tokened_client, key="launch-key")
+
+    without = tokened_client.get("/api/devices")
+    with_key = tokened_client.get("/api/devices", headers={"X-Broccoli-Key": "launch-key"})
+
+    assert without.status_code == 403
+    assert without.json() == {"detail": "Local key required."}
+    assert with_key.status_code == 200
+
+
+def test_the_api_accepts_the_capability_token_as_a_query_parameter(
+    tokened_client: TestClient,
+) -> None:
+    """EventSource cannot set headers either, so the audio-level stream and any
+    other request the UI cannot attach a header to falls back to `?k=`."""
+    login(tokened_client, key="launch-key")
+
+    response = tokened_client.get("/api/devices?k=launch-key")
+
+    assert response.status_code == 200
+
+
+def test_the_shell_and_its_assets_do_not_require_the_token(
+    tokened_client: TestClient,
+) -> None:
+    """The page has to boot before it can present a key."""
+    assert tokened_client.get("/").status_code == 200
+    assert tokened_client.get("/static/app.js").status_code == 200
+
+
+def test_the_event_socket_requires_the_capability_token(
+    tokened_client: TestClient,
+) -> None:
+    login(tokened_client, key="launch-key")
+
+    with pytest.raises(WebSocketDisconnect) as rejection:
+        with tokened_client.websocket_connect("/api/events") as websocket:
+            websocket.receive_json()
+
+    assert rejection.value.code == 1008
+
+    with tokened_client.websocket_connect("/api/events?k=launch-key") as websocket:
+        assert websocket.receive_json()["type"] == "bootstrap"
 
 
 def test_event_socket_sends_a_safe_bootstrap_then_one_way_ui_events(

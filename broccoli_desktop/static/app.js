@@ -1,6 +1,30 @@
 (() => {
   "use strict";
 
+  // The launch key arrives once, in the URL the native window opened. Read it,
+  // then strip it from the address bar so it is not sitting in a visible URL for
+  // the rest of the session. It never goes to storage and never leaves loopback.
+  const CAPABILITY_KEY = new URLSearchParams(window.location.search).get("k") || "";
+  if (CAPABILITY_KEY) {
+    const clean = window.location.pathname + window.location.hash;
+    window.history.replaceState(null, "", clean);
+  }
+
+  function apiHeaders(extra = {}) {
+    return CAPABILITY_KEY ? { ...extra, "X-Broccoli-Key": CAPABILITY_KEY } : { ...extra };
+  }
+
+  function apiUrl(path) {
+    return path;
+  }
+
+  // WebSocket cannot set a header either, so the key travels the same way here:
+  // as a query parameter, over loopback only.
+  function socketUrl(path) {
+    const base = `ws://${window.location.host}${path}`;
+    return CAPABILITY_KEY ? `${base}?k=${encodeURIComponent(CAPABILITY_KEY)}` : base;
+  }
+
   const elements = {
     loginView: document.querySelector("#loginView"),
     mainView: document.querySelector("#mainView"),
@@ -558,7 +582,13 @@
   function connectAudioLevels(deviceTest = null) {
     if (!state.authenticated || !("EventSource" in window)) return;
     closeAudioLevelStream();
-    const query = deviceTest ? `?${new URLSearchParams(deviceTest)}` : "";
+    // EventSource cannot set a header, so the key rides along as a query
+    // parameter here too -- alongside any device-test parameters already in
+    // play, not in place of them. (Unlike socketUrl, this keeps the http(s)
+    // scheme EventSource requires; a ws:// URL is not a valid one for it.)
+    const params = new URLSearchParams(deviceTest || {});
+    if (CAPABILITY_KEY) params.set("k", CAPABILITY_KEY);
+    const query = params.toString() ? `?${params.toString()}` : "";
     const source = new EventSource(`/api/audio-levels/stream${query}`);
     state.audioLevelSource = source;
 
@@ -639,8 +669,8 @@
   // ------------------------------------------------------------------------ fetch
 
   async function localFetch(path, options = {}) {
-    const response = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    const response = await fetch(apiUrl(path), {
+      headers: { "Content-Type": "application/json", ...apiHeaders(options.headers || {}) },
       ...options,
     });
     if (response.ok) {
@@ -1715,8 +1745,7 @@
 
   function connectEvents() {
     state.eventSocket?.close();
-    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${window.location.host}/api/events`);
+    const socket = new WebSocket(socketUrl("/api/events"));
     state.eventSocket = socket;
     socket.addEventListener("open", () => {
       state.eventRetryDelay = 0;

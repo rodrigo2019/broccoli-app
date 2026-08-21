@@ -29,7 +29,7 @@ from tests.fakes import (
     FakeCaptureBackend,
     visual_test_remote_factory,
 )
-from tests.visual_server import create_visual_app
+from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
 
 
 @dataclass
@@ -150,6 +150,7 @@ class FakeServer:
     started: bool = False
     shutdown_calls: int = 0
     url: str = "http://127.0.0.1:45678"
+    window_url: str = "http://127.0.0.1:45678/?k=fake-capability-token"
 
     def start(self) -> bool:
         self.started = True
@@ -705,6 +706,23 @@ def test_loopback_server_reports_when_a_coroutine_cannot_run_on_its_event_loop()
     assert ran is False
 
 
+def test_the_runtime_always_produces_a_capability_token() -> None:
+    """The None escape hatch exists for the visual runner. If the production
+    path could reach it, the hatch would be the hole."""
+    server = UvicornLoopbackServer(
+        lambda port: Services(
+            credentials=FakeCredentials(),
+            remote_factory=visual_test_remote_factory(),
+            capture_backend=FakeCaptureBackend(),
+            loopback_port=port,
+        )
+    )
+
+    assert server.capability_token
+    assert len(server.capability_token) >= 32
+    assert server.window_url.endswith(f"/?k={server.capability_token}")
+
+
 def test_server_start_failure_never_creates_a_window() -> None:
     """A failed health check must report locally and avoid opening the desktop UI."""
     server = FakeServer(healthy=False)
@@ -803,8 +821,12 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
     """Browser QA must use its fixed local remote, devices, and transcript seed only."""
     client = TestClient(create_visual_app(port=8765), headers={"host": "127.0.0.1:8765"})
 
-    login = client.post("/api/login", json={"token": VISUAL_TEST_TOKEN})
-    with client.websocket_connect("/api/events") as websocket:
+    login = client.post(
+        "/api/login",
+        json={"token": VISUAL_TEST_TOKEN},
+        headers={"X-Broccoli-Key": VISUAL_CAPABILITY_TOKEN},
+    )
+    with client.websocket_connect(f"/api/events?k={VISUAL_CAPABILITY_TOKEN}") as websocket:
         bootstrap = websocket.receive_json()["bootstrap"]
 
     assert login.status_code == 204

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import signal
 import socket
 import threading
@@ -77,6 +78,7 @@ class LoopbackServerProtocol(Protocol):
     """Managed loopback server with a controller available after local login."""
 
     url: str
+    window_url: str
     controller: SessionProtocol | None
 
     def start(self) -> bool: ...
@@ -138,7 +140,12 @@ class UvicornLoopbackServer:
         self, services_factory: Callable[[int], Services], *, port: int | None = None
     ) -> None:
         self._port = _available_loopback_port() if port is None else _validated_loopback_port(port)
+        # Generated here, not left to whatever the factory happens to pass in,
+        # so the production path can never produce a server with no key --
+        # test_the_runtime_always_produces_a_capability_token is what checks that.
+        self._capability_token = secrets.token_urlsafe(32)
         self._services = services_factory(self._port)
+        self._services.capability_token = self._capability_token
         self._server = uvicorn.Server(
             create_uvicorn_config(create_app(self._services), port=self._port)
         )
@@ -149,6 +156,16 @@ class UvicornLoopbackServer:
     @property
     def url(self) -> str:
         return f"http://{LOOPBACK_HOST}:{self._port}"
+
+    @property
+    def capability_token(self) -> str:
+        return self._capability_token
+
+    @property
+    def window_url(self) -> str:
+        """The URL the native window opens. Carries the launch key once; app.js
+        strips it from the address bar as soon as it has read it."""
+        return f"{self.url}/?k={self._capability_token}"
 
     @property
     def controller(self) -> SessionProtocol | None:
@@ -412,7 +429,7 @@ def start_runtime(
     runtime: DesktopRuntime | None = None
     try:
         create_window = window_factory or _create_pywebview_window
-        window = create_window("Broccoli Desktop", server.url)
+        window = create_window("Broccoli Desktop", server.window_url)
         create_tray = tray_factory or _create_system_tray
         tray = create_tray_placeholder(create_tray, runtime_dialog, server, window)
         runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=runtime_dialog)

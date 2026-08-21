@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qs
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -73,6 +75,10 @@ class Services:
     remote_factory: RemoteFactory
     capture_backend: CaptureBackend
     loopback_port: int | None = None
+    #: None skips the check entirely -- production always sets a random one
+    #: (see LoopbackServer); this exists so tests/visual_server.py can pin a
+    #: known value instead.
+    capability_token: str | None = None
     controller_factory: ControllerFactory = DesktopSessionController
     device_settings: DeviceSettings = field(default_factory=InMemoryDeviceSettings)
     session_titles: SessionTitleGenerator = field(default_factory=SessionTitleGenerator)
@@ -194,10 +200,11 @@ class SessionUpdateRequest(BaseModel):
 class LoopbackHostMiddleware:
     """Reject Host headers that could expose this UI outside its local origin."""
 
-    def __init__(self, app: Any, *, port: int | None) -> None:
+    def __init__(self, app: Any, *, port: int | None, capability_token: str | None = None) -> None:
         self.app = app
         self._allowed_hosts = {"localhost", LOOPBACK_HOST}
         self._allowed_origins: set[str] = set()
+        self._capability_token = capability_token
         if port is not None:
             self._allowed_hosts.update({f"localhost:{port}", f"{LOOPBACK_HOST}:{port}"})
             self._allowed_origins.update(
@@ -232,6 +239,22 @@ class LoopbackHostMiddleware:
         if origin and origin.lower() not in self._allowed_origins:
             await self._reject(scope, send, status=403, detail="Local origin required.")
             return
+        # Origin stops a web page the user happens to be visiting. It does not
+        # stop another process on the machine, which sends no Origin at all --
+        # this per-launch key is what closes that gap. / and /static/* are the
+        # shell and its assets: no data, and the page cannot present a key
+        # before it has loaded the script that reads one. Neither WebSocket nor
+        # EventSource can set a request header, so a missing header falls back
+        # to the `k` query parameter for every /api/* request, not only sockets.
+        if self._capability_token and scope.get("path", "").startswith("/api/"):
+            presented = self._header(scope, b"x-broccoli-key")
+            if not presented:
+                presented = parse_qs(scope.get("query_string", b"").decode("latin-1")).get(
+                    "k", [""]
+                )[0]
+            if not secrets.compare_digest(presented, self._capability_token):
+                await self._reject(scope, send, status=403, detail="Local key required.")
+                return
         await self.app(scope, receive, send)
 
     async def _reject(self, scope: dict[str, Any], send: Any, *, status: int, detail: str) -> None:
@@ -261,7 +284,11 @@ def create_uvicorn_config(app: FastAPI, *, port: int) -> uvicorn.Config:
 def create_app(services: Services) -> FastAPI:
     """Create the loopback JSON API with only injectable local dependencies."""
     app = FastAPI()
-    app.add_middleware(LoopbackHostMiddleware, port=services.loopback_port)
+    app.add_middleware(
+        LoopbackHostMiddleware,
+        port=services.loopback_port,
+        capability_token=services.capability_token,
+    )
     app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
 
     @app.exception_handler(ApiError)

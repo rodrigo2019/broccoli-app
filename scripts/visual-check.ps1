@@ -103,7 +103,7 @@ try {
     $seededSessionCount = 45
     $finalSegmentText = "we should ship"
 
-    Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/")
+    Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/?k=visual-capability-token")
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
     Invoke-Browser -BrowserArguments @("set", "media", "light")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Entrar")
@@ -312,7 +312,10 @@ try {
     )
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("set", "media", "dark")
-    Invoke-Browser -BrowserArguments @("reload")
+    # A bare reload would hit the URL app.js already stripped the launch key
+    # from, and the loopback API refuses every /api/* request without it --
+    # reopening the same launch URL is what a real relaunch would do instead.
+    Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/?k=visual-capability-token")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-stopped-dark.png"))
@@ -322,8 +325,8 @@ try {
         throw "Browser console errors were reported: $errorsJson"
     }
     Assert-NoAccessibilityViolations -Screen "the dark capture screen"
-    $storage = Invoke-Browser -BrowserArguments @("eval", "[document.documentElement.innerText.includes('visual-test-token'), localStorage.getItem('broccoli-desktop-settings')?.includes('visual-test-token') ?? false, sessionStorage.length]") | ConvertFrom-Json
-    if (@($storage).Count -ne 3 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0) {
+    $storage = Invoke-Browser -BrowserArguments @("eval", "[document.documentElement.innerText.includes('visual-test-token'), localStorage.getItem('broccoli-desktop-settings')?.includes('visual-test-token') ?? false, sessionStorage.length, document.documentElement.innerText.includes('visual-capability-token')]") | ConvertFrom-Json
+    if (@($storage).Count -ne 4 -or $storage[0] -ne $false -or $storage[1] -ne $false -or $storage[2] -ne 0 -or $storage[3] -ne $false) {
         throw "The browser retained fake credential data in page text or web storage."
     }
     $passed = $true

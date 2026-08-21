@@ -15,6 +15,10 @@ from tests.fakes import (
     visual_test_remote_factory,
 )
 
+#: Fixed so scripts/visual-check.ps1 can open the page with a key. The
+#: production path generates a random one per launch; test_runtime asserts it.
+VISUAL_CAPABILITY_TOKEN = "visual-capability-token"
+
 
 @dataclass
 class VisualCredentials:
@@ -46,6 +50,7 @@ def create_visual_app(*, port: int):
             remote_factory=visual_test_remote_factory(),
             capture_backend=capture_backend,
             loopback_port=port,
+            capability_token=VISUAL_CAPABILITY_TOKEN,
         )
     )
 
