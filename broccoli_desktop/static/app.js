@@ -729,6 +729,8 @@
     // Authentication and the local-origin guards.
     "A credential is required.": "Informe o token de acesso.",
     "Authentication is required.": "Faça login novamente para continuar.",
+    "The account has no Listening credit available.": "Sua conta está sem créditos para transcrição. Fale com o administrador do seu workspace.",
+    "The session reached its maximum duration.": "A reunião atingiu a duração máxima permitida.",
     "Credential storage is unavailable.": "O armazenamento de credenciais não está disponível.",
     "Local host required.": "Esta ação só pode partir do aplicativo.",
     "Local origin required.": "Esta ação só pode partir do aplicativo.",

@@ -308,6 +308,11 @@ class HttpListeningRemote:
         except Exception as error:
             if _handshake_status_code(error) in {401, 403}:
                 raise RemoteUnauthorizedError from None
+            # A refusal that arrives as a close code rather than an HTTP status
+            # carries the actual reason -- no credit, over the duration limit --
+            # and collapsing it into RemoteRequestError threw that away.
+            if _close_code(error) is not None:
+                _raise_safe_remote_error(error)
             raise RemoteRequestError from None
         return _WebSocketRemoteStream(socket)
 

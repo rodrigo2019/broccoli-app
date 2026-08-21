@@ -44,6 +44,8 @@ from broccoli_desktop.naming import SessionTitleGenerator
 from broccoli_desktop.remote import (
     ListeningRemote,
     RemoteConflictError,
+    RemoteCreditError,
+    RemoteDurationError,
     RemoteError,
     RemoteNotFoundError,
     RemoteProtocolError,
@@ -634,6 +636,27 @@ def create_app(services: Services) -> FastAPI:
         _request: Request, _error: RemoteValidationError
     ) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": "The session changes are invalid."})
+
+    @app.exception_handler(RemoteCreditError)
+    async def remote_credit_handler(_request: Request, _error: RemoteCreditError) -> JSONResponse:
+        # 402: the request was understood and the credential is fine -- there is
+        # simply nothing left to spend. Without this handler the refusal fell
+        # through to a 500, and before the platform started sending a readable
+        # close code it reached the window as "authentication failed", which
+        # sent people off to re-enter a token that was never the problem.
+        return JSONResponse(
+            status_code=402,
+            content={"detail": "The account has no Listening credit available."},
+        )
+
+    @app.exception_handler(RemoteDurationError)
+    async def remote_duration_handler(
+        _request: Request, _error: RemoteDurationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "The session reached its maximum duration."},
+        )
 
     @app.exception_handler(RemoteRequestError)
     async def remote_request_handler(_request: Request, _error: RemoteRequestError) -> JSONResponse:
