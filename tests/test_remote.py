@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 import httpx
 import pytest
@@ -31,6 +32,10 @@ class FakeTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, json=self.responses.pop(0), request=request)
 
 
+#: "connect_stream was never called" -- distinct from any value it could pass.
+_UNSET = object()
+
+
 @dataclass
 class FakeSocket:
     received: list[str] = field(default_factory=list)
@@ -54,10 +59,17 @@ class FakeSocketFactory:
     socket: FakeSocket = field(default_factory=FakeSocket)
     url: str | None = None
     headers: dict[str, str] | None = None
-    proxy: str | None = None
+    #: Mirrors websockets.connect's own signature, where True is the default
+    #: ("use the environment proxies") and None means "disable proxying".
+    #: _UNSET distinguishes "never called" from "called with True".
+    proxy: str | Literal[True] | None | object = _UNSET
 
     async def __call__(
-        self, url: str, *, additional_headers: dict[str, str], proxy: str | None = None
+        self,
+        url: str,
+        *,
+        additional_headers: dict[str, str],
+        proxy: str | Literal[True] | None = True,
     ) -> FakeSocket:
         self.url = url
         self.headers = additional_headers
@@ -413,6 +425,29 @@ async def test_the_websocket_stream_is_opened_through_the_configured_proxy(
     await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
 
     assert fake_socket_factory.proxy == "http://user:pass@proxy.local:8080"
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_proxy_leaves_environment_proxying_alone(
+    fake_socket_factory: FakeSocketFactory,
+) -> None:
+    """`websockets.connect(proxy=None)` means *disable proxy support*, not "no
+    proxy configured" -- its default is True. Forwarding an unset proxy as None
+    would silently switch off HTTPS_PROXY/WSS_PROXY for every user who never
+    opened the settings panel, and leave the audio transport disagreeing with
+    the HTTP client, whose trust_env still honours the same variables.
+    """
+    remote = HttpListeningRemote(
+        "https://broccoli.example",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=fake_socket_factory,
+    )
+
+    await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+
+    assert fake_socket_factory.proxy is not None
+    assert fake_socket_factory.proxy is True
 
 
 @pytest.mark.asyncio

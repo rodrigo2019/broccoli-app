@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -213,6 +213,21 @@ class HttpListeningRemote:
         """The proxy URL this credential's requests are routed through, if any."""
         return self._proxy
 
+    def _websocket_proxy(self) -> str | Literal[True]:
+        """Resolve what ``websockets.connect`` should be told about proxies.
+
+        ``websockets.connect`` signs its argument ``proxy: str | Literal[True] |
+        None = True``, and ``None`` there means *disable proxy support*, not
+        "no proxy configured". Passing ``self._proxy`` straight through would
+        therefore switch off ``HTTPS_PROXY``/``WSS_PROXY`` for every user who
+        never opened the settings panel -- a regression against the code that
+        simply omitted the argument -- and would leave the audio transport
+        disagreeing with the HTTP client, which still honours the environment
+        through httpx's own ``trust_env``. So an unconfigured proxy restores
+        the library default instead of suppressing it.
+        """
+        return self._proxy if self._proxy is not None else True
+
     async def aclose(self) -> None:
         """Release the pooled connections once this credential is done with."""
         client, self._client = self._client, None
@@ -288,7 +303,7 @@ class HttpListeningRemote:
                     title=title,
                 ),
                 additional_headers={"Authorization": _authorization_header(self._token)},
-                proxy=self._proxy,
+                proxy=self._websocket_proxy(),
             )
         except Exception as error:
             if _handshake_status_code(error) in {401, 403}:
@@ -301,6 +316,16 @@ class HttpListeningRemote:
 
         One client per request meant a fresh TLS handshake for every call --
         paid once per page while walking a long meeting's segments.
+
+        ``transport`` and ``proxy`` are mutually exclusive in practice: httpx
+        mounts a proxy transport that takes precedence over the ``transport``
+        injected here, so a caller that sets both gets the proxy and silently
+        loses the stub -- a test wired that way would reach the real network
+        instead of its fake. Production sets only ``proxy`` and tests set only
+        ``transport``; nothing should set both. Leaving ``proxy=None`` here
+        when unset is correct for httpx (unlike websockets, see
+        ``_websocket_proxy``): ``trust_env`` still applies, so the environment
+        proxy is honoured.
         """
         if self._client is None:
             self._client = httpx.AsyncClient(
