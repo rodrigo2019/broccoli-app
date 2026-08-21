@@ -677,6 +677,36 @@ async def test_capture_teardown_from_a_remote_end_does_not_freeze_the_event_loop
 
 
 @pytest.mark.asyncio
+async def test_a_second_concurrent_start_is_refused_rather_than_racing_the_first(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """The guard at the top of _open and the move to STARTING have to stay
+    free of any await between them.
+
+    _cancel_tasks already documents this -- it is deliberately placed after
+    STARTING so that waiting on a previous run's sender cannot open a window
+    for a second caller to walk past the guard. The device enumeration this
+    method now takes has to obey the same rule, and it is the kind of line
+    that reads as harmless setup and drifts upward.
+    """
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    first = asyncio.create_task(
+        controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    )
+    second = asyncio.create_task(
+        controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    )
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    refused = [result for result in results if isinstance(result, RuntimeError)]
+    assert len(refused) == 1
+    assert "already active" in str(refused[0])
+    assert len(fake_remote.streams) == 1
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_the_audio_sender_survives_a_failure_outside_the_frame_handler(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

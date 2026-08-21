@@ -294,13 +294,6 @@ class DesktopSessionController:
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
-        # One enumeration for this whole start, from the cache when the API
-        # layer gave this controller its lookup. It used to be three: this label
-        # resolution and CaptureSession's constructor both went straight to the
-        # backend on the event loop, and CaptureSession.start() took a third on
-        # its worker thread.
-        device_labels = {device.device_id: device.label for device in await self._list_devices()}
-        self._device_label = device_labels.get(choices.system_device_id, choices.system_device_id)
         self._set_state(ConnectionState.STARTING)
         # After STARTING, so that waiting on a previous run's sender cannot open
         # a window for a second caller to walk past the guard above. A run that
@@ -319,6 +312,22 @@ class DesktopSessionController:
         # -- self._stream and self._capture are both still unset at that
         # check, exactly where stop() looks.
         run_generation = self._run_generation
+        # One enumeration for this whole start, from the cache when the API
+        # layer gave this controller its lookup. It used to be three: the label
+        # resolution below and CaptureSession's constructor both went straight
+        # to the backend on the event loop, and CaptureSession.start() took a
+        # third on its worker thread.
+        #
+        # Placed here, not up beside self._choices where the label used to be
+        # resolved synchronously: an await between the guard at the top of this
+        # method and _set_state(STARTING) would let a second caller walk past
+        # that guard, which is the very window the comment above _cancel_tasks
+        # exists to keep shut. After the generation capture as well, so a
+        # concurrent stop() landing during this enumeration is caught by the
+        # _RunReclaimed check rather than masked by a generation read taken
+        # after the fact.
+        device_labels = {device.device_id: device.label for device in await self._list_devices()}
+        self._device_label = device_labels.get(choices.system_device_id, choices.system_device_id)
         stream = None
         remote_period_started = False
         try:
