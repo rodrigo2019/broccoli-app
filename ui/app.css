@@ -275,18 +275,154 @@
     text-align: center;
   }
 
-  .audio-level-card {
+  .audio-channel {
     display: grid;
-    gap: 0.55rem;
-    padding: 0.75rem;
+    gap: 0.4rem;
+    align-content: start;
+  }
+
+  .audio-channel__label {
+    color: color-mix(in oklch, var(--color-base-content) 62%, transparent);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .audio-channel__hint {
+    color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  /* One accent per card drives badge, bars and tip icon together, so the
+     input/output distinction is a single declaration rather than a selector
+     repeated for every part. */
+  .audio-level-card {
+    --audio-level-accent: var(--color-primary);
+    display: grid;
+    gap: 0.85rem;
+    margin-top: 0.5rem;
+    padding: 1rem;
     border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
-    border-radius: 0.65rem;
+    border-radius: 0.9rem;
     background:
-      linear-gradient(90deg, color-mix(in oklch, var(--color-primary) 8%, transparent), transparent 72%),
+      linear-gradient(135deg, color-mix(in oklch, var(--audio-level-accent) 9%, transparent), transparent 62%),
       color-mix(in oklch, var(--color-base-200) 65%, transparent);
   }
 
-  .audio-level-card__header,
+  .audio-level-card--output {
+    --audio-level-accent: var(--color-secondary);
+  }
+
+  .audio-level-card__header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .audio-level-card__badge {
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--audio-level-accent) 16%, transparent);
+    color: var(--audio-level-accent);
+    font-size: 1.05rem;
+  }
+
+  .audio-level-card__title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  .audio-level-card__subtitle {
+    margin-top: 0.15rem;
+    color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .audio-level-card__reading {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--color-base-100) 55%, transparent);
+    color: color-mix(in oklch, var(--color-base-content) 78%, transparent);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .audio-level-card__reading::before {
+    content: "";
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.75;
+  }
+
+  /* Auto columns, not repeat(N): the segment count lives in app.js, and
+     spelling it here too meant one could change without the other. */
+  .audio-level-card__meter {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    align-items: end;
+    gap: 0.16rem;
+    height: 2.6rem;
+  }
+
+  .audio-level-card__segment {
+    height: var(--segment-height, 50%);
+    min-height: 0.35rem;
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--audio-level-accent) 14%, var(--color-base-300));
+    opacity: 0.42;
+    transition: background-color 100ms linear, box-shadow 100ms linear, opacity 100ms linear;
+  }
+
+  .audio-level-card__segment.is-active {
+    background: var(--audio-level-accent);
+    opacity: 0.98;
+    box-shadow: 0 0 0.55rem color-mix(in oklch, var(--audio-level-accent) 40%, transparent);
+  }
+
+  /* Counted from the end so the hot zone stays the top of the scale whatever
+     AUDIO_METER_SEGMENTS is. */
+  .audio-level-card__segment:nth-last-child(-n + 5).is-active {
+    background: var(--color-warning);
+    box-shadow: 0 0 0.55rem color-mix(in oklch, var(--color-warning) 48%, transparent);
+  }
+
+  .audio-level-card__segment.is-peak {
+    outline: 1px solid var(--color-base-content);
+    outline-offset: 2px;
+  }
+
+  .audio-level-card__tip {
+    display: flex;
+    align-items: start;
+    gap: 0.45rem;
+    color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+
+  .audio-level-card__tip > i {
+    color: color-mix(in oklch, var(--audio-level-accent) 75%, var(--color-base-content));
+    font-size: 0.85rem;
+    line-height: 1.35;
+  }
+
   .audio-test-control {
     display: flex;
     align-items: center;
@@ -362,6 +498,7 @@
     left: 1rem;
     z-index: 30;
     display: grid;
+    /* The two channel cards, then the transport column. */
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.75rem;
@@ -384,29 +521,110 @@
   }
 
   .capture-dock__sources {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
     min-width: 0;
   }
 
-  .capture-dock__channel {
+  /* One card per channel: mute control, name, state, signal, language. */
+  .capture-channel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0.35rem;
+    padding: 0.7rem;
+    border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+    border-radius: 0.9rem;
+    background: color-mix(in oklch, var(--color-base-200) 40%, transparent);
+    transition: border-color 240ms ease, background-color 240ms ease;
+  }
+
+  .capture-channel[data-muted="true"] {
+    border-color: color-mix(in oklch, var(--color-error) 26%, transparent);
+    background: color-mix(in oklch, var(--color-error) 7%, transparent);
+  }
+
+  .capture-channel__head {
     display: flex;
     min-width: 0;
     align-items: center;
-    gap: 0.55rem;
-    padding: 0.45rem 0.6rem;
-    border-radius: 0.55rem;
+    gap: 0.65rem;
   }
 
-  .capture-dock__channel + .capture-dock__channel {
-    border-left: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  /* The channel icon is the mute button, so it carries the channel's state:
+     tinted with the primary while the audio is being sent, with the error
+     colour while it is being withheld. */
+  .capture-channel__mute {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 3rem;
+    height: 3rem;
+    border: 1px solid color-mix(in oklch, var(--color-primary) 42%, transparent);
+    border-radius: 0.8rem;
+    background: color-mix(in oklch, var(--color-primary) 12%, transparent);
+    color: var(--color-primary);
+    font-size: 1.3rem;
+    cursor: pointer;
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
   }
 
-  .capture-dock__channel-label {
-    display: block;
-    color: color-mix(in oklch, var(--color-base-content) 62%, transparent);
-    font-size: 0.65rem;
+  .capture-channel__mute:hover {
+    background: color-mix(in oklch, var(--color-primary) 22%, transparent);
+  }
+
+  .capture-channel[data-muted="true"] .capture-channel__mute {
+    border-color: color-mix(in oklch, var(--color-error) 45%, transparent);
+    background: color-mix(in oklch, var(--color-error) 14%, transparent);
+    color: var(--color-error);
+  }
+
+  .capture-channel[data-muted="true"] .capture-channel__mute:hover {
+    background: color-mix(in oklch, var(--color-error) 24%, transparent);
+  }
+
+  .capture-channel__titles {
+    min-width: 0;
+  }
+
+  .capture-channel__name {
+    overflow: hidden;
+    color: var(--color-base-content);
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .capture-channel__badge {
+    display: inline-block;
+    margin-top: 0.3rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--color-primary) 18%, transparent);
+    color: var(--color-primary);
+    font-size: 0.68rem;
     font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+  }
+
+  .capture-channel[data-muted="true"] .capture-channel__badge {
+    background: color-mix(in oklch, var(--color-error) 18%, transparent);
+    color: var(--color-error);
+  }
+
+  .capture-channel__language-label {
+    margin-top: 0.15rem;
+    color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+    font-size: 0.68rem;
+    line-height: 1.3;
+  }
+
+  .capture-channel__language {
+    width: 100%;
+    background: color-mix(in oklch, var(--color-base-100) 55%, transparent);
   }
 
   /* A canvas, drawn by CaptureMotion in app.js. `color` is the channel tint:
@@ -433,9 +651,38 @@
     color: var(--color-secondary);
   }
 
+  /* The canvas colour is read back by CaptureMotion, so muting re-reads it
+     (see renderMuteControls). Declared after the streaming rules above,
+     which it ties with on specificity and has to win against: a muted
+     channel stays grey even while the rest of the dock is lit up. */
+  .capture-channel[data-muted="true"] .capture-dock__histogram {
+    color: color-mix(in oklch, var(--color-base-content) 30%, transparent);
+    opacity: 0.5;
+  }
+
+  /* The transport column, divided off from the two source cards. */
+  .capture-dock__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    justify-content: center;
+    padding-left: 1rem;
+    border-left: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  }
+
+  .capture-dock__caption {
+    max-width: 13rem;
+    color: color-mix(in oklch, var(--color-base-content) 62%, transparent);
+    font-size: 0.78rem;
+    line-height: 1.35;
+    text-align: center;
+  }
+
   .capture-dock__toggle {
-    min-width: 3.25rem;
+    min-width: 12.5rem;
     min-height: 3.25rem;
+    gap: 0.5rem;
+    font-size: 1rem;
     border-radius: 0.8rem;
     box-shadow: 0 0 0 rgb(255 91 91 / 0%);
     transition: box-shadow 180ms ease, transform 180ms ease;
@@ -529,9 +776,51 @@
       border-radius: 0.65rem;
     }
 
-    .capture-dock__channel {
-      gap: 0.35rem;
-      padding: 0.4rem;
+    /* Cards stay side by side -- stacking them would make the dock taller
+       than the transcript it is docked to -- and the transport takes the
+       row underneath, where the divider becomes a rule above it. */
+    .capture-dock {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .capture-dock__actions {
+      flex-direction: row;
+      align-items: center;
+      gap: 0.75rem;
+      padding-top: 0.6rem;
+      padding-left: 0;
+      border-top: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+      border-left: none;
+    }
+
+    .capture-dock__caption {
+      flex: 1 1 auto;
+      max-width: none;
+      text-align: left;
+    }
+
+    .capture-dock__toggle {
+      min-width: 10rem;
+      min-height: 2.75rem;
+    }
+
+    .capture-channel {
+      gap: 0.3rem;
+      padding: 0.5rem;
+    }
+
+    .capture-channel__mute {
+      width: 2.4rem;
+      height: 2.4rem;
+      font-size: 1.05rem;
+    }
+
+    /* Wrapped rather than ellipsised: at this width "Audio do sistema" does
+       not fit on one line, and half a channel name is not a channel name. */
+    .capture-channel__name {
+      font-size: 0.85rem;
+      line-height: 1.15;
+      white-space: normal;
     }
 
     .capture-dock__histogram {

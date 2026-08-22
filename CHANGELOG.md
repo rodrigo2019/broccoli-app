@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Forced transcription language per channel, chosen in the capture dock before a capture starts.
+- Mute for the microphone and the system audio, toggleable during a capture.
 - Session pinning to keep important sessions at the top of the library.
 - Session deletion from the session library.
 - Automatic session naming.

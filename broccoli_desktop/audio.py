@@ -92,6 +92,24 @@ class AudioPipeline:
             self._buffer_offsets_ms[channel] = None
         return frames
 
+    def skip(self, channel: Literal["mic", "system"]) -> None:
+        """Count one 20 ms block for a muted channel without producing a frame.
+
+        The offset is a position in the meeting, not a count of what was sent.
+        A muted channel whose clock stopped would come back, on unmute, at
+        offsets the meeting already used, and its new speech would land on top
+        of transcript that is already there.
+
+        The partial buffer goes with it: the tail of a frame captured before
+        the mute must not be completed with audio from after it, and it must
+        not be emitted late under an offset the mute has already moved past.
+        """
+        if channel not in self._buffers:
+            raise ValueError("Unknown audio channel.")
+        self._capture_offsets_ms[channel] += INPUT_BLOCK_MS
+        self._buffers[channel].clear()
+        self._buffer_offsets_ms[channel] = None
+
     @property
     def next_offset_ms(self) -> int:
         """Return the next shared offset after all captured channel input."""

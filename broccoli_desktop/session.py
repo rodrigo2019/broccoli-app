@@ -48,6 +48,10 @@ FRAME_DURATION_MS = 100
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 15)
 AUTO_DETECT_LANGUAGE = ""
 
+#: The languages a capture may be forced into, alongside automatic detection.
+#: ISO-639-1, which is the form the transcription service takes.
+SUPPORTED_LANGUAGES = frozenset({AUTO_DETECT_LANGUAGE, "pt", "en"})
+
 #: The reconnect buffer's bound, in frames. Named rather than recomputed at the
 #: one place that trims, so that a test about the trim can size its buffer from
 #: the same constant the trim reads instead of from something that merely
@@ -69,6 +73,26 @@ class SleepClock(Protocol):
 class CaptureChoices:
     microphone_id: str
     system_device_id: str
+
+
+@dataclass(frozen=True)
+class CaptureLanguages:
+    """The language each channel is transcribed in; empty means detect it.
+
+    Separate from CaptureChoices because these are not device identities:
+    they are not persisted with the selection, they are chosen per capture,
+    and they reach the remote as handshake parameters rather than as
+    anything the local capture reads.
+    """
+
+    microphone: str = AUTO_DETECT_LANGUAGE
+    system: str = AUTO_DETECT_LANGUAGE
+
+
+#: Nothing forced on either channel, which is what every capture did before
+#: the choice existed. A shared instance because the value is frozen and it
+#: is the default of three signatures below.
+DETECT_LANGUAGES = CaptureLanguages()
 
 
 class _RunReclaimed(Exception):
@@ -121,6 +145,16 @@ class DesktopSessionController:
         self._session: SessionSummary | None = None
         self._session_uuid: str | None = None
         self._choices: CaptureChoices | None = None
+        # The languages this run opened with. Held for the whole run because
+        # a reconnect and the terminal stream have to ask for the same ones:
+        # a reconnect that fell back to detection would change what the
+        # service transcribes, mid-meeting, with nothing on screen saying so.
+        self._languages = CaptureLanguages()
+        # Read from the capture thread on every block, written from the loop
+        # when the user toggles. Two bools need no lock of their own: a
+        # toggle landing between two blocks takes effect on the next one,
+        # which is exactly what muting means.
+        self._muted: dict[Literal["mic", "system"], bool] = {"mic": False, "system": False}
         self._device_label: str | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._audio_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
@@ -143,6 +177,16 @@ class DesktopSessionController:
         return self._choices
 
     @property
+    def selected_languages(self) -> CaptureLanguages:
+        """Return the languages the current or most recent run was opened with."""
+        return self._languages
+
+    @property
+    def muted_channels(self) -> dict[str, bool]:
+        """Return which channels are currently withheld from the remote."""
+        return dict(self._muted)
+
+    @property
     def session(self) -> SessionSummary | None:
         """Return the active local session summary without remote payload data."""
         return self._session
@@ -153,15 +197,39 @@ class DesktopSessionController:
             return 0
         return self._pipeline_base_offset_ms
 
-    async def start_new(self, choices: CaptureChoices, title: str) -> SessionSummary:
+    async def start_new(
+        self,
+        choices: CaptureChoices,
+        title: str,
+        *,
+        languages: CaptureLanguages = DETECT_LANGUAGES,
+    ) -> SessionSummary:
         """Open a new remote session with a local capture title."""
-        return await self._open(choices, resume_code=None, title=title)
+        return await self._open(choices, resume_code=None, title=title, languages=languages)
 
     async def resume(
-        self, uuid_code: str, choices: CaptureChoices, *, title: str | None = None
+        self,
+        uuid_code: str,
+        choices: CaptureChoices,
+        *,
+        title: str | None = None,
+        languages: CaptureLanguages = DETECT_LANGUAGES,
     ) -> SessionSummary:
         """Resume the selected remote session with a fresh local capture lifecycle."""
-        return await self._open(choices, resume_code=uuid_code, title=title)
+        return await self._open(choices, resume_code=uuid_code, title=title, languages=languages)
+
+    def set_channel_muted(self, channel: Literal["mic", "system"], muted: bool) -> None:
+        """Withhold one channel's audio from the remote, or send it again.
+
+        Muting drops the channel's frames rather than closing its device:
+        the toggle has to be instant mid-meeting, and reopening a WASAPI
+        endpoint is not. The offsets keep advancing while muted (see
+        AudioPipeline.skip), so unmuting resumes at the point the meeting
+        has actually reached instead of on top of transcript already there.
+        """
+        if channel not in self._muted:
+            raise ValueError("Unknown audio channel.")
+        self._muted[channel] = bool(muted)
 
     async def stop(self) -> None:
         """Stop capture before ending the remote session and publishing stopped."""
@@ -286,7 +354,12 @@ class DesktopSessionController:
             del self._buffered_frames[:excess]
 
     async def _open(
-        self, choices: CaptureChoices, *, resume_code: str | None, title: str | None
+        self,
+        choices: CaptureChoices,
+        *,
+        resume_code: str | None,
+        title: str | None,
+        languages: CaptureLanguages = DETECT_LANGUAGES,
     ) -> SessionSummary:
         if self.state in {
             ConnectionState.STARTING,
@@ -301,6 +374,7 @@ class DesktopSessionController:
         self.pending_deltas.clear()
         self._loop = asyncio.get_running_loop()
         self._choices = choices
+        self._languages = languages
         self._set_state(ConnectionState.STARTING)
         # After STARTING, so that waiting on a previous run's sender cannot open
         # a window for a second caller to walk past the guard above. A run that
@@ -341,7 +415,8 @@ class DesktopSessionController:
             stream = await self._remote.connect_stream(
                 resume_code=resume_code,
                 device_label=self._device_label,
-                language=AUTO_DETECT_LANGUAGE,
+                language_mic=languages.microphone,
+                language_system=languages.system,
                 title=title,
             )
             iterator = stream.events()
@@ -395,7 +470,7 @@ class DesktopSessionController:
                 choices.system_device_id,
                 self._on_pcm,
                 on_event=self._on_capture_event,
-                on_audio_level=self._on_audio_level,
+                on_audio_level=self._report_audio_level,
                 on_capture_state=self._on_capture_state,
                 device_labels=device_labels,
             )
@@ -554,7 +629,8 @@ class DesktopSessionController:
                     stream = await self._remote.connect_stream(
                         resume_code=self._session_uuid,
                         device_label=self._device_label or "",
-                        language=AUTO_DETECT_LANGUAGE,
+                        language_mic=self._languages.microphone,
+                        language_system=self._languages.system,
                         title=None,
                     )
                     previous_stream = self._recovery_stream
@@ -708,8 +784,24 @@ class DesktopSessionController:
         pipeline = self._pipeline
         if pipeline is None:
             return
+        if self._muted[channel]:
+            pipeline.skip(channel)
+            return
         for frame in pipeline.feed(channel, pcm):
             self._schedule_forward(frame)
+
+    def _report_audio_level(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
+        """Meter what is being transmitted, not what the device can hear.
+
+        A muted channel reports a silent block of the same length rather
+        than nothing at all: reporting nothing would leave the meter holding
+        its last reading until it decayed, and a mute the histogram does not
+        show is a mute the user cannot trust.
+        """
+        report = self._on_audio_level
+        if report is None:
+            return
+        report(channel, bytes(len(pcm)) if self._muted[channel] else pcm)
 
     def _schedule_forward(self, frame: AudioFrame) -> None:
         loop = self._loop
@@ -1050,7 +1142,8 @@ class DesktopSessionController:
             return await self._remote.connect_stream(
                 resume_code=self._session_uuid,
                 device_label=self._device_label or "",
-                language=AUTO_DETECT_LANGUAGE,
+                language_mic=self._languages.microphone,
+                language_system=self._languages.system,
                 title=None,
             )
         except Exception:

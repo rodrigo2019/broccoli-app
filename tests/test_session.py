@@ -21,6 +21,7 @@ from broccoli_desktop.session import (
     MAX_BUFFERED_AUDIO_MS,
     MAX_BUFFERED_FRAMES,
     CaptureChoices,
+    CaptureLanguages,
     DesktopSessionController,
 )
 from tests.fakes import (
@@ -166,13 +167,172 @@ async def test_start_new_opens_without_resume_code_and_updates_the_requested_tit
 async def test_start_new_leaves_transcription_language_for_the_remote_service_to_detect(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
+    """No forced language is the default: the service detects both channels."""
     controller = DesktopSessionController(fake_remote, fake_capture)
 
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
 
-    assert fake_remote.stream_languages == [""]
+    assert fake_remote.stream_languages == [("", "")]
 
     await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_language_forced_on_each_channel_reaches_the_handshake(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    await controller.start_new(
+        CaptureChoices("mic-1", "system-1"),
+        title="Daily",
+        languages=CaptureLanguages(microphone="pt", system="en"),
+    )
+
+    assert fake_remote.stream_languages == [("pt", "en")]
+    assert controller.selected_languages == CaptureLanguages(microphone="pt", system="en")
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_asks_for_the_languages_the_run_started_with(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend, fake_clock: FakeClock
+) -> None:
+    """A recovery that fell back to detection would change what is transcribed."""
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(
+        CaptureChoices("mic-1", "system-1"),
+        title="Daily",
+        languages=CaptureLanguages(microphone="pt", system="en"),
+    )
+
+    await fake_remote.emit_failure()
+    await settle()
+
+    assert controller.state is ConnectionState.STREAMING
+    assert fake_remote.stream_languages == [("pt", "en"), ("pt", "en")]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_stream_a_stop_opens_keeps_the_run_languages(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend, fake_clock: FakeClock
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(
+        CaptureChoices("mic-1", "system-1"),
+        title="Daily",
+        languages=CaptureLanguages(microphone="pt", system="en"),
+    )
+    # Leave the controller reconnecting with no stream of its own, which is the
+    # one path where stop() has to open a connection to end the session.
+    controller._stream = None
+    controller.state = ConnectionState.RECONNECTING
+
+    await controller.stop()
+
+    # Two handshakes: the one that opened the run, and the one stop() had to
+    # open to end a session it no longer held a stream for.
+    assert fake_remote.stream_languages == [("pt", "en"), ("pt", "en")]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_carries_the_languages_it_was_resumed_with(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await controller.stop()
+
+    await controller.resume(
+        started.uuid_code,
+        CaptureChoices("mic-1", "system-1"),
+        languages=CaptureLanguages(microphone="en", system=""),
+    )
+
+    assert fake_remote.stream_languages == [("", ""), ("en", "")]
+
+    await controller.stop()
+
+
+def pcm_20ms_block() -> bytes:
+    """One capture block, at the size the pipeline accepts."""
+    return b"\x10\x00" * 960
+
+
+@pytest.mark.asyncio
+async def test_a_muted_channel_sends_nothing_while_the_other_keeps_streaming(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.set_channel_muted("mic", True)
+
+    for _ in range(5):
+        fake_capture.handles["mic-1"].emit(pcm_20ms_block())
+        fake_capture.handles["system-1"].emit(pcm_20ms_block())
+    await settle()
+
+    sent = [decode_audio_frame(frame) for frame in fake_remote.streams[0].frames]
+    assert [frame.channel for frame in sent] == ["system"]
+    assert controller.muted_channels == {"mic": True, "system": False}
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_unmuting_resumes_where_the_meeting_is_rather_than_where_it_stopped(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Offsets are positions in the meeting, so a mute has to spend them."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.set_channel_muted("mic", True)
+
+    for _ in range(5):
+        fake_capture.handles["mic-1"].emit(pcm_20ms_block())
+    controller.set_channel_muted("mic", False)
+    for _ in range(5):
+        fake_capture.handles["mic-1"].emit(pcm_20ms_block())
+    await settle()
+
+    sent = [decode_audio_frame(frame) for frame in fake_remote.streams[0].frames]
+    assert [(frame.channel, frame.offset_ms) for frame in sent] == [("mic", 100)]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_muted_channel_meters_as_silence_so_the_histogram_shows_the_mute(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    levels: list[tuple[str, bytes]] = []
+    controller = DesktopSessionController(
+        fake_remote,
+        fake_capture,
+        on_audio_level=lambda channel, pcm: levels.append((channel, pcm)),
+    )
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.set_channel_muted("mic", True)
+
+    fake_capture.handles["mic-1"].emit(pcm_20ms_block())
+    fake_capture.handles["system-1"].emit(pcm_20ms_block())
+
+    assert levels == [("mic", bytes(1_920)), ("system", pcm_20ms_block())]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_muting_an_unknown_channel_is_refused(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+
+    with pytest.raises(ValueError, match="channel"):
+        controller.set_channel_muted("speaker", True)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -1184,12 +1344,21 @@ async def test_recovery_exhaustion_discards_buffered_frames_before_a_later_recon
     original_connect = fake_remote.connect_stream
 
     async def fail_reconnects(
-        *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+        *,
+        resume_code: str | None,
+        device_label: str,
+        language_mic: str,
+        language_system: str,
+        title: str | None = None,
     ):
         if resume_code is not None:
             raise RemoteRequestError()
         return await original_connect(
-            resume_code=resume_code, device_label=device_label, language=language, title=title
+            resume_code=resume_code,
+            device_label=device_label,
+            language_mic=language_mic,
+            language_system=language_system,
+            title=title,
         )
 
     fake_remote.connect_stream = fail_reconnects  # type: ignore[method-assign]

@@ -292,13 +292,17 @@ async def test_stream_uses_handshake_query_and_derives_segment_id(
     )
 
     stream = await remote.connect_stream(
-        resume_code=None, device_label="Speakers", language="en", title="Daily review"
+        resume_code=None,
+        device_label="Speakers",
+        language_mic="pt",
+        language_system="en",
+        title="Daily review",
     )
     events = [event async for event in stream.events()]
 
     assert (
-        fake_socket_factory.url
-        == "ws://127.0.0.1:8000/ws/listening/?device=Speakers&language=en&title=Daily+review"
+        fake_socket_factory.url == "ws://127.0.0.1:8000/ws/listening/"
+        "?device=Speakers&language_mic=pt&language_system=en&title=Daily+review"
     )
     assert fake_socket_factory.socket.sent == []
     assert events == [
@@ -354,7 +358,9 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
         socket_factory=fake_socket_factory,
     )
 
-    stream = await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+    stream = await remote.connect_stream(
+        resume_code=None, device_label="Speakers", language_mic="en", language_system="en"
+    )
     events = [event async for event in stream.events()]
 
     assert events == [
@@ -376,11 +382,16 @@ async def test_stream_includes_nonempty_resume_in_the_handshake_query(
         socket_factory=fake_socket_factory,
     )
 
-    await remote.connect_stream(resume_code="live 1", device_label="Laptop speakers", language="en")
+    await remote.connect_stream(
+        resume_code="live 1",
+        device_label="Laptop speakers",
+        language_mic="en",
+        language_system="en",
+    )
 
     assert (
-        fake_socket_factory.url
-        == "wss://broccoli.example/ws/listening/?resume=live+1&device=Laptop+speakers&language=en"
+        fake_socket_factory.url == "wss://broccoli.example/ws/listening/"
+        "?resume=live+1&device=Laptop+speakers&language_mic=en&language_system=en"
     )
     assert fake_socket_factory.headers == {"Authorization": "Token secret"}
 
@@ -422,7 +433,9 @@ async def test_the_websocket_stream_is_opened_through_the_configured_proxy(
         proxy="http://user:pass@proxy.local:8080",
     )
 
-    await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+    await remote.connect_stream(
+        resume_code=None, device_label="Speakers", language_mic="en", language_system="en"
+    )
 
     assert fake_socket_factory.proxy == "http://user:pass@proxy.local:8080"
 
@@ -444,7 +457,9 @@ async def test_an_unconfigured_proxy_leaves_environment_proxying_alone(
         socket_factory=fake_socket_factory,
     )
 
-    await remote.connect_stream(resume_code=None, device_label="Speakers", language="en")
+    await remote.connect_stream(
+        resume_code=None, device_label="Speakers", language_mic="en", language_system="en"
+    )
 
     assert fake_socket_factory.proxy is not None
     assert fake_socket_factory.proxy is True
@@ -503,7 +518,9 @@ async def test_stream_exposes_listening_close_codes_as_safe_typed_errors(
         websocket_path="/ws/listening/",
         socket_factory=socket_factory,
     )
-    stream = await remote.connect_stream(resume_code=None, device_label="Laptop", language="en")
+    stream = await remote.connect_stream(
+        resume_code=None, device_label="Laptop", language_mic="en", language_system="en"
+    )
 
     with pytest.raises(Exception) as raised:
         _ = [event async for event in stream.events()]

@@ -207,32 +207,44 @@
                     </button>
                   </div>
                   <div class="grid gap-4 md:grid-cols-2">
-                    <div>
-                      <fieldset class="fieldset">
-                        <legend class="fieldset-legend text-sm">Microfone</legend>
-                        <select id="settingsMicrophoneSelect" class="select w-full" aria-label="Microfone das configurações" data-testid="settings-microphone"></select>
-                        <p class="fieldset-label leading-snug">Fonte principal para sua voz.</p>
-                      </fieldset>
-                      <div class="audio-level-card mt-3">
+                    <div class="audio-channel">
+                      <p id="settingsMicrophoneLabel" class="audio-channel__label">Dispositivo de entrada</p>
+                      <label class="select w-full">
+                        <i class="bi bi-mic" aria-hidden="true"></i>
+                        <select id="settingsMicrophoneSelect" aria-labelledby="settingsMicrophoneLabel" data-testid="settings-microphone"></select>
+                      </label>
+                      <p class="audio-channel__hint">Fonte principal para sua voz.</p>
+                      <div class="audio-level-card audio-level-card--input">
                         <div class="audio-level-card__header">
-                          <span>Entrada</span>
+                          <span class="audio-level-card__badge" aria-hidden="true"><i class="bi bi-mic"></i></span>
+                          <div class="audio-level-card__titles">
+                            <p class="audio-level-card__title">Entrada</p>
+                            <p class="audio-level-card__subtitle">Fale no microfone para visualizar o nível.</p>
+                          </div>
                           <output id="settingsMicrophoneLevel" class="audio-level-card__reading">Aguardando</output>
                         </div>
                         <div id="settingsMicrophoneMeter" class="audio-level-card__meter" role="meter" aria-label="Nível do microfone" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Aguardando teste"></div>
+                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i>Fale com tom de voz normal a uma distância de 15–30 cm do microfone.</p>
                       </div>
                     </div>
-                    <div>
-                      <fieldset class="fieldset">
-                        <legend class="fieldset-legend text-sm">Áudio do sistema</legend>
-                        <select id="settingsSystemDeviceSelect" class="select w-full" aria-label="Áudio do sistema das configurações" data-testid="settings-system-audio"></select>
-                        <p class="fieldset-label leading-snug">Som reproduzido pelo computador.</p>
-                      </fieldset>
-                      <div class="audio-level-card mt-3">
+                    <div class="audio-channel">
+                      <p id="settingsSystemDeviceLabel" class="audio-channel__label">Dispositivo de saída</p>
+                      <label class="select w-full">
+                        <i class="bi bi-volume-up" aria-hidden="true"></i>
+                        <select id="settingsSystemDeviceSelect" aria-labelledby="settingsSystemDeviceLabel" data-testid="settings-system-audio"></select>
+                      </label>
+                      <p class="audio-channel__hint">Som reproduzido pelo computador.</p>
+                      <div class="audio-level-card audio-level-card--output">
                         <div class="audio-level-card__header">
-                          <span>Saída</span>
+                          <span class="audio-level-card__badge" aria-hidden="true"><i class="bi bi-volume-up"></i></span>
+                          <div class="audio-level-card__titles">
+                            <p class="audio-level-card__title">Saída</p>
+                            <p class="audio-level-card__subtitle">O áudio de teste será reproduzido pelos alto-falantes.</p>
+                          </div>
                           <output id="settingsSystemLevel" class="audio-level-card__reading">Aguardando</output>
                         </div>
-                        <div id="settingsSystemMeter" class="audio-level-card__meter audio-level-card__meter--system" role="meter" aria-label="Nível do áudio do sistema" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Aguardando teste"></div>
+                        <div id="settingsSystemMeter" class="audio-level-card__meter" role="meter" aria-label="Nível do áudio do sistema" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Aguardando teste"></div>
+                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i>Você ouvirá um som de teste em volume confortável.</p>
                       </div>
                     </div>
                   </div>
@@ -362,26 +374,79 @@
             </div>
 
             <footer id="captureDock" class="capture-dock p-2 sm:p-3" data-capture-state="idle" role="group" aria-label="Controles da captura">
-              <div class="capture-dock__sources grid min-w-0 grid-cols-2 gap-1 px-1 sm:gap-2 sm:px-2">
-                <div class="capture-dock__channel" title="Microfone definido nas configurações">
-                  <i class="bi bi-mic shrink-0 text-base-content/60" aria-hidden="true"></i>
-                  <div class="min-w-0 flex-1">
-                    <span class="capture-dock__channel-label">Microfone</span>
-                    <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" aria-label="Histograma do microfone"></canvas>
+              <div class="capture-dock__sources">
+                <!--
+                  One card per channel, each carrying everything that decides
+                  what that channel contributes: whether it is being sent, what
+                  it sounds like, and which language it is transcribed in. The
+                  channel icon *is* the mute control -- it was already the thing
+                  that names the channel, and pairing the two is what makes a
+                  muted card read as muted at a glance. `data-muted` is what the
+                  stylesheet reads to turn the card red and grey the histogram.
+                -->
+                <div id="microphoneChannel" class="capture-channel" data-muted="false">
+                  <div class="capture-channel__head">
+                    <button id="microphoneMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Silenciar microfone" title="Silenciar microfone" data-testid="mute-microphone">
+                      <i class="bi bi-mic" aria-hidden="true"></i>
+                    </button>
+                    <div class="capture-channel__titles">
+                      <p class="capture-channel__name">Microfone</p>
+                      <span id="microphoneStatusBadge" class="capture-channel__badge">Ativo</span>
+                    </div>
                   </div>
+                  <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" aria-label="Histograma do microfone"></canvas>
+                  <!--
+                    A visible label rather than the sr-only one this started
+                    with: two selects side by side, both reading "Detectar
+                    automaticamente", are indistinguishable without it. Named
+                    through aria-labelledby for the reason spelled out at
+                    #tokenInput -- the DaisyUI `label.select` wrapper is the
+                    control's own chrome, not its name.
+                  -->
+                  <p id="microphoneLanguageLabel" class="capture-channel__language-label">Idioma do microfone</p>
+                  <label class="select select-sm capture-channel__language">
+                    <select id="microphoneLanguageSelect" aria-labelledby="microphoneLanguageLabel" data-testid="microphone-language">
+                      <option value="">Detectar automaticamente</option>
+                      <option value="pt">Português</option>
+                      <option value="en">Inglês</option>
+                    </select>
+                  </label>
                 </div>
-                <div class="capture-dock__channel" title="Áudio do sistema definido nas configurações">
-                  <i class="bi bi-volume-up shrink-0 text-base-content/60" aria-hidden="true"></i>
-                  <div class="min-w-0 flex-1">
-                    <span class="capture-dock__channel-label">Sistema</span>
-                    <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" aria-label="Histograma do áudio do sistema"></canvas>
+
+                <div id="systemChannel" class="capture-channel" data-muted="false">
+                  <div class="capture-channel__head">
+                    <button id="systemMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Silenciar áudio do sistema" title="Silenciar áudio do sistema" data-testid="mute-system">
+                      <i class="bi bi-volume-up" aria-hidden="true"></i>
+                    </button>
+                    <div class="capture-channel__titles">
+                      <p class="capture-channel__name">Áudio do sistema</p>
+                      <span id="systemStatusBadge" class="capture-channel__badge">Ativo</span>
+                    </div>
                   </div>
+                  <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" aria-label="Histograma do áudio do sistema"></canvas>
+                  <p id="systemLanguageLabel" class="capture-channel__language-label">Idioma do sistema</p>
+                  <label class="select select-sm capture-channel__language">
+                    <select id="systemLanguageSelect" aria-labelledby="systemLanguageLabel" data-testid="system-language">
+                      <option value="">Detectar automaticamente</option>
+                      <option value="pt">Português</option>
+                      <option value="en">Inglês</option>
+                    </select>
+                  </label>
                 </div>
               </div>
 
-              <div class="capture-dock__actions flex shrink-0 items-center justify-end px-1 sm:px-2">
-                <button id="captureToggleButton" class="capture-dock__toggle btn btn-primary btn-square" type="button" data-testid="capture-toggle" aria-label="Iniciar captura" title="Iniciar captura">
-                  <i class="bi bi-play-fill text-2xl" aria-hidden="true"></i>
+              <div class="capture-dock__actions">
+                <!--
+                  role="status", because this line is also the explanation for a
+                  disabled start button: with both channels muted there is
+                  nothing to transcribe, and a button that simply stops
+                  responding is indistinguishable from a broken one for someone
+                  who cannot see it greyed out.
+                -->
+                <p id="captureScopeCaption" class="capture-dock__caption" role="status">Transcrever as duas fontes</p>
+                <button id="captureToggleButton" class="capture-dock__toggle btn btn-primary" type="button" data-testid="capture-toggle" title="Iniciar transcrição">
+                  <i id="captureToggleIcon" class="bi bi-play-fill text-xl" aria-hidden="true"></i>
+                  <span id="captureToggleLabel">Iniciar transcrição</span>
                 </button>
               </div>
             </footer>

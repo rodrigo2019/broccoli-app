@@ -178,7 +178,13 @@ class ListeningRemote(Protocol):
     async def delete_session(self, uuid_code: str) -> None: ...
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+        self,
+        *,
+        resume_code: str | None,
+        device_label: str,
+        language_mic: str,
+        language_system: str,
+        title: str | None = None,
     ) -> RemoteStream: ...
 
 
@@ -296,7 +302,13 @@ class HttpListeningRemote:
         await self._request("DELETE", f"{SESSION_LIST_PATH}{quote(uuid_code, safe='')}/")
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+        self,
+        *,
+        resume_code: str | None,
+        device_label: str,
+        language_mic: str,
+        language_system: str,
+        title: str | None = None,
     ) -> RemoteStream:
         try:
             socket = await self._socket_factory(
@@ -305,7 +317,8 @@ class HttpListeningRemote:
                     self._websocket_path,
                     resume_code=resume_code,
                     device_label=device_label,
-                    language=language,
+                    language_mic=language_mic,
+                    language_system=language_system,
                     title=title,
                 ),
                 additional_headers={"Authorization": _authorization_header(self._token)},
@@ -547,9 +560,16 @@ def _stream_url(
     *,
     resume_code: str | None,
     device_label: str,
-    language: str,
+    language_mic: str,
+    language_system: str,
     title: str | None,
 ) -> str:
+    """Build the Listening handshake URL, dropping every value left empty.
+
+    An omitted ``language_mic``/``language_system`` is what asks the service to
+    detect that channel's language, so the empty string must not be sent as a
+    forced language of its own.
+    """
     parts = urlsplit(base_url)
     scheme = {"https": "wss", "http": "ws"}.get(parts.scheme)
     if scheme is None:
@@ -560,7 +580,8 @@ def _stream_url(
             for key, value in {
                 "resume": resume_code,
                 "device": device_label,
-                "language": language,
+                "language_mic": language_mic,
+                "language_system": language_system,
                 "title": title,
             }.items()
             if value

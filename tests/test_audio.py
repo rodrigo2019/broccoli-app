@@ -110,6 +110,55 @@ def test_resumed_pipeline_offsets_frames_after_the_remote_base(
     assert frames[0].offset_ms == 12_345
 
 
+def test_a_skipped_block_produces_no_frame_but_still_moves_the_channel_clock(
+    fake_resampler: FakeResampler,
+) -> None:
+    """Muting withholds the audio; it does not rewind the meeting."""
+    pipeline = AudioPipeline(resampler=fake_resampler)
+
+    for _ in range(5):
+        pipeline.skip("mic")
+    frames = [frame for _ in range(5) for frame in pipeline.feed("mic", pcm_20ms())]
+
+    assert len(frames) == 1
+    assert frames[0].offset_ms == 100
+
+
+def test_skipping_drops_the_partial_frame_captured_before_the_mute(
+    fake_resampler: FakeResampler,
+) -> None:
+    """Audio from before a mute must not be completed with audio from after it."""
+    pipeline = AudioPipeline(resampler=fake_resampler)
+
+    for _ in range(3):
+        pipeline.feed("mic", pcm_20ms())
+    pipeline.skip("mic")
+    frames = [frame for _ in range(4) for frame in pipeline.feed("mic", pcm_20ms())]
+
+    assert frames == []
+    assert [frame.offset_ms for frame in pipeline.feed("mic", pcm_20ms())] == [80]
+
+
+def test_skipping_one_channel_leaves_the_other_untouched(
+    fake_resampler: FakeResampler,
+) -> None:
+    pipeline = AudioPipeline(resampler=fake_resampler)
+
+    for _ in range(5):
+        pipeline.skip("mic")
+    frames = [frame for _ in range(5) for frame in pipeline.feed("system", pcm_20ms())]
+
+    assert [frame.offset_ms for frame in frames] == [0]
+    assert pipeline.next_offset_ms == 100
+
+
+def test_pipeline_rejects_skipping_an_unknown_channel(fake_resampler: FakeResampler) -> None:
+    pipeline = AudioPipeline(resampler=fake_resampler)
+
+    with pytest.raises(ValueError, match="channel"):
+        pipeline.skip("speaker")  # type: ignore[arg-type]
+
+
 def test_pipeline_rejects_non_20ms_pcm_blocks(fake_resampler: FakeResampler) -> None:
     pipeline = AudioPipeline(resampler=fake_resampler)
 

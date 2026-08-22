@@ -190,7 +190,8 @@ class FakeSessionRemote:
     stream_event_scripts: list[list[RemoteEvent | Exception | None]] = field(default_factory=list)
     streams: list[FakeLiveRemoteStream] = field(default_factory=list)
     stream_requests: list[tuple[str | None, str]] = field(default_factory=list)
-    stream_languages: list[str] = field(default_factory=list)
+    #: One ``(microphone, system)`` pair per handshake, in order.
+    stream_languages: list[tuple[str, str]] = field(default_factory=list)
     fail_send_stream_indexes: set[int] = field(default_factory=set)
     fail_control_stream_indexes: set[int] = field(default_factory=set)
     fail_close_stream_indexes: set[int] = field(default_factory=set)
@@ -337,7 +338,13 @@ class FakeSessionRemote:
         del self.sessions[uuid_code]
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+        self,
+        *,
+        resume_code: str | None,
+        device_label: str,
+        language_mic: str,
+        language_system: str,
+        title: str | None = None,
     ) -> FakeLiveRemoteStream:
         self._assert_authorized()
         uuid_code = resume_code or "session-1"
@@ -363,7 +370,7 @@ class FakeSessionRemote:
         )
         self.streams.append(stream)
         self.stream_requests.append((resume_code, device_label))
-        self.stream_languages.append(language)
+        self.stream_languages.append((language_mic, language_system))
         # Stamped like the real server does: the client builds its history
         # row straight off this event, so a fake that omitted the timestamps
         # would let the row sort and render wrongly without any test noticing.
@@ -508,9 +515,15 @@ class FakeListeningRemote:
             raise RemoteProtocolError("Fake session was not configured.") from None
 
     async def connect_stream(
-        self, *, resume_code: str | None, device_label: str, language: str, title: str | None = None
+        self,
+        *,
+        resume_code: str | None,
+        device_label: str,
+        language_mic: str,
+        language_system: str,
+        title: str | None = None,
     ) -> FakeRemoteStream:
-        del language, title
+        del language_mic, language_system, title
         self._assert_authorized()
         self.stream_requests.append((resume_code, device_label))
         return self.stream

@@ -131,6 +131,17 @@
     captureToggleButton: document.querySelector("#captureToggleButton"),
     copyCodeButton: document.querySelector("#copyCodeButton"),
     captureDock: document.querySelector("#captureDock"),
+    microphoneChannel: document.querySelector("#microphoneChannel"),
+    systemChannel: document.querySelector("#systemChannel"),
+    microphoneMuteButton: document.querySelector("#microphoneMuteButton"),
+    systemMuteButton: document.querySelector("#systemMuteButton"),
+    microphoneStatusBadge: document.querySelector("#microphoneStatusBadge"),
+    systemStatusBadge: document.querySelector("#systemStatusBadge"),
+    microphoneLanguageSelect: document.querySelector("#microphoneLanguageSelect"),
+    systemLanguageSelect: document.querySelector("#systemLanguageSelect"),
+    captureScopeCaption: document.querySelector("#captureScopeCaption"),
+    captureToggleIcon: document.querySelector("#captureToggleIcon"),
+    captureToggleLabel: document.querySelector("#captureToggleLabel"),
     jumpToLatestButton: document.querySelector("#jumpToLatestButton"),
     microphoneHistogram: document.querySelector("#microphoneHistogram"),
     systemHistogram: document.querySelector("#systemHistogram"),
@@ -142,6 +153,14 @@
   // Same key and same values the platform writes, so the two surfaces agree on
   // what "dark" means and a theme picked in one reads naturally in the other.
   const THEME_STORAGE_KEY = "theme";
+
+  // The forced transcription language of each channel. Kept here rather than
+  // on the server because it is only ever needed at the moment a capture is
+  // started, and it travels in that request -- there is nothing for a second
+  // stored copy to stay in sync with. Empty means automatic detection.
+  const LANGUAGE_STORAGE_KEY = "capture-languages";
+  const SUPPORTED_LANGUAGES = ["", "pt", "en"];
+  const DEFAULT_LANGUAGES = { microphone: "", system: "" };
 
   // The proxy password is never part of this shape and never travels through
   // localStorage: it lives only in the Windows Credential Manager, reached
@@ -156,6 +175,27 @@
     } catch (error) {
       state.proxy = { ...DEFAULT_PROXY };
       reportError(error);
+    }
+  }
+
+  function loadLanguages() {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(LANGUAGE_STORAGE_KEY) || "{}");
+      return {
+        microphone: SUPPORTED_LANGUAGES.includes(stored.microphone) ? stored.microphone : "",
+        system: SUPPORTED_LANGUAGES.includes(stored.system) ? stored.system : "",
+      };
+    } catch {
+      return { ...DEFAULT_LANGUAGES };
+    }
+  }
+
+  function setLanguage(channel, value) {
+    state.languages[channel] = SUPPORTED_LANGUAGES.includes(value) ? value : "";
+    try {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, JSON.stringify(state.languages));
+    } catch {
+      // Same best-effort contract as the rest of the local preferences.
     }
   }
 
@@ -216,6 +256,11 @@
     // from localStorage, and never carrying a password field.
     proxy: { ...DEFAULT_PROXY },
     theme: loadTheme(),
+    languages: loadLanguages(),
+    // Runtime state, not a preference: it belongs to the capture the
+    // controller is running, and the bootstrap is what a reloaded window
+    // reads it back from.
+    muted: { microphone: false, system: false },
     audioTestActive: false,
     audioMeterBars: { microphone: [], system: [] },
     audioLevelSource: null,
@@ -521,7 +566,7 @@
 
   // ---------------------------------------------------------------- audio levels
 
-  const AUDIO_METER_SEGMENTS = 18;
+  const AUDIO_METER_SEGMENTS = 28;
   const AUDIO_LEVEL_RETRY_MS = 2000;
 
   function mountAudioMeter(container, channel) {
@@ -747,6 +792,8 @@
     "The session changes are invalid.": "As alterações da reunião não são válidas.",
     "Choose a session property to update.": "Escolha o que deseja alterar na reunião.",
     "The session title is invalid.": "O título da reunião não é válido.",
+    "The selected transcription language is unsupported.":
+      "O idioma selecionado não está disponível para transcrição.",
     "The pin state is invalid.": "Não foi possível alterar a fixação da reunião.",
     // Capture lifecycle conflicts.
     "A capture is active.": "Já existe uma captura em andamento.",
@@ -1848,19 +1895,105 @@
     return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
   }
 
+  const MUTE_CONTROLS = {
+    microphone: {
+      channel: "microphoneChannel",
+      button: "microphoneMuteButton",
+      badge: "microphoneStatusBadge",
+      liveIcon: "mic",
+      mutedIcon: "mic-mute-fill",
+      mute: "Silenciar microfone",
+      unmute: "Reativar microfone",
+    },
+    system: {
+      channel: "systemChannel",
+      button: "systemMuteButton",
+      badge: "systemStatusBadge",
+      liveIcon: "volume-up",
+      mutedIcon: "volume-mute-fill",
+      mute: "Silenciar áudio do sistema",
+      unmute: "Reativar áudio do sistema",
+    },
+  };
+
+  function renderMuteControls() {
+    for (const [channel, control] of Object.entries(MUTE_CONTROLS)) {
+      const muted = Boolean(state.muted[channel]);
+      const button = elements[control.button];
+      const label = muted ? control.unmute : control.mute;
+      elements[control.channel].dataset.muted = muted ? "true" : "false";
+      button.setAttribute("aria-pressed", muted ? "true" : "false");
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.replaceChildren(icon(muted ? control.mutedIcon : control.liveIcon));
+      elements[control.badge].textContent = muted ? "Mudo" : "Ativo";
+    }
+    // The histogram's colour comes from the stylesheet, read back once and
+    // cached (see CaptureMotion.refreshTheme). Muting changes which rule
+    // applies, so the cache has to be invalidated or a muted channel would
+    // keep drawing in its live tint.
+    captureMotion?.refreshTheme();
+  }
+
+  // The language reaches the service in the handshake that opens the remote
+  // session, so it can only be chosen while there is no session open. The
+  // title says why rather than leaving a control that is simply dead.
+  const LANGUAGE_LOCKED_TITLE = "Pare a captura para trocar o idioma";
+
+  function renderCaptureLanguages() {
+    const locked = isCaptureActive();
+    const selects = {
+      microphone: elements.microphoneLanguageSelect,
+      system: elements.systemLanguageSelect,
+    };
+    for (const [channel, select] of Object.entries(selects)) {
+      select.value = state.languages[channel];
+      select.disabled = locked;
+      select.closest("label").title = locked ? LANGUAGE_LOCKED_TITLE : "";
+    }
+  }
+
+  /**
+   * What the transport column says this capture will actually transcribe.
+   *
+   * Present tense while it runs, because by then it is a report rather than
+   * a promise. With both channels muted there is nothing to open a session
+   * for, so the idle wording is an instruction and the start button is
+   * disabled to match -- muting both *during* a capture stays allowed, since
+   * that is a pause, not a session with no purpose.
+   */
+  function captureScopeText(active) {
+    const microphoneMuted = Boolean(state.muted.microphone);
+    const systemMuted = Boolean(state.muted.system);
+    if (microphoneMuted && systemMuted) {
+      return active ? "Nenhuma fonte ativa" : "Ative uma fonte para transcrever";
+    }
+    if (microphoneMuted) {
+      return active ? "Transcrevendo só o áudio do sistema" : "Transcrever só o áudio do sistema";
+    }
+    if (systemMuted) {
+      return active ? "Transcrevendo só o microfone" : "Transcrever só o microfone";
+    }
+    return active ? "Transcrevendo as duas fontes" : "Transcrever as duas fontes";
+  }
+
+  function everySourceMuted() {
+    return Boolean(state.muted.microphone) && Boolean(state.muted.system);
+  }
+
   function renderCaptureDock() {
     const active = isCaptureActive();
     elements.captureDock.dataset.captureState = state.connectionState;
+    renderMuteControls();
+    renderCaptureLanguages();
+    const label = active ? "Parar transcrição" : "Iniciar transcrição";
     elements.captureToggleButton.classList.toggle("btn-error", active);
     elements.captureToggleButton.classList.toggle("btn-primary", !active);
-    elements.captureToggleButton.setAttribute(
-      "aria-label",
-      active ? "Parar captura" : "Iniciar captura",
-    );
-    elements.captureToggleButton.title = active ? "Parar captura" : "Iniciar captura";
-    elements.captureToggleButton.replaceChildren(
-      icon(active ? "stop-fill" : "play-fill", "text-2xl"),
-    );
+    elements.captureToggleButton.title = label;
+    elements.captureToggleButton.disabled = !active && everySourceMuted();
+    elements.captureToggleLabel.textContent = label;
+    setIconName(elements.captureToggleIcon, active ? "stop-fill" : "play-fill");
+    elements.captureScopeCaption.textContent = captureScopeText(active);
     captureMotion.setState(state.connectionState);
   }
 
@@ -2309,6 +2442,13 @@
     };
   }
 
+  function selectedLanguagePayload() {
+    return {
+      microphone_language: state.languages.microphone,
+      system_language: state.languages.system,
+    };
+  }
+
   async function startSession() {
     const devices = selectedDevicePayload();
     if (!devices.microphone_id || !devices.system_device_id) {
@@ -2328,7 +2468,10 @@
     const path = currentSession
       ? `/api/sessions/${encodeURIComponent(currentSession.uuid_code)}/resume`
       : "/api/sessions";
-    const body = currentSession ? devices : { ...devices, title: elements.sessionTitle.value };
+    const languages = selectedLanguagePayload();
+    const body = currentSession
+      ? { ...devices, ...languages }
+      : { ...devices, ...languages, title: elements.sessionTitle.value };
     try {
       stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
       state.connectionState = "starting";
@@ -2364,9 +2507,42 @@
     }
   }
 
+  async function setMuted(channel, muted) {
+    const previous = state.muted[channel];
+    // Optimistic, then reconciled: a mute has to look instant, and the
+    // request it depends on is a loopback call to this window's own
+    // service. A failure puts the button back rather than leaving the dock
+    // claiming a channel is muted while its audio is still being sent.
+    state.muted[channel] = muted;
+    renderCaptureDock();
+    try {
+      await localFetch("/api/capture/mute", {
+        method: "PUT",
+        body: JSON.stringify({
+          microphone_muted: state.muted.microphone,
+          system_muted: state.muted.system,
+        }),
+      });
+    } catch (error) {
+      state.muted[channel] = previous;
+      renderCaptureDock();
+      reportError(error);
+    }
+  }
+
   function toggleCapture() {
     if (isCaptureActive()) {
       return stopSession();
+    }
+    // The button is disabled in this state; this is the guard for anything
+    // that reaches the handler another way, so a session that could only
+    // record silence is never opened.
+    if (everySourceMuted()) {
+      showNotification(
+        "Ative o microfone ou o áudio do sistema antes de iniciar a transcrição.",
+        "warning",
+      );
+      return Promise.resolve();
     }
     return startSession();
   }
@@ -2458,6 +2634,14 @@
     if (!state.authenticated) closeAudioLevelStream();
     state.selectedDevices = bootstrap.selected_devices;
     state.connectionState = bootstrap.state;
+    // The capture, not this window, owns both of these. A reload lands on
+    // what the controller is actually doing: the mute state always, and the
+    // languages only while a run is in progress -- with none in progress,
+    // the stored preference is what the next one will be started with.
+    if (bootstrap.muted) state.muted = { ...state.muted, ...bootstrap.muted };
+    if (bootstrap.languages && isCaptureActive()) {
+      state.languages = { ...state.languages, ...bootstrap.languages };
+    }
     state.selectedSession = bootstrap.session;
     if (state.selectedSession) mergeSession(state.selectedSession);
     renderDevices(bootstrap.devices || []);
@@ -2694,6 +2878,18 @@
   elements.captureToggleButton.addEventListener("click", () => {
     toggleCapture().catch(reportError);
   });
+  elements.microphoneMuteButton.addEventListener("click", () => {
+    setMuted("microphone", !state.muted.microphone).catch(reportError);
+  });
+  elements.systemMuteButton.addEventListener("click", () => {
+    setMuted("system", !state.muted.system).catch(reportError);
+  });
+  elements.microphoneLanguageSelect.addEventListener("change", () => {
+    setLanguage("microphone", elements.microphoneLanguageSelect.value);
+  });
+  elements.systemLanguageSelect.addEventListener("change", () => {
+    setLanguage("system", elements.systemLanguageSelect.value);
+  });
   elements.sessionTitle.addEventListener("change", () => {
     saveSessionTitle().catch((error) => {
       renderSessionDetails();
@@ -2778,6 +2974,7 @@
 
   clearTimeline();
   renderView();
+  renderCaptureDock();
   renderSessions();
   watchSessionsSentinel();
   watchCaptureDockHeight();

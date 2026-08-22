@@ -324,7 +324,7 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     ):
         legend_id = labelled.attributes[field_id]["aria-labelledby"]
         assert labelled.attributes[legend_id]["tag"] == "legend"
-        assert labelled.legend_text[legend_id].strip() == visible_label
+        assert labelled.element_text[legend_id].strip() == visible_label
     # The login screen needs its own way into the settings panel: /api/settings
     # is unauthenticated precisely so a proxy can be configured before the login
     # request can reach the backend, and #settingsButton lives in the sidebar
@@ -390,6 +390,8 @@ def test_bootstrap_carries_the_devices_the_first_screen_needs(
             {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
             {"device_id": "system-1", "label": "Speakers", "kind": "system"},
         ],
+        "languages": {"microphone": "", "system": ""},
+        "muted": {"microphone": False, "system": False},
         "selected_devices": None,
         "state": "idle",
         "session": None,
@@ -408,6 +410,8 @@ def test_bootstrap_is_unauthenticated_without_a_stored_credential(client: TestCl
             {"device_id": "mic-1", "label": "Microphone One", "kind": "mic"},
             {"device_id": "system-1", "label": "Speakers", "kind": "system"},
         ],
+        "languages": {"microphone": "", "system": ""},
+        "muted": {"microphone": False, "system": False},
         "selected_devices": None,
         "state": "idle",
         "session": None,
@@ -864,6 +868,151 @@ def test_successful_capture_saves_opaque_device_choices_for_a_fresh_service(
         "microphone_id": "mic-1",
         "system_device_id": "system-1",
     }
+
+
+def test_a_capture_carries_the_language_chosen_for_each_channel(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+
+    started = client.post(
+        "/api/sessions",
+        json={
+            "title": "Reunião",
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+            "microphone_language": "pt",
+            "system_language": "en",
+        },
+    )
+
+    assert started.status_code == 201
+    assert fake_remote_factory.remote.stream_languages == [("pt", "en")]
+
+
+def test_a_capture_with_no_language_chosen_leaves_both_channels_detected(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+
+    start_capture(client)
+
+    assert fake_remote_factory.remote.stream_languages == [("", "")]
+
+
+def test_resuming_a_session_carries_the_language_chosen_for_each_channel(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+
+    resumed = client.post(
+        "/api/sessions/session-1/resume",
+        json={
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+            "microphone_language": "en",
+            "system_language": "pt",
+        },
+    )
+
+    assert resumed.status_code == 201
+    assert fake_remote_factory.remote.stream_languages == [("en", "pt")]
+
+
+def test_a_language_the_service_does_not_take_is_refused(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+
+    refused = client.post(
+        "/api/sessions",
+        json={
+            "title": "Reunião",
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+            "microphone_language": "klingon",
+            "system_language": "",
+        },
+    )
+
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "The selected transcription language is unsupported."
+    assert fake_remote_factory.remote.stream_languages == []
+
+
+def test_muting_a_channel_withholds_it_and_survives_a_window_reload(
+    client: TestClient,
+    services: Services,
+) -> None:
+    """The capture owns the mute state, so a reloaded window reads it back."""
+    login(client)
+    start_capture(client)
+
+    muted = client.put(
+        "/api/capture/mute",
+        json={"microphone_muted": True, "system_muted": False},
+    )
+    payload = bootstrap_payload(client)
+
+    assert muted.status_code == 204
+    assert services.controller is not None
+    assert services.controller.muted_channels == {"mic": True, "system": False}
+    assert payload["muted"] == {"microphone": True, "system": False}
+
+
+def test_a_channel_can_be_muted_before_the_capture_starts_and_unmuted_during_it(
+    client: TestClient,
+    services: Services,
+) -> None:
+    login(client)
+
+    before = client.put(
+        "/api/capture/mute",
+        json={"microphone_muted": True, "system_muted": True},
+    )
+    start_capture(client)
+    during = client.put(
+        "/api/capture/mute",
+        json={"microphone_muted": False, "system_muted": True},
+    )
+
+    assert before.status_code == 204
+    assert during.status_code == 204
+    assert services.controller is not None
+    assert services.controller.muted_channels == {"mic": False, "system": True}
+
+
+def test_the_mute_route_requires_a_credential(client: TestClient) -> None:
+    refused = client.put(
+        "/api/capture/mute",
+        json={"microphone_muted": True, "system_muted": True},
+    )
+
+    assert refused.status_code == 401
+
+
+def test_the_bootstrap_reports_the_languages_a_running_capture_was_opened_with(
+    client: TestClient,
+) -> None:
+    login(client)
+    client.post(
+        "/api/sessions",
+        json={
+            "title": "Reunião",
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+            "microphone_language": "pt",
+            "system_language": "en",
+        },
+    )
+
+    payload = bootstrap_payload(client)
+
+    assert payload["languages"] == {"microphone": "pt", "system": "en"}
 
 
 def test_settings_can_save_and_clear_device_choices_before_a_capture_starts(
@@ -2013,39 +2162,43 @@ class _LabelledFields(HTMLParser):
     Substring assertions over the raw document cannot see a pairing: an id and
     a reference to it both being present says nothing about them belonging to
     the same field. Parsing gives every element's attributes back keyed by id,
-    and every <legend>'s visible text alongside, which is what turns "the
-    string is in there somewhere" into "this input is named by this legend, and
-    that legend reads what the user sees".
+    and every id'd element's visible text alongside, which is what turns "the
+    string is in there somewhere" into "this input is named by this element,
+    and that element reads what the user sees".
+
+    Text is collected for any element carrying an id, not only <legend>, so a
+    field named by a plain heading or caption is checkable the same way.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.attributes: dict[str, dict[str, str]] = {}
-        self.legend_text: dict[str, str] = {}
-        self._open_legend: str | None = None
+        self.element_text: dict[str, str] = {}
+        self._open: list[tuple[str, str | None]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {name: value or "" for name, value in attrs}
         identifier = attributes.get("id")
         if identifier:
             self.attributes[identifier] = {"tag": tag, **attributes}
-        if tag == "legend":
-            self._open_legend = identifier
-            if identifier:
-                self.legend_text[identifier] = ""
+            self.element_text.setdefault(identifier, "")
+        self._open.append((tag, identifier))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
-        if tag == "legend":
-            self._open_legend = None
+        self._open.pop()
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "legend":
-            self._open_legend = None
+        for index in range(len(self._open) - 1, -1, -1):
+            if self._open[index][0] == tag:
+                del self._open[index:]
+                return
 
     def handle_data(self, data: str) -> None:
-        if self._open_legend:
-            self.legend_text[self._open_legend] += data
+        # Into every open id'd ancestor, so nesting inside a label still counts.
+        for _tag, identifier in self._open:
+            if identifier:
+                self.element_text[identifier] += data
 
 
 def _parse_labelled_fields(document: str) -> _LabelledFields:
@@ -2468,3 +2621,22 @@ def test_the_window_size_follows_login_without_overriding_the_user(
         "rerender_logged_in": None,
         "rerender_logged_out": None,
     }
+
+
+def test_the_device_selects_are_named_by_the_label_the_user_reads(
+    tokened_client: TestClient,
+) -> None:
+    """WCAG 2.5.3, the same property the proxy fields are checked for.
+
+    These two carried aria-label="Microfone das configuracoes" while the
+    visible legend read "Microfone" -- a name that is present and wrong, which
+    an axe scan passes and someone driving the app by voice cannot use.
+    """
+    labelled = _parse_labelled_fields(tokened_client.get("/static/index.html").text)
+
+    for field_id, visible_label in (
+        ("settingsMicrophoneSelect", "Dispositivo de entrada"),
+        ("settingsSystemDeviceSelect", "Dispositivo de saída"),
+    ):
+        label_id = labelled.attributes[field_id]["aria-labelledby"]
+        assert labelled.element_text[label_id].strip() == visible_label

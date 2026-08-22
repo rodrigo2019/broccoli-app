@@ -461,10 +461,40 @@ try {
     )
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
+    # Muting both sources is the one state the transport refuses: a session
+    # opened there could only record silence, and it would still spend the
+    # meeting's clock. The caption is what explains the dead button, which is
+    # why it is asserted rather than left to the screenshot.
+    Invoke-Browser -BrowserArguments @("find", "testid", "mute-microphone", "click")
+    Invoke-Browser -BrowserArguments @("find", "testid", "mute-system", "click")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#captureToggleButton')?.disabled === true"
+    )
+    $mutedCaption = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "document.querySelector('#captureScopeCaption').textContent"
+    ) | ConvertFrom-Json)
+    if ($mutedCaption -ne "Ative uma fonte para transcrever") {
+        throw "Muting both sources left the start caption reading '$mutedCaption'."
+    }
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Assert-NoAccessibilityViolations -Screen "the capture screen with both sources muted"
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-muted.png"))
+    Invoke-Browser -BrowserArguments @("find", "testid", "mute-microphone", "click")
+    Invoke-Browser -BrowserArguments @("find", "testid", "mute-system", "click")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.querySelector('#captureToggleButton')?.disabled === false"
+    )
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+
     $overlongTitle = "x" * 121
     Invoke-Browser -BrowserArguments @("eval", "document.querySelector('#sessionTitle').value = '$overlongTitle'")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("wait", "--text", "O t$([char]0x00ED)tulo da reuni$([char]0x00E3)o n$([char]0x00E3)o $([char]0x00E9) v$([char]0x00E1)lido.")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     $startEnabled = (Invoke-Browser -BrowserArguments @("is", "enabled", "#captureToggleButton") | Select-Object -Last 1).Trim()
@@ -474,11 +504,11 @@ try {
     Invoke-Browser -BrowserArguments @("eval", "document.querySelector('#sessionTitle').value = ''")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
-    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar captura")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Iniciar transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @(
         "wait",
         "--fn",
-        "document.querySelector('#captureToggleButton')?.getAttribute('aria-label') === 'Parar captura'"
+        "document.querySelector('#captureToggleLabel')?.textContent === 'Parar transcri$([char]0x00E7)$([char]0x00E3)o'"
     )
     Invoke-Browser -BrowserArguments @("wait", "--text", $finalSegmentText)
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
@@ -531,7 +561,7 @@ try {
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-narrow.png"))
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
 
-    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Parar captura")
+    Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Parar transcri$([char]0x00E7)$([char]0x00E3)o")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Captura encerrada.")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 

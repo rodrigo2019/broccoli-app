@@ -53,7 +53,13 @@ from broccoli_desktop.remote import (
     RemoteUnauthorizedError,
     RemoteValidationError,
 )
-from broccoli_desktop.session import CaptureChoices, DesktopSessionController
+from broccoli_desktop.session import (
+    DETECT_LANGUAGES,
+    SUPPORTED_LANGUAGES,
+    CaptureChoices,
+    CaptureLanguages,
+    DesktopSessionController,
+)
 from broccoli_desktop.settings import (
     DeviceSettings,
     InMemoryDeviceSettings,
@@ -397,8 +403,32 @@ class SessionRequest(BaseModel):
     system_device_id: str
 
 
-class StartSessionRequest(SessionRequest):
+class CaptureRequest(SessionRequest):
+    """A request that opens a capture period, device selection plus language.
+
+    The languages default to the empty string, which is what asks the
+    service to detect them -- the behaviour every capture had before this
+    choice existed.
+    """
+
+    microphone_language: str = ""
+    system_language: str = ""
+
+
+class StartSessionRequest(CaptureRequest):
     title: str = ""
+
+
+class MuteRequest(BaseModel):
+    """The complete mute state of both channels, not a single toggle.
+
+    Sending both every time keeps the window and the capture from drifting
+    apart: a request that lost its way cannot leave one channel silently
+    muted while the interface shows it live.
+    """
+
+    microphone_muted: bool
+    system_muted: bool
 
 
 class SessionUpdateRequest(BaseModel):
@@ -872,10 +902,11 @@ def create_app(services: Services) -> FastAPI:
         # request must not be what leaves a meeting with no title at all.
         title = _validate_title(request.title) or services.session_titles()
         choices = await _validated_choices(services, request)
+        languages = _validated_languages(request)
         controller, _remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
-            session = await controller.start_new(choices, title)
+            session = await controller.start_new(choices, title, languages=languages)
         except RuntimeError:
             raise ApiError(409, "The current session cannot be changed.") from None
         except DeviceUnavailableError:
@@ -884,13 +915,16 @@ def create_app(services: Services) -> FastAPI:
         return _session_payload(session)
 
     @app.post("/api/sessions/{uuid_code}/resume", status_code=201)
-    async def resume_session(uuid_code: str, request: SessionRequest) -> dict[str, object]:
+    async def resume_session(uuid_code: str, request: CaptureRequest) -> dict[str, object]:
         choices = await _validated_choices(services, request)
+        languages = _validated_languages(request)
         controller, remote = await _require_authenticated(services)
         services.stop_audio_level_monitor()
         try:
             existing = await remote.get_session(uuid_code)
-            session = await controller.resume(uuid_code, choices, title=existing.title)
+            session = await controller.resume(
+                uuid_code, choices, title=existing.title, languages=languages
+            )
         except RuntimeError:
             raise ApiError(409, "The current session cannot be changed.") from None
         except DeviceUnavailableError:
@@ -902,6 +936,19 @@ def create_app(services: Services) -> FastAPI:
     async def stop_session() -> Response:
         controller, _remote = await _require_authenticated(services)
         await controller.stop()
+        return Response(status_code=204)
+
+    @app.put("/api/capture/mute", status_code=204)
+    async def set_capture_mute(request: MuteRequest) -> Response:
+        """Withhold either channel from the remote, or send it again.
+
+        Deliberately allowed while a capture is running -- muting the room
+        for a private aside is the whole point, and it is the one control
+        here that would be useless if it needed the capture stopped first.
+        """
+        controller, _remote = await _require_authenticated(services)
+        controller.set_channel_muted("mic", request.microphone_muted)
+        controller.set_channel_muted("system", request.system_muted)
         return Response(status_code=204)
 
     @app.websocket("/api/events")
@@ -1091,6 +1138,16 @@ async def _validated_choices(services: Services, request: SessionRequest) -> Cap
     return CaptureChoices(request.microphone_id, request.system_device_id)
 
 
+def _validated_languages(request: CaptureRequest) -> CaptureLanguages:
+    """Accept only a language the transcription service is known to take."""
+    if (
+        request.microphone_language not in SUPPORTED_LANGUAGES
+        or request.system_language not in SUPPORTED_LANGUAGES
+    ):
+        raise ApiError(422, "The selected transcription language is unsupported.")
+    return CaptureLanguages(microphone=request.microphone_language, system=request.system_language)
+
+
 async def _choices_are_available(services: Services, choices: CaptureChoices) -> bool:
     devices = {device.device_id: device.kind for device in await services.list_devices()}
     return (
@@ -1118,9 +1175,20 @@ async def _bootstrap_payload(
     services: Services, controller: DesktopSessionController | None
 ) -> dict[str, object]:
     choices = controller.selected_devices if controller is not None else None
+    languages = controller.selected_languages if controller is not None else DETECT_LANGUAGES
+    muted = controller.muted_channels if controller is not None else {}
     return {
         "authenticated": controller is not None,
         "devices": await _device_payloads(services),
+        # The window keeps its own copy of both -- the languages in local
+        # storage, the mute state in memory -- so this is what a reload
+        # lands on: the run that is actually in progress, not what the
+        # window last chose.
+        "languages": {"microphone": languages.microphone, "system": languages.system},
+        "muted": {
+            "microphone": bool(muted.get("mic")),
+            "system": bool(muted.get("system")),
+        },
         "selected_devices": (
             {
                 "microphone_id": choices.microphone_id,
