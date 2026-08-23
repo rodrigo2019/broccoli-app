@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from broccoli_desktop.branding import load_icon_image
 from broccoli_desktop.models import ConnectionState
 
 
@@ -80,7 +81,6 @@ class _PystrayIcon:
 def build_system_tray(runtime: RuntimeProtocol) -> TrayController:
     """Create the real pystray menu only for the production desktop process."""
     import pystray
-    from PIL import Image
 
     menu = pystray.Menu(
         pystray.MenuItem("Abrir o Broccoli Desktop", lambda _icon: controller.show_window()),
@@ -90,7 +90,7 @@ def build_system_tray(runtime: RuntimeProtocol) -> TrayController:
     )
     icon = pystray.Icon(
         "broccoli-desktop",
-        Image.new("RGBA", (64, 64), "#1f8b4c"),
+        load_icon_image(),
         "Broccoli Desktop",
         menu,
     )

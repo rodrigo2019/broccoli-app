@@ -17,6 +17,7 @@ import pyaudiowpatch
 import uvicorn
 
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app, create_uvicorn_config
+from broccoli_desktop.branding import APPLICATION_ICON, apply_taskbar_identity
 from broccoli_desktop.capture import PyAudioCaptureBackend
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.credentials import CredentialStore
@@ -484,6 +485,9 @@ def start_runtime(
 
     runtime: DesktopRuntime | None = None
     try:
+        # Before the window, never after: the taskbar button inherits the
+        # process identity that exists at the moment the shell creates it.
+        apply_taskbar_identity()
         create_window = window_factory or _create_pywebview_window
         window = create_window("Broccoli Desktop", server.window_url)
         create_tray = tray_factory or _create_system_tray
@@ -733,6 +737,14 @@ def _start_pywebview(runtime: DesktopRuntime) -> None:
     """Start PyWebView without letting its SIGINT handler bypass runtime teardown."""
     import webview
 
+    # ``icon`` is documented as GTK/QT-only, but the WinForms backend reads the
+    # same state and assigns it to the form -- which is the window's title bar,
+    # its Alt+Tab entry, and its taskbar button. Without it that backend falls
+    # back to whatever sys.executable carries: the embedded icon once
+    # PyInstaller has packaged the application, and python.exe's own from a
+    # source checkout.
+    window_icon = str(APPLICATION_ICON)
+
     # PyWebView installs its own SIGINT handler while starting its Windows GUI
     # backend.  Without this hook, that replacement bypasses
     # ``_install_interrupt_handler`` above: the backend repeatedly asks the
@@ -742,7 +754,7 @@ def _start_pywebview(runtime: DesktopRuntime) -> None:
     gui = webview.initialize()
     original_interrupt_handler = getattr(gui, "_sigint_handler", None)
     if not callable(original_interrupt_handler):
-        webview.start()
+        webview.start(icon=window_icon)
         return
 
     def handle_interrupt(signum: int, frame: Any) -> None:
@@ -751,7 +763,7 @@ def _start_pywebview(runtime: DesktopRuntime) -> None:
 
     gui._sigint_handler = handle_interrupt
     try:
-        webview.start()
+        webview.start(icon=window_icon)
     finally:
         gui._sigint_handler = original_interrupt_handler
 

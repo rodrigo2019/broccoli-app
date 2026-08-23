@@ -39,6 +39,7 @@ jobs:
             "static/app.js",
             "static/index.html",
             "static/output.css",
+            "static/images/broccoli_icon.ico",
             "static/vendor/bootstrap-icons/bootstrap-icons.css"
           )) {
             if (-not (Test-Path (Join-Path $root $required))) {

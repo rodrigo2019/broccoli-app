@@ -3,13 +3,12 @@
 
 from pathlib import Path
 
-import PyInstaller
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
-APPLICATION_ICON = (
-    Path(PyInstaller.__file__).resolve().parent / "bootloader" / "images" / "icon-windowed.ico"
-)
+#: The same file broccoli_desktop.branding hands to the window and the tray, so
+#: the executable, its shortcuts, and the running application agree on one logo.
+APPLICATION_ICON = PROJECT_ROOT / "broccoli_desktop" / "static" / "images" / "broccoli_icon.ico"
 RUNTIME_PACKAGES = (
     "webview",
     "pyaudiowpatch",

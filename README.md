@@ -34,6 +34,18 @@ Run validation:
 .\scripts\check.ps1
 ```
 
+## Application icon
+
+The window, the notification area, the executable, and the installer all read
+`broccoli_desktop\static\images\broccoli_icon.ico`, which is committed. It is
+generated from `broccoli_icon.svg` by a script that rasterizes the logo with an
+installed Chrome or Edge; rerun it after changing the logo and commit the
+result:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_icon.py
+```
+
 ## Windows installer
 
 Build the installer on Windows 11 x64 with Python 3.12, Node.js/npm, uv, and

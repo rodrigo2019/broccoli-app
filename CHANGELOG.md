@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Broccoli logo on every Windows surface: the window title bar and its taskbar
+  button, the notification area, `BroccoliDesktop.exe` and the shortcuts it backs,
+  and the installer. `scripts/build_icon.py` rasterizes the icon from the logo SVG.
+- An explicit AppUserModelID, claimed at startup and repeated on the installed
+  shortcuts. The taskbar resolves a button's icon through that identity rather
+  than reading the window's own, so without it the button showed the icon of
+  whichever executable launched the process.
 - Forced transcription language per channel, chosen in the capture dock before a capture starts.
 - Mute for the microphone and the system audio, toggleable during a capture.
 - Session pinning to keep important sessions at the top of the library.

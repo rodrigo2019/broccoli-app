@@ -2,6 +2,10 @@
 #define MyAppName "Broccoli Desktop"
 #define MyAppVersion "0.1.0"
 #define MyAppExeName "BroccoliDesktop.exe"
+; Must match broccoli_desktop.branding.APPLICATION_IDENTITY: the running
+; process claims that identity at startup, and a shortcut pinned under a
+; different one becomes a second taskbar button that never lights up.
+#define MyAppUserModelId "Broccoli.BroccoliDesktop"
 
 [Setup]
 AppId={#MyAppId}
@@ -15,6 +19,11 @@ OutputDir={#SourcePath}\..\dist\installer
 OutputBaseFilename=BroccoliDesktop-{#MyAppVersion}-setup
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; setup.exe is the first thing a user sees of the application, and the only
+; file they download; without this it carries Inno Setup's own icon. The
+; Start Menu and desktop shortcuts need no equivalent -- they inherit the icon
+; PyInstaller embedded in the executable they point at.
+SetupIconFile={#SourcePath}\..\broccoli_desktop\static\images\broccoli_icon.ico
 ArchitecturesAllowed=x64compatible and not arm64
 ArchitecturesInstallIn64BitMode=x64compatible and not arm64
 MinVersion=10.0.22000
@@ -27,8 +36,8 @@ WizardStyle=modern
 Source: "{#SourcePath}\..\dist\BroccoliDesktop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelId}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelId}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: IsWebView2Installed

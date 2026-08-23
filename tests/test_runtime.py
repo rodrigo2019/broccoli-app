@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from pytest import fixture, raises
 
 from broccoli_desktop.api import Services, create_app
+from broccoli_desktop.branding import APPLICATION_ICON
 from broccoli_desktop.browser_only import print_window_url
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.models import ConnectionState
@@ -662,7 +663,7 @@ def test_console_interrupt_routes_pywebviews_replaced_handler_to_runtime_teardow
         def initialize(self) -> FakeGui:
             return gui
 
-        def start(self) -> None:
+        def start(self, icon: str | None = None) -> None:
             # This matches PyWebView's Windows backend, which replaces the
             # application's handler after the runtime has installed it.
             signal.signal(signal.SIGINT, gui._sigint_handler)
@@ -691,6 +692,85 @@ def test_console_interrupt_routes_pywebviews_replaced_handler_to_runtime_teardow
     assert fake_tray.stop_calls == 1
     assert fake_window.destroyed is True
     assert signal.getsignal(signal.SIGINT) is previous_handler
+
+
+def test_the_native_window_opens_with_the_application_icon(
+    fake_server: FakeServer,
+    fake_window: FakeWindow,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+    monkeypatch: Any,
+) -> None:
+    """Started without an icon, PyWebView's WinForms backend falls back to the
+    one sys.executable carries -- python.exe's from a source checkout. The
+    title bar, the Alt+Tab entry and the taskbar button all read that form
+    icon, so passing ours is what puts the logo on the window at all."""
+
+    class FakeWebView:
+        def __init__(self) -> None:
+            self.icon: str | None = None
+
+        def initialize(self) -> object:
+            """Stand in for a GUI backend with no handler of its own to wrap."""
+            return object()
+
+        def start(self, icon: str | None = None) -> None:
+            self.icon = icon
+
+    web_view = FakeWebView()
+    monkeypatch.setitem(sys.modules, "webview", web_view)
+
+    runtime = start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: fake_window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+    )
+
+    assert runtime is not None
+    assert web_view.icon == str(APPLICATION_ICON)
+
+
+def test_the_shell_identity_is_claimed_before_the_window_exists(
+    fake_server: FakeServer,
+    fake_tray: FakeTray,
+    fake_dialog: FakeDialog,
+    monkeypatch: Any,
+) -> None:
+    """The shell reads a window's AppUserModelID when it creates the taskbar
+    button and never revisits it, so claiming the identity after the window is
+    up is the same as not claiming it: the button keeps the icon of whatever
+    executable the shell derived an identity from instead of the window's own.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(
+        "broccoli_desktop.runtime.apply_taskbar_identity", lambda: order.append("identity")
+    )
+
+    def create_window(_title: str, _url: str) -> FakeWindow:
+        order.append("window")
+        return FakeWindow()
+
+    runtime = start_runtime(
+        RuntimeConfig(
+            environment="local",
+            server_url="http://127.0.0.1:8000",
+            websocket_path="/ws/listening/",
+        ),
+        server_factory=lambda _config: fake_server,
+        window_factory=create_window,
+        tray_factory=lambda _runtime: fake_tray,
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+
+    assert runtime is not None
+    assert order == ["identity", "window"]
 
 
 def test_window_close_hides_instead_of_stopping_capture(
