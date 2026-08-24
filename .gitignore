@@ -1,10 +1,12 @@
-.venv/
+.venv
+.idea/
 __pycache__/
 .ruff_cache/
 .pytest_cache/
 .env
 build/
 dist/
+artifacts/
 *.spec
 !installer/BroccoliDesktop.spec
 node_modules/
