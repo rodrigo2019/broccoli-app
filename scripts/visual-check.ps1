@@ -206,6 +206,24 @@ try {
     # walks -- the post-login settings scan below runs while #proxyFields is
     # collapsed and structurally cannot see them.
     Invoke-Browser -BrowserArguments @("find", "testid", "proxy-toggle", "click")
+    # The connection card is the only section on this screen, so it takes the
+    # form's full width instead of half a two-column grid; its fields stay
+    # inside it (nowrap option labels used to push the grid tracks past the
+    # card's edge); and the address shares its row with the port.
+    $proxyLayout = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const card = document.getElementById('settingsConnectionSection'); const cardBox = card.getBoundingClientRect(); const form = document.getElementById('settingsForm').getBoundingClientRect(); let spill = 0; card.querySelectorAll('*').forEach((el) => { spill = Math.max(spill, Math.round(el.getBoundingClientRect().right - cardBox.right)); }); const host = document.getElementById('proxyHost').getBoundingClientRect(); const port = document.getElementById('proxyPort').getBoundingClientRect(); return [Math.round(form.width - cardBox.width), spill, Math.round(Math.abs(host.top - port.top))]; })()"
+    ) | ConvertFrom-Json
+    $proxyLayout = @($proxyLayout)
+    if ([int]$proxyLayout[0] -gt 2) {
+        throw "The pre-login connection card is $($proxyLayout[0])px narrower than its form."
+    }
+    if ([int]$proxyLayout[1] -gt 1) {
+        throw "Proxy fields spill $($proxyLayout[1])px past the connection card's edge."
+    }
+    if ([int]$proxyLayout[2] -gt 2) {
+        throw "The proxy address and port fields are not on one row."
+    }
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Assert-NoAccessibilityViolations -Screen "the pre-login network settings screen"
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "settings-pre-login.png"))
@@ -218,12 +236,24 @@ try {
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
     Invoke-Browser -BrowserArguments @("wait", "--text", $invalidTokenText)
+    # The error line grows the card by one row; the compact window has to
+    # absorb that without a scrollbar.
+    $errorOverflow = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const doc = document.scrollingElement; return doc.scrollHeight - doc.clientHeight; })()"
+    ) | ConvertFrom-Json)
+    if ([int]$errorOverflow -gt 0) {
+        throw "The login error made the compact window scroll by $errorOverflow px."
+    }
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
 
     Invoke-Browser -BrowserArguments @("find", "testid", "token-input", "fill", "visual-test-token")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("find", "testid", "login-submit", "click")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Transcri$([char]0x00E7)$([char]0x00E3)o")
+    # Signing in maximizes the real window (runtime.py); the rest of the run
+    # exercises the signed-in screens at a desktop size.
+    Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
     $focused = (Invoke-Browser -BrowserArguments @(
         "eval",
         "document.activeElement.tagName + '#' + document.activeElement.id"
@@ -243,6 +273,16 @@ try {
         "--fn",
         "document.querySelector('#sessionTitle').value.trim().length > 0"
     )
+
+    # An empty transcript still fills its column, so the placeholder centers
+    # in the panel instead of sitting in a one-line strip at the top.
+    $unfilledColumn = (Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const surface = document.getElementById('transcriptTimeline'); const wrapper = surface.parentElement; return Math.round(wrapper.getBoundingClientRect().height - surface.getBoundingClientRect().height); })()"
+    ) | ConvertFrom-Json)
+    if ([int]$unfilledColumn -gt 2) {
+        throw "The empty transcript surface leaves $unfilledColumn px of its column unfilled."
+    }
 
     # The screen's label moved into the topbar. The <h1> stayed behind as
     # sr-only so the skip link and focusScreen still have a heading to land on,
@@ -413,6 +453,26 @@ try {
 
     Invoke-Browser -BrowserArguments @("find", "testid", "settings-button", "click")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    # The audio-level cards are styled by the ruleset that matches today's
+    # markup: titles in normal case (a stale duplicate ruleset used to
+    # uppercase the whole header) and every meter segment on one baseline
+    # (the same duplicate hard-coded 18 grid columns and wrapped the 28
+    # segments onto a second row). The settings screen also keeps the
+    # document as its only scroller.
+    $audioCards = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const subtitle = document.querySelector('.audio-level-card__subtitle'); const segs = Array.from(document.querySelectorAll('#settingsMicrophoneMeter .audio-level-card__segment')); const bottoms = new Set(segs.map((s) => Math.round(s.getBoundingClientRect().bottom))); return [getComputedStyle(subtitle).textTransform, segs.length, bottoms.size, getComputedStyle(document.getElementById('settingsView')).overflowY]; })()"
+    ) | ConvertFrom-Json
+    $audioCards = @($audioCards)
+    if ($audioCards[0] -ne "none") {
+        throw "The audio card subtitle inherits text-transform '$($audioCards[0])'."
+    }
+    if ([int]$audioCards[1] -lt 1 -or [int]$audioCards[2] -ne 1) {
+        throw "The microphone meter wrapped: $($audioCards[1]) segments across $($audioCards[2]) baselines."
+    }
+    if ($audioCards[3] -ne "visible") {
+        throw "The settings screen grew a scroller of its own (overflow-y: $($audioCards[3]))."
+    }
     Invoke-Browser -BrowserArguments @("select", "#settingsMicrophoneSelect", "mic-1")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("select", "#settingsSystemDeviceSelect", "system-1")
