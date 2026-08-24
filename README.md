@@ -63,8 +63,20 @@ uninstaller. Microsoft Edge WebView2 Runtime must already be installed; the
 installer stops before installation when it is unavailable.
 
 The packaged application embeds the backend hostnames and the Listening
-WebSocket path by design (see `config.py`); do not include a token or a
+WebSocket path by design (see `config.py`), along with the default proxy
+configuration script address (see `settings.py`); do not include a token or a
 production transcript in build inputs, CI configuration, or release artifacts.
+
+## Proxy
+
+The settings screen configures the proxy either manually, with a host and port,
+or from an automatic configuration script (PAC). In script mode Windows itself
+downloads and evaluates the script through `WinHttpGetProxyForUrl` and names a
+proxy for the backend URL, so no JavaScript engine is bundled; the username and
+password from the same panel are then applied to whatever proxy it chose. The
+script address arrives filled in with the address Windows uses under Settings >
+Network & Internet > Proxy, but nothing is routed anywhere until the proxy is
+enabled.
 
 ## Selecting an environment
 

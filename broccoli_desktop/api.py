@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from broccoli_desktop.autoproxy import AutoProxyError, ResolvedProxy, resolve_script_proxy
 from broccoli_desktop.capture import (
     AudioLevelMonitor,
     AudioLevelSnapshot,
@@ -64,6 +65,7 @@ from broccoli_desktop.settings import (
     DeviceSettings,
     InMemoryDeviceSettings,
     InMemoryProxySettings,
+    ProxyMode,
     ProxySettings,
     ProxySettingsStore,
 )
@@ -94,8 +96,13 @@ def _build_proxy_url(host: str, port: int, username: str, password: str | None) 
     return f"http://{userinfo}@{host}:{port}"
 
 
-async def _default_proxy_prober(target_url: str, proxy_url: str) -> bool:
+async def _default_proxy_prober(target_url: str, proxy_url: str | None) -> bool:
     """Report only whether a request reached ``target_url`` through the proxy.
+
+    ``proxy_url`` is None when there is no proxy to go through -- a
+    configuration script is entitled to answer DIRECT, and the honest test of
+    that answer is a direct request rather than a claim of success. httpx
+    reads None as exactly that.
 
     Deliberately collapses every failure -- DNS, a refused connection, a proxy
     auth challenge, a 5xx from the target -- into the same ``False``. Anything
@@ -142,7 +149,11 @@ type RemoteFactory = Callable[[str], ListeningRemote]
 type ControllerFactory = Callable[[ListeningRemote, CaptureBackend], DesktopSessionController]
 #: (target_url, proxy_url) -> whether a request reached the target through the
 #: proxy. Injected so tests never need a real network or a real proxy.
-type ProxyProber = Callable[[str, str], Awaitable[bool]]
+type ProxyProber = Callable[[str, str | None], Awaitable[bool]]
+#: (target_url, script_url) -> the proxy the script chose, or None for a
+#: direct connection. Injected for the same reason as ProxyProber: the real
+#: one downloads a script over the real network.
+type ScriptResolver = Callable[[str, str], ResolvedProxy | None]
 
 
 @dataclass
@@ -165,6 +176,7 @@ class Services:
     #: an injected Services never reaches the network unless a test opts in.
     backend_url: str = ""
     proxy_prober: ProxyProber = _default_proxy_prober
+    script_resolver: ScriptResolver = resolve_script_proxy
     session_titles: SessionTitleGenerator = field(default_factory=SessionTitleGenerator)
     #: Moves the native window between its two fixed sizes. None wherever there
     #: is no native window to move -- browser_only.py and the API tests.
@@ -172,6 +184,12 @@ class Services:
     controller: DesktopSessionController | None = field(default=None, init=False)
     _remote: ListeningRemote | None = field(default=None, init=False, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
+    #: (script address, what it resolved to). Resolving is a network round
+    #: trip and every rebuilt transport needs the answer, so it is kept until
+    #: the address changes -- see ensure_proxy_resolved.
+    _resolved_script: tuple[str, ResolvedProxy | None] | None = field(
+        default=None, init=False, repr=False
+    )
     _device_cache: tuple[float, list[DeviceDescriptor]] | None = field(
         default=None, init=False, repr=False
     )
@@ -206,6 +224,10 @@ class Services:
         token = await asyncio.to_thread(self.credentials.load_token)
         if token is None:
             return None
+        # Both branches below build a remote through remote_factory, which
+        # reads proxy_url() synchronously. The script behind that answer has
+        # to be downloaded first, and not on this thread.
+        await self.ensure_proxy_resolved()
         if self._token != token or self.controller is None:
             remote = self.remote_factory(token)
             self._remote = remote
@@ -297,6 +319,49 @@ class Services:
         if self.controller is not None:
             self.controller.clear_selected_devices()
 
+    async def ensure_proxy_resolved(self) -> None:
+        """Read the configuration script, off the loop, before a remote is built.
+
+        proxy_url() has to stay synchronous -- remote_factory calls it inside a
+        closure -- and a script is a network download rather than the cheap
+        vault read that method was designed around. Doing it inline would hold
+        the event loop, and with it the transcript socket, the event feed and
+        the level meter, for as long as the script server takes to answer.
+
+        So the download happens here, on a worker thread, and proxy_url() only
+        reads what this left behind. Callers run it immediately before building
+        a remote; a cached answer for the same address costs nothing.
+        """
+        settings = self.proxy_settings.load()
+        if not settings.enabled or settings.mode is not ProxyMode.SCRIPT:
+            return
+        script_url = settings.script_url.strip()
+        if not script_url:
+            return
+        if self._resolved_script is not None and self._resolved_script[0] == script_url:
+            return
+        try:
+            resolved = await asyncio.to_thread(self.script_resolver, self.backend_url, script_url)
+        except (AutoProxyError, ValueError):
+            # A mistyped address or a script server that is down must not raise
+            # out of whichever request happened to rebuild the transport. The
+            # connection made without a proxy fails on its own on a network that
+            # needs one, and "Testar conexão" is where the user is told why.
+            logging.getLogger(__name__).warning(
+                "The proxy configuration script could not be read.", exc_info=True
+            )
+            resolved = None
+        self._resolved_script = (script_url, resolved)
+
+    def _script_proxy(self) -> ResolvedProxy | None:
+        """What ensure_proxy_resolved last got out of the configuration script."""
+        if self._resolved_script is None:
+            logging.getLogger(__name__).warning(
+                "A proxy configuration script is set but was never resolved."
+            )
+            return None
+        return self._resolved_script[1]
+
     def proxy_url(self) -> str | None:
         """Build the proxy URL a remote should route through, or None when unset.
 
@@ -305,9 +370,25 @@ class Services:
         this builds -- this only runs at login and at token change, never on
         the request hot path, so a vault read here is cheap enough to not
         thread through asyncio.to_thread the way credentials.load_token() does.
+
+        In script mode the host and port come from what the script chose rather
+        than from the settings file; the username and password still come from
+        the settings screen, which is the only place a script cannot speak for.
         """
         settings = self.proxy_settings.load()
-        if not settings.enabled or not settings.host or not settings.port:
+        if not settings.enabled:
+            return None
+        if settings.mode is ProxyMode.SCRIPT:
+            resolved = self._script_proxy()
+            if resolved is None:
+                # Either the script answered DIRECT, which is an instruction to
+                # connect straight out, or it could not be read at all -- which
+                # ensure_proxy_resolved has already reported.
+                return None
+            host, port = resolved.host, resolved.port
+        else:
+            host, port = settings.host, settings.port
+        if not host or not port:
             return None
         password = self.credentials.load_proxy_password()
         if settings.username and password is None:
@@ -318,7 +399,7 @@ class Services:
             # process -- never "this proxy needs no password". Refusing here
             # fails closed instead of silently connecting unauthenticated.
             return None
-        return _build_proxy_url(settings.host, settings.port, settings.username, password)
+        return _build_proxy_url(host, port, settings.username, password)
 
     def save_proxy_settings(self, settings: ProxySettings, *, password: str | None) -> None:
         """Save a submitted password to the vault before persisting the
@@ -339,6 +420,9 @@ class Services:
         if password:
             self.credentials.save_proxy_password(password)
         self.proxy_settings.save(settings)
+        # A different script address is a different answer, and the cached
+        # one would otherwise outlive the setting that produced it.
+        self._resolved_script = None
         self.invalidate_remote()
 
     def clear_proxy_settings(self) -> None:
@@ -354,6 +438,7 @@ class Services:
         """
         self.credentials.delete_proxy_password()
         self.proxy_settings.clear()
+        self._resolved_script = None
         self.invalidate_remote()
 
     async def _create_controller(self, remote: ListeningRemote) -> DesktopSessionController:
@@ -443,8 +528,11 @@ class ProxyPayload(BaseModel):
     """
 
     enabled: bool
+    mode: ProxyMode = ProxyMode.MANUAL
     host: str = ""
     port: int = 0
+    #: Only read in script mode, where it replaces host and port entirely.
+    script_url: str = ""
     username: str = ""
     #: None means "leave whatever is already stored" -- the saved password
     #: never round-trips to the settings screen, so there is nothing to resend
@@ -460,8 +548,10 @@ class ProxyTestRequest(BaseModel):
     """The candidate values currently in the settings form, tested as typed --
     independent of whatever is already saved or enabled."""
 
+    mode: ProxyMode = ProxyMode.MANUAL
     host: str = ""
     port: int = 0
+    script_url: str = ""
     username: str = ""
     password: str | None = None
 
@@ -717,6 +807,7 @@ def create_app(services: Services) -> FastAPI:
             raise ApiError(422, "A credential is required.")
         if services.controller is not None and _capture_is_active(services.controller):
             raise ApiError(409, "A capture is active.")
+        await services.ensure_proxy_resolved()
         remote = services.remote_factory(token)
         try:
             await remote.verify_token()
@@ -765,27 +856,72 @@ def create_app(services: Services) -> FastAPI:
         if not proxy.enabled:
             services.clear_proxy_settings()
             return Response(status_code=204)
-        host = proxy.host.strip()
         username = proxy.username.strip()
-        if not host or not proxy.port:
-            raise ApiError(422, "Proxy host and port are required.")
-        services.save_proxy_settings(
-            ProxySettings(host=host, port=proxy.port, username=username, enabled=True),
-            password=proxy.password,
-        )
+        if proxy.mode is ProxyMode.SCRIPT:
+            script_url = proxy.script_url.strip()
+            if not script_url:
+                # Same reason the manual mode refuses a missing host and port:
+                # an enabled proxy with nothing to route through is a setting
+                # that silently does nothing.
+                raise ApiError(422, "A proxy configuration script address is required.")
+            settings = ProxySettings(
+                enabled=True,
+                mode=ProxyMode.SCRIPT,
+                script_url=script_url,
+                username=username,
+            )
+        else:
+            host = proxy.host.strip()
+            if not host or not proxy.port:
+                raise ApiError(422, "Proxy host and port are required.")
+            settings = ProxySettings(
+                enabled=True,
+                mode=ProxyMode.MANUAL,
+                host=host,
+                port=proxy.port,
+                username=username,
+            )
+        services.save_proxy_settings(settings, password=proxy.password)
         return Response(status_code=204)
 
     @app.post("/api/settings/test-proxy")
     async def test_proxy(request: ProxyTestRequest) -> dict[str, bool]:
         """Try one request through the submitted (not necessarily saved) proxy
         values and report only whether it got through -- see _default_proxy_prober
-        for why the answer never says more than that."""
-        host = request.host.strip()
-        if not host or not request.port:
-            raise ApiError(422, "Proxy host and port are required.")
-        proxy_url = _build_proxy_url(host, request.port, request.username.strip(), request.password)
+        for why the answer never says more than that.
+
+        ``script_error`` is the one distinction worth drawing, because the two
+        failures need different fixes: correct the script address, or correct
+        the credentials. It is no credential oracle either -- it reports on a
+        URL the caller has just typed, not on what the proxy thought of a
+        password.
+        """
+        username = request.username.strip()
+        if request.mode is ProxyMode.SCRIPT:
+            script_url = request.script_url.strip()
+            if not script_url:
+                raise ApiError(422, "A proxy configuration script address is required.")
+            try:
+                resolved = await asyncio.to_thread(
+                    services.script_resolver, services.backend_url, script_url
+                )
+            except (AutoProxyError, ValueError):
+                return {"ok": False, "script_error": True}
+            # A script is entitled to answer DIRECT, and the honest test of that
+            # is a direct request rather than reporting success on the strength
+            # of the script having been readable.
+            proxy_url = (
+                None
+                if resolved is None
+                else _build_proxy_url(resolved.host, resolved.port, username, request.password)
+            )
+        else:
+            host = request.host.strip()
+            if not host or not request.port:
+                raise ApiError(422, "Proxy host and port are required.")
+            proxy_url = _build_proxy_url(host, request.port, username, request.password)
         ok = await services.proxy_prober(services.backend_url, proxy_url)
-        return {"ok": ok}
+        return {"ok": ok, "script_error": False}
 
     @app.post("/api/window", status_code=204)
     def set_window_mode(request: WindowModeRequest) -> Response:
@@ -1302,8 +1438,10 @@ def _proxy_payload(settings: ProxySettings) -> dict[str, object]:
     """Never includes a password field -- ProxySettings has none to include."""
     return {
         "enabled": settings.enabled,
+        "mode": settings.mode.value,
         "host": settings.host,
         "port": settings.port,
+        "script_url": settings.script_url,
         "username": settings.username,
     }
 

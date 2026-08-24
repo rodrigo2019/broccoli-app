@@ -285,7 +285,7 @@
                   </div>
                   <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
                     <input id="proxyEnabled" class="toggle toggle-primary" type="checkbox" data-testid="proxy-toggle" />
-                    <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Ativar configuração manual de rede.</span></span>
+                    <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Rotear a conexão com o Broccoli através de um proxy.</span></span>
                   </label>
                   <!--
                     Every input below points aria-labelledby at its own legend's
@@ -300,15 +300,42 @@
                     rather than merely overlapping it.
                   -->
                   <div id="proxyFields" class="hidden grid gap-3 border-t border-base-content/10 pt-4">
-                    <fieldset class="fieldset">
-                      <legend id="proxyHostLegend" class="fieldset-legend text-xs">Endereço</legend>
-                      <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" aria-labelledby="proxyHostLegend" />
+                    <!--
+                      The two radios name themselves through the <label> that
+                      wraps each one, so they need no aria-labelledby: the
+                      caveat above applies to a <legend> standing in for a
+                      sibling <input>'s name, which is not the shape here.
+                    -->
+                    <fieldset class="grid gap-3" aria-label="Forma de configuração do proxy">
+                      <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                        <input id="proxyModeManual" class="radio radio-primary" type="radio" name="proxyMode" value="manual" data-testid="proxy-mode-manual" />
+                        <span class="min-w-0"><span class="block font-medium">Manual</span><span class="block text-xs text-base-content/60">Informe o endereço e a porta do proxy.</span></span>
+                      </label>
+                      <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                        <input id="proxyModeScript" class="radio radio-primary" type="radio" name="proxyMode" value="script" data-testid="proxy-mode-script" />
+                        <span class="min-w-0"><span class="block font-medium">Script automático</span><span class="block text-xs text-base-content/60">O Windows lê o script e escolhe o proxy para cada destino.</span></span>
+                      </label>
                     </fieldset>
-                    <div class="grid gap-3 sm:grid-cols-2">
+                    <div id="proxyManualFields" class="grid gap-3">
                       <fieldset class="fieldset">
-                        <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
-                        <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
+                        <legend id="proxyHostLegend" class="fieldset-legend text-xs">Endereço</legend>
+                        <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" aria-labelledby="proxyHostLegend" />
                       </fieldset>
+                      <div class="grid gap-3 sm:grid-cols-2">
+                        <fieldset class="fieldset">
+                          <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
+                          <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
+                        </fieldset>
+                      </div>
+                    </div>
+                    <div id="proxyScriptFields" class="hidden grid gap-3">
+                      <fieldset class="fieldset">
+                        <legend id="proxyScriptUrlLegend" class="fieldset-legend text-xs">Endereço do script</legend>
+                        <input id="proxyScriptUrl" class="input w-full" type="text" placeholder="http://exemplo.local/proxy.pac" autocomplete="off" data-testid="proxy-script-url" aria-labelledby="proxyScriptUrlLegend" aria-describedby="proxyScriptUrlHelp" />
+                        <p id="proxyScriptUrlHelp" class="fieldset-label leading-snug">O mesmo endereço que o Windows usa em Rede e Internet &gt; Proxy &gt; Usar script de instalação. O script decide o proxy por destino, então conexões internas podem sair direto.</p>
+                      </fieldset>
+                    </div>
+                    <div class="grid gap-3 sm:grid-cols-2">
                       <fieldset class="fieldset">
                         <legend id="proxyUsernameLegend" class="fieldset-legend text-xs">Usuário</legend>
                         <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" aria-labelledby="proxyUsernameLegend" />

@@ -6,10 +6,13 @@ import json
 import logging
 import pathlib
 import subprocess
+import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from typing import Any
 
 import httpx
 import pytest
@@ -25,6 +28,8 @@ from broccoli_desktop.api import (
     create_app,
     create_uvicorn_config,
 )
+from broccoli_desktop.autoproxy import AutoProxyError, ResolvedProxy
+from broccoli_desktop.console import ensure_standard_streams
 from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
 from broccoli_desktop.models import (
     ConnectionState,
@@ -36,6 +41,7 @@ from broccoli_desktop.models import (
 )
 from broccoli_desktop.remote import RemoteProtocolError
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
+from broccoli_desktop.settings import DEFAULT_SCRIPT_URL
 from tests.fakes import (
     VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
@@ -319,6 +325,7 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
         ("tokenInput", "Token de acesso"),
         ("proxyHost", "Endereço"),
         ("proxyPort", "Porta"),
+        ("proxyScriptUrl", "Endereço do script"),
         ("proxyUsername", "Usuário"),
         ("proxyPassword", "Senha"),
     ):
@@ -1280,6 +1287,29 @@ def test_creating_the_uvicorn_config_installs_capability_key_log_redaction(
         assert any(isinstance(installed, _RedactCapabilityKeyFilter) for installed in filters)
 
 
+def test_the_loopback_config_survives_a_process_with_no_console(
+    services: Services, monkeypatch: Any
+) -> None:
+    """The packaged, windowed build died at startup on every launch from
+    Explorer: "Unable to configure formatter 'default'".
+
+    Constructing uvicorn.Config runs its dictConfig, whose default formatter
+    asks sys.stdout whether it is a tty and whose handlers stream to
+    sys.stdout and sys.stderr. A windowed build has none of those -- Python
+    leaves them None -- so the very first thing the runtime does after opening
+    the window raised AttributeError on NoneType.
+
+    Running the executable from a shell hides this completely: the process
+    inherits the shell's streams and behaves. Only a launch with no console
+    reproduces it, which is what this simulates.
+    """
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    ensure_standard_streams()
+
+    create_uvicorn_config(create_app(services), port=8765)
+
+
 def test_the_capability_key_redaction_filter_strips_a_logged_request_line() -> None:
     """Directly exercises the filter uvicorn's own log records pass through --
     once shaped like its HTTP access log line, once like its WebSocket
@@ -1545,7 +1575,14 @@ def test_saved_proxy_settings_are_returned_without_a_password_field(client: Test
     stored = client.get("/api/settings").json()
 
     assert stored == {
-        "proxy": {"enabled": True, "host": "proxy.local", "port": 8080, "username": "user"}
+        "proxy": {
+            "enabled": True,
+            "mode": "manual",
+            "host": "proxy.local",
+            "port": 8080,
+            "script_url": DEFAULT_SCRIPT_URL,
+            "username": "user",
+        }
     }
     assert "password" not in json.dumps(stored)
 
@@ -1554,7 +1591,16 @@ def test_settings_default_to_a_disabled_proxy(client: TestClient) -> None:
     response = client.get("/api/settings")
 
     assert response.status_code == 200
-    assert response.json() == {"proxy": {"enabled": False, "host": "", "port": 0, "username": ""}}
+    assert response.json() == {
+        "proxy": {
+            "enabled": False,
+            "mode": "manual",
+            "host": "",
+            "port": 0,
+            "script_url": DEFAULT_SCRIPT_URL,
+            "username": "",
+        }
+    }
 
 
 def test_settings_are_reachable_without_authentication(client: TestClient) -> None:
@@ -1828,7 +1874,7 @@ def test_test_proxy_reports_success(client: TestClient, services: Services) -> N
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.json() == {"ok": True, "script_error": False}
     assert prober.calls == [("https://backend.example", "http://user:secret@proxy.local:8080")]
 
 
@@ -1858,7 +1904,11 @@ def test_test_proxy_reports_failure_identically_for_a_bad_password_and_an_unreac
     )
 
     assert wrong_password_response.status_code == unreachable_host_response.status_code == 200
-    assert wrong_password_response.json() == unreachable_host_response.json() == {"ok": False}
+    assert (
+        wrong_password_response.json()
+        == unreachable_host_response.json()
+        == {"ok": False, "script_error": False}
+    )
 
 
 def test_test_proxy_never_echoes_the_password_back(client: TestClient, services: Services) -> None:
@@ -1898,7 +1948,7 @@ def test_test_proxy_checks_the_submitted_values_not_the_saved_ones(
         json={"host": "proxy.local", "port": 8080, "username": "", "password": ""},
     )
 
-    assert response.json() == {"ok": True}
+    assert response.json() == {"ok": True, "script_error": False}
 
 
 def test_saving_and_testing_the_proxy_never_logs_the_password(
@@ -2640,3 +2690,258 @@ def test_the_device_selects_are_named_by_the_label_the_user_reads(
     ):
         label_id = labelled.attributes[field_id]["aria-labelledby"]
         assert labelled.element_text[label_id].strip() == visible_label
+
+
+# ------------------------------------------------- automatic proxy configuration
+
+
+@dataclass
+class FakeScriptResolver:
+    """Stand in for WinHTTP, which these tests must never reach: it would
+    download a real script over the real network."""
+
+    resolved: ResolvedProxy | None = ResolvedProxy(host="resolved.example", port=3128)
+    error: Exception | None = None
+    calls: list[tuple[str, str]] = field(default_factory=list)
+    threads: list[int] = field(default_factory=list)
+
+    def __call__(self, target_url: str, script_url: str) -> ResolvedProxy | None:
+        self.calls.append((target_url, script_url))
+        self.threads.append(threading.get_ident())
+        if self.error is not None:
+            raise self.error
+        return self.resolved
+
+
+def _script_services(
+    fake_credentials: FakeCredentials,
+    fake_capture: FakeCaptureBackend,
+    resolver: FakeScriptResolver,
+    built_with: list[str | None],
+) -> Services:
+    """Mirror production's composition: remote_factory reads proxy_url() inside
+    the closure, which is where a script-mode proxy has to land."""
+    services: Services
+
+    def remote_factory(_token: str) -> FakeSessionRemote:
+        built_with.append(services.proxy_url())
+        return FakeSessionRemote()
+
+    services = Services(
+        credentials=fake_credentials,
+        remote_factory=remote_factory,
+        capture_backend=fake_capture,
+        loopback_port=8765,
+        backend_url="https://backend.example",
+        script_resolver=resolver,
+    )
+    return services
+
+
+def test_a_script_mode_proxy_routes_through_the_proxy_the_script_chose(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """The whole point: the user names a script, and the connection goes
+    through whatever that script picked for the backend -- carrying the username
+    and password from the same panel, which the script has no way to supply."""
+    resolver = FakeScriptResolver()
+    built_with: list[str | None] = []
+    services = _script_services(fake_credentials, fake_capture, resolver, built_with)
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "mode": "script",
+                "script_url": "http://proxy.local/config.pac",
+                "username": "user",
+                "password": "secret",
+            }
+        },
+    )
+    login(client)
+
+    assert resolver.calls == [("https://backend.example", "http://proxy.local/config.pac")]
+    assert built_with[-1] == "http://user:secret@resolved.example:3128"
+
+
+def test_the_configuration_script_is_read_off_the_event_loop(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """Reading a script is a network download, not the cheap vault read
+    proxy_url() was built around. Run inline it would hold the loop -- and with
+    it the transcript socket, the event feed and the level meter -- for as long
+    as the script takes to answer, which on a network with a broken script
+    server is the full timeout.
+    """
+    resolver = FakeScriptResolver()
+    built_with: list[str | None] = []
+    services = _script_services(fake_credentials, fake_capture, resolver, built_with)
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "mode": "script",
+                "script_url": "http://proxy.local/config.pac",
+            }
+        },
+    )
+    login(client)
+
+    assert resolver.threads
+    assert threading.main_thread().ident not in resolver.threads
+
+
+def test_a_script_that_answers_direct_leaves_the_connection_unproxied(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """DIRECT is an instruction, not a failure: scripts answer it for hosts
+    inside the network, and the loopback backend under --local is one of them."""
+    resolver = FakeScriptResolver(resolved=None)
+    built_with: list[str | None] = []
+    services = _script_services(fake_credentials, fake_capture, resolver, built_with)
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "mode": "script",
+                "script_url": "http://proxy.local/config.pac",
+            }
+        },
+    )
+    login(client)
+
+    assert built_with[-1] is None
+
+
+def test_an_unreadable_script_does_not_take_the_application_down(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """A mistyped address, or a script server that is down, must leave the app
+    usable and the failure visible through the connection test -- not raise out
+    of whichever request happened to rebuild the transport."""
+    resolver = FakeScriptResolver(error=AutoProxyError("unreachable"))
+    built_with: list[str | None] = []
+    services = _script_services(fake_credentials, fake_capture, resolver, built_with)
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+
+    client.post(
+        "/api/settings",
+        json={
+            "proxy": {
+                "enabled": True,
+                "mode": "script",
+                "script_url": "http://broken.local/config.pac",
+            }
+        },
+    )
+    login(client)
+
+    assert built_with[-1] is None
+
+
+def test_a_new_script_address_is_picked_up_without_a_restart(
+    fake_credentials: FakeCredentials, fake_capture: FakeCaptureBackend
+) -> None:
+    """The resolution is cached -- it is a network round trip on the path to
+    every rebuilt transport -- so saving a different address has to drop it, the
+    same way saving a proxy drops the cached remote."""
+    resolver = FakeScriptResolver()
+    built_with: list[str | None] = []
+    services = _script_services(fake_credentials, fake_capture, resolver, built_with)
+    client = TestClient(create_app(services), headers={"host": "127.0.0.1:8765"})
+    proxy = {"enabled": True, "mode": "script", "script_url": "http://first.local/config.pac"}
+    client.post("/api/settings", json={"proxy": proxy})
+    login(client)
+    assert len(resolver.calls) == 1
+
+    resolver.resolved = ResolvedProxy(host="second.example", port=9090)
+    client.post(
+        "/api/settings",
+        json={"proxy": {**proxy, "script_url": "http://second.local/config.pac"}},
+    )
+    assert client.get("/api/session-name").status_code == 200
+
+    assert resolver.calls[-1][1] == "http://second.local/config.pac"
+    assert built_with[-1] == "http://second.example:9090"
+
+
+def test_enabling_script_mode_without_an_address_is_rejected(client: TestClient) -> None:
+    """The manual mode refuses a missing host and port for the same reason: an
+    enabled proxy with nothing to route through is a setting that silently does
+    nothing."""
+    response = client.post(
+        "/api/settings", json={"proxy": {"enabled": True, "mode": "script", "script_url": "  "}}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "A proxy configuration script address is required."}
+
+
+def test_the_connection_test_separates_an_unreadable_script_from_a_blocked_proxy(
+    client: TestClient, services: Services
+) -> None:
+    """These two failures need different fixes -- correct the address versus
+    correct the credentials -- and reporting both as one generic failure leaves
+    the user guessing which. Unlike the proxy's own answer, this distinction is
+    no credential oracle: it is about a URL the user has just typed."""
+    services.backend_url = "https://backend.example"
+    services.proxy_prober = FakeProxyProber(result=True)
+    services.script_resolver = FakeScriptResolver(error=AutoProxyError("unreachable"))
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={"mode": "script", "script_url": "http://broken.local/config.pac"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "script_error": True}
+
+
+def test_the_connection_test_probes_through_the_proxy_the_script_chose(
+    client: TestClient, services: Services
+) -> None:
+    services.backend_url = "https://backend.example"
+    prober = FakeProxyProber(result=True)
+    services.proxy_prober = prober
+    services.script_resolver = FakeScriptResolver()
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={
+            "mode": "script",
+            "script_url": "http://proxy.local/config.pac",
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert response.json() == {"ok": True, "script_error": False}
+    assert prober.calls == [("https://backend.example", "http://user:secret@resolved.example:3128")]
+
+
+def test_the_connection_test_probes_directly_when_the_script_says_direct(
+    client: TestClient, services: Services
+) -> None:
+    """Reporting success without probing anything would tell the user their
+    setup works on the strength of the script alone."""
+    services.backend_url = "https://backend.example"
+    prober = FakeProxyProber(result=True)
+    services.proxy_prober = prober
+    services.script_resolver = FakeScriptResolver(resolved=None)
+
+    response = client.post(
+        "/api/settings/test-proxy",
+        json={"mode": "script", "script_url": "http://proxy.local/config.pac"},
+    )
+
+    assert response.json() == {"ok": True, "script_error": False}
+    assert prober.calls == [("https://backend.example", None)]

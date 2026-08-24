@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import uvicorn
 
 from broccoli_desktop.api import Services, create_app, create_uvicorn_config
+from broccoli_desktop.autoproxy import ResolvedProxy
 from broccoli_desktop.models import DeviceDescriptor
 from tests.fakes import (
     FakeCaptureBackend,
@@ -46,10 +47,16 @@ class VisualCredentials:
         self.proxy_password = None
 
 
-async def _visual_proxy_prober(_target_url: str, _proxy_url: str) -> bool:
+async def _visual_proxy_prober(_target_url: str, _proxy_url: str | None) -> bool:
     """Always succeed: this is a fake-only offline server, so "Testar conexão"
     must never open a real socket the way the production prober does."""
     return True
+
+
+def _visual_script_resolver(_target_url: str, _script_url: str) -> ResolvedProxy:
+    """Answer without WinHTTP, which would download a real script over the
+    real network -- the same reason the prober above is faked."""
+    return ResolvedProxy(host="proxy.visual.local", port=8080)
 
 
 def create_visual_app(*, port: int):
@@ -68,6 +75,7 @@ def create_visual_app(*, port: int):
             loopback_port=port,
             capability_token=VISUAL_CAPABILITY_TOKEN,
             proxy_prober=_visual_proxy_prober,
+            script_resolver=_visual_script_resolver,
         )
     )
 

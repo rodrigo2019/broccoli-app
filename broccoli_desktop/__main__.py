@@ -5,10 +5,17 @@ from collections.abc import Sequence
 from importlib import import_module
 
 from broccoli_desktop.config import parse_runtime_config
+from broccoli_desktop.console import ensure_standard_streams
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse runtime configuration and start the application on invocation."""
+    # First, before anything that might write a line or ask whether it is
+    # talking to a terminal. The packaged build is windowed, so a launch from
+    # Explorer leaves sys.stdout and sys.stderr as None, and uvicorn's logging
+    # setup -- reached below, through the runtime -- calls isatty() on one of
+    # them while the window is still opening.
+    ensure_standard_streams()
     config = parse_runtime_config(sys.argv[1:] if argv is None else argv)
     try:
         runtime = import_module("broccoli_desktop.runtime")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -25,6 +26,29 @@ class DeviceSettings(Protocol):
     def clear(self) -> None: ...
 
 
+class ProxyMode(StrEnum):
+    """Which of the two ways of naming a proxy the user chose.
+
+    Mirrors the choice Windows itself offers under Settings > Network &
+    Internet > Proxy, because that is where anyone on a corporate network has
+    already met it.
+    """
+
+    #: A host and port typed by hand.
+    MANUAL = "manual"
+    #: An address for an automatic configuration script (PAC), which names the
+    #: proxy per destination. See broccoli_desktop.autoproxy.
+    SCRIPT = "script"
+
+
+#: Offered in the settings screen so nobody on the corporate network has to go
+#: and find it. Only ever a starting value: the proxy stays disabled until
+#: somebody switches it on, so an install outside that network never reaches for
+#: this address on its own. The product already embeds its backend hostnames the
+#: same way -- see the README.
+DEFAULT_SCRIPT_URL = "http://rbins.bosch.com/ca.pac"
+
+
 @dataclass(frozen=True)
 class ProxySettings:
     """Proxy connection settings the local API persists -- deliberately with no
@@ -36,12 +60,17 @@ class ProxySettings:
     port: int = 0
     username: str = ""
     enabled: bool = False
+    mode: ProxyMode = ProxyMode.MANUAL
+    script_url: str = DEFAULT_SCRIPT_URL
 
 
 DEFAULT_PROXY_SETTINGS = ProxySettings()
 
 _PROXY_SETTINGS_FILENAME = "proxy-settings.json"
 _PROXY_SETTINGS_KEYS = frozenset({"host", "port", "username", "enabled"})
+#: Added after the first release. A file written before they existed is a valid
+#: file, not a corrupt one -- see LocalProxySettings.load.
+_OPTIONAL_PROXY_SETTINGS_KEYS = frozenset({"mode", "script_url"})
 
 
 class ProxySettingsStore(Protocol):
@@ -162,23 +191,49 @@ class LocalProxySettings:
         except json.JSONDecodeError:
             self.clear()
             return DEFAULT_PROXY_SETTINGS
-        if not isinstance(payload, dict) or set(payload) != _PROXY_SETTINGS_KEYS:
+        # Required keys must all be present and nothing unknown may appear, but
+        # the keys added after the first release are optional: a file written
+        # by an earlier build is complete for what that build knew, and
+        # answering it with clear() would delete a working proxy configuration
+        # on exactly the network where the app cannot reach the backend without
+        # one.
+        if not isinstance(payload, dict):
+            self.clear()
+            return DEFAULT_PROXY_SETTINGS
+        keys = set(payload)
+        if not _PROXY_SETTINGS_KEYS <= keys or not keys <= (
+            _PROXY_SETTINGS_KEYS | _OPTIONAL_PROXY_SETTINGS_KEYS
+        ):
             self.clear()
             return DEFAULT_PROXY_SETTINGS
         host = payload["host"]
         port = payload["port"]
         username = payload["username"]
         enabled = payload["enabled"]
+        mode = payload.get("mode", ProxyMode.MANUAL.value)
+        script_url = payload.get("script_url", DEFAULT_SCRIPT_URL)
         if (
             not isinstance(host, str)
             or isinstance(port, bool)
             or not isinstance(port, int)
             or not isinstance(username, str)
             or not isinstance(enabled, bool)
+            or not isinstance(script_url, str)
+            or mode not in frozenset(ProxyMode)
         ):
+            # An unrecognised mode is refused rather than downgraded to manual:
+            # routing through whatever host happens to sit in the same file is
+            # not what the file asks for.
             self.clear()
             return DEFAULT_PROXY_SETTINGS
-        return ProxySettings(host=host, port=port, username=username, enabled=enabled)
+        return ProxySettings(
+            host=host,
+            port=port,
+            username=username,
+            enabled=enabled,
+            mode=ProxyMode(mode),
+            script_url=script_url,
+        )
 
     def save(self, settings: ProxySettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +244,8 @@ class LocalProxySettings:
                     "port": settings.port,
                     "username": settings.username,
                     "enabled": settings.enabled,
+                    "mode": settings.mode.value,
+                    "script_url": settings.script_url,
                 },
                 separators=(",", ":"),
             ),

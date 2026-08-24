@@ -46,6 +46,38 @@ jobs:
               throw "Packaged build is missing $required"
             }
           }
+      - name: Verify the packaged application starts
+        shell: pwsh
+        run: |
+          # Two startup defects shipped unnoticed because every check stopped at
+          # "the build succeeded": the archive was missing broccoli_desktop.runtime,
+          # and uvicorn's logging setup called isatty() on the None stdout a
+          # windowed build has. Both are invisible until the executable is run,
+          # and running it from a shell hides the second one -- the process
+          # inherits the shell's streams. Start-Process launches it the way a
+          # shortcut does, with no console and no std handles.
+          $process = Start-Process -FilePath "dist/BroccoliDesktop/BroccoliDesktop.exe" -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(90)
+            $port = $null
+            while ((Get-Date) -lt $deadline -and -not $port) {
+              if ($process.HasExited) {
+                throw "The packaged application exited with code $($process.ExitCode) instead of serving its local API."
+              }
+              $listening = Get-NetTCPConnection -OwningProcess $process.Id -State Listen -ErrorAction SilentlyContinue
+              $port = ($listening | Where-Object { $_.LocalAddress -eq "127.0.0.1" } | Select-Object -First 1).LocalPort
+              if (-not $port) { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $port) { throw "The packaged application never opened its loopback port." }
+            # Reaching /health means the runtime imported, the logging setup
+            # survived, and the local service is up. It says nothing about the
+            # native window, which opens after this and needs a desktop session.
+            $health = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 10
+            if ($health.status -ne "ok") { throw "The packaged application answered /health with $($health | ConvertTo-Json -Compress)." }
+            Write-Host "The packaged application served /health on port $port."
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
       - name: Build Windows installer
         run: .\scripts\installer.ps1
       - name: Upload installer

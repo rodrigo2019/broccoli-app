@@ -3,7 +3,12 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+    copy_metadata,
+)
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
 #: The same file broccoli_desktop.branding hands to the window and the tray, so
@@ -36,7 +41,11 @@ WINDOWS_RUNTIME_IMPORTS = (
 datas = [(str(PROJECT_ROOT / "broccoli_desktop" / "static"), "broccoli_desktop/static")]
 datas.extend(copy_metadata("keyring"))
 binaries = []
-hiddenimports = list(WINDOWS_RUNTIME_IMPORTS)
+# __main__ reaches the runtime through import_module(), whose argument is a
+# string PyInstaller cannot follow -- so nothing below __main__ was collected
+# and the executable died at startup on every build. Collecting the package
+# names them all, which also covers whatever a later dynamic import reaches.
+hiddenimports = list(WINDOWS_RUNTIME_IMPORTS) + collect_submodules("broccoli_desktop")
 for package in RUNTIME_PACKAGES:
     datas.extend(collect_data_files(package))
     binaries.extend(collect_dynamic_libs(package))

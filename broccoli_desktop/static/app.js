@@ -117,6 +117,11 @@
     themeDarkOption: document.querySelector("#themeDarkOption"),
     proxyEnabled: document.querySelector("#proxyEnabled"),
     proxyFields: document.querySelector("#proxyFields"),
+    proxyModeManual: document.querySelector("#proxyModeManual"),
+    proxyModeScript: document.querySelector("#proxyModeScript"),
+    proxyManualFields: document.querySelector("#proxyManualFields"),
+    proxyScriptFields: document.querySelector("#proxyScriptFields"),
+    proxyScriptUrl: document.querySelector("#proxyScriptUrl"),
     proxyHost: document.querySelector("#proxyHost"),
     proxyPort: document.querySelector("#proxyPort"),
     proxyUsername: document.querySelector("#proxyUsername"),
@@ -166,7 +171,18 @@
   // localStorage: it lives only in the Windows Credential Manager, reached
   // exclusively through /api/settings. This is what the server returns for an
   // unconfigured proxy, and what the form falls back to if that fetch fails.
-  const DEFAULT_PROXY = { enabled: false, host: "", port: "", username: "" };
+  // script_url is blank here on purpose: the saved default lives on the
+  // server (settings.py), and duplicating the address would leave two
+  // copies to keep in step. This shape is only what the form falls back to
+  // if the /api/settings read fails outright.
+  const DEFAULT_PROXY = {
+    enabled: false,
+    mode: "manual",
+    host: "",
+    port: "",
+    script_url: "",
+    username: "",
+  };
 
   async function loadProxySettings() {
     try {
@@ -816,6 +832,8 @@
     "The requested session was not found.": "A reunião solicitada não foi encontrada.",
     // Proxy settings.
     "Proxy host and port are required.": "Informe o endereço e a porta do proxy.",
+    "A proxy configuration script address is required.":
+      "Informe o endereço do script de configuração.",
     "Stop the active capture before changing the proxy.":
       "Pare a captura em andamento antes de alterar o proxy.",
   };
@@ -1041,6 +1059,9 @@
 
   function updateProxyFieldsVisibility() {
     elements.proxyFields.classList.toggle("hidden", !elements.proxyEnabled.checked);
+    const script = elements.proxyModeScript.checked;
+    elements.proxyManualFields.classList.toggle("hidden", script);
+    elements.proxyScriptFields.classList.toggle("hidden", !script);
   }
 
   /**
@@ -1060,6 +1081,10 @@
       if (element !== focused) element.value = value;
     };
     if (elements.proxyEnabled !== focused) elements.proxyEnabled.checked = state.proxy.enabled;
+    const script = state.proxy.mode === "script";
+    if (elements.proxyModeManual !== focused) elements.proxyModeManual.checked = !script;
+    if (elements.proxyModeScript !== focused) elements.proxyModeScript.checked = script;
+    writable(elements.proxyScriptUrl, state.proxy.script_url);
     writable(elements.proxyHost, state.proxy.host);
     writable(elements.proxyPort, state.proxy.port);
     writable(elements.proxyUsername, state.proxy.username);
@@ -1121,10 +1146,15 @@
     if (!elements.proxyEnabled.checked) return { enabled: false };
     const payload = {
       enabled: true,
-      host: elements.proxyHost.value.trim(),
-      port: Number(elements.proxyPort.value.trim()) || 0,
+      mode: elements.proxyModeScript.checked ? "script" : "manual",
       username: elements.proxyUsername.value.trim(),
     };
+    if (elements.proxyModeScript.checked) {
+      payload.script_url = elements.proxyScriptUrl.value.trim();
+    } else {
+      payload.host = elements.proxyHost.value.trim();
+      payload.port = Number(elements.proxyPort.value.trim()) || 0;
+    }
     const password = elements.proxyPassword.value;
     if (password) payload.password = password;
     return payload;
@@ -1223,30 +1253,49 @@
   const PROXY_TEST_FAILED =
     "Não foi possível conectar através do proxy. Se ele exigir senha, digite-a acima antes de testar.";
 
+  // A script that cannot be read and a proxy that refuses the connection need
+  // different fixes -- correct the address, or correct the credentials -- so
+  // the backend reports them apart and so does this.
+  const PROXY_SCRIPT_FAILED =
+    "Não foi possível ler o script de configuração. Confira o endereço e se ele está acessível desta rede.";
+
   async function testProxyConnection() {
-    const host = elements.proxyHost.value.trim();
-    const port = Number(elements.proxyPort.value.trim()) || 0;
-    if (!host || !port) {
-      elements.proxyTestStatus.textContent = "Informe o endereço e a porta antes de testar.";
-      return;
+    const script = elements.proxyModeScript.checked;
+    const request = {
+      mode: script ? "script" : "manual",
+      username: elements.proxyUsername.value.trim(),
+      // Same rule as saving: an empty field tests without a password rather
+      // than silently reusing whatever is already stored.
+      password: elements.proxyPassword.value || undefined,
+    };
+    if (script) {
+      request.script_url = elements.proxyScriptUrl.value.trim();
+      if (!request.script_url) {
+        elements.proxyTestStatus.textContent = "Informe o endereço do script antes de testar.";
+        return;
+      }
+    } else {
+      request.host = elements.proxyHost.value.trim();
+      request.port = Number(elements.proxyPort.value.trim()) || 0;
+      if (!request.host || !request.port) {
+        elements.proxyTestStatus.textContent = "Informe o endereço e a porta antes de testar.";
+        return;
+      }
     }
     elements.proxyTestButton.disabled = true;
     elements.proxyTestStatus.textContent = "Testando conexão...";
     try {
       const result = await localFetch("/api/settings/test-proxy", {
         method: "POST",
-        body: JSON.stringify({
-          host,
-          port,
-          username: elements.proxyUsername.value.trim(),
-          // Same rule as saving: an empty field tests without a password
-          // rather than silently reusing whatever is already stored.
-          password: elements.proxyPassword.value || undefined,
-        }),
+        body: JSON.stringify(request),
       });
-      elements.proxyTestStatus.textContent = result.ok
-        ? "Conexão bem-sucedida."
-        : PROXY_TEST_FAILED;
+      if (result.script_error) {
+        elements.proxyTestStatus.textContent = PROXY_SCRIPT_FAILED;
+      } else {
+        elements.proxyTestStatus.textContent = result.ok
+          ? "Conexão bem-sucedida."
+          : PROXY_TEST_FAILED;
+      }
     } catch {
       elements.proxyTestStatus.textContent = PROXY_TEST_FAILED;
     } finally {
@@ -2852,6 +2901,13 @@
   elements.proxyEnabled.addEventListener("change", () => {
     updateProxyFieldsVisibility();
   });
+  for (const option of [elements.proxyModeManual, elements.proxyModeScript]) {
+    option.addEventListener("change", () => {
+      updateProxyFieldsVisibility();
+      // The previous mode's result says nothing about the new one.
+      elements.proxyTestStatus.textContent = "";
+    });
+  }
   elements.proxyTestButton.addEventListener("click", () => {
     testProxyConnection().catch(reportError);
   });
