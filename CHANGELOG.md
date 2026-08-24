@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Transcription quality: audio reaching the transcription model no longer
+  carries resampling artifacts. Each 20 ms capture block was converted in
+  isolation, restarting the resampler's filter 50 times a second and smearing
+  edge transients over all speech (~31 dB SNR against the continuous
+  conversion; ~70 dB now that one stateful stream per channel spans blocks).
+- A transient input overflow no longer ends the capture as a lost device. The
+  flagged block is kept, the degradation is logged, and actual device removal
+  is detected by a per-source watchdog on stream health instead.
+- Reconnects longer than ten seconds no longer silently discard most of the
+  audio captured while offline: the reconnect buffer now holds minutes, and
+  when it does trim, the user is told.
+
+### Changed
+
+- Capture devices open at their own shared-mode mix format instead of a forced
+  48 kHz mono. Endpoints at other rates (44.1 kHz interfaces, Bluetooth
+  headsets) previously failed to open or passed through an extra OS
+  conversion; stereo mixes are now averaged to mono instead of losing a side.
+- The microphone list offers only WASAPI endpoints. The MME/DirectSound
+  duplicates ("Microsoft Sound Mapper", names truncated to 31 characters)
+  routed capture through legacy emulation layers.
+
 ### Added
 
 - Proxy configuration through an automatic configuration script (PAC), alongside
