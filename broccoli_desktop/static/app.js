@@ -2177,7 +2177,29 @@
    */
   function appendTimelineRow(row) {
     elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
-    elements.transcriptTimeline.insertBefore(row, elements.transcriptProvisional || null);
+    const rowKey = [
+      Number(row.dataset.startedOffsetMs || 0),
+      row.dataset.channel || "",
+      row.dataset.utteranceId || "",
+    ];
+    const nextRow = Array.from(
+      elements.transcriptTimeline.querySelectorAll(
+        ":scope > .transcript-preview__entry:not(.transcript-preview__entry--provisional)",
+      ),
+    ).find((candidate) => {
+      const candidateKey = [
+        Number(candidate.dataset.startedOffsetMs || 0),
+        candidate.dataset.channel || "",
+        candidate.dataset.utteranceId || "",
+      ];
+      if (candidateKey[0] !== rowKey[0]) return candidateKey[0] > rowKey[0];
+      if (candidateKey[1] !== rowKey[1]) return candidateKey[1].localeCompare(rowKey[1]) > 0;
+      return candidateKey[2].localeCompare(rowKey[2]) > 0;
+    });
+    elements.transcriptTimeline.insertBefore(
+      row,
+      nextRow || elements.transcriptProvisional || null,
+    );
     noteTranscriptActivity();
     scrollTranscriptToLatest();
   }
@@ -2213,6 +2235,8 @@
       ? "transcript-preview__entry transcript-preview__entry--provisional"
       : "transcript-preview__entry";
     row.dataset.utteranceId = entry.utterance_id;
+    row.dataset.startedOffsetMs = String(entry.started_offset_ms);
+    row.dataset.channel = entry.channel;
     const avatar = document.createElement("div");
     avatar.className = "avatar avatar-placeholder shrink-0";
     const avatarFace = document.createElement("div");

@@ -441,7 +441,7 @@ class _WebSocketRemoteStream:
             sequence = self._sequence_for(channel)
             return TranscriptSegmentEvent(
                 channel=channel,
-                utterance_id=f"{channel}:{sequence}",
+                utterance_id=_optional_string(values, "utterance_id") or f"{channel}:{sequence}",
                 text=_required_string(values, "text"),
                 started_offset_ms=_required_integer(values, "started_offset_ms"),
                 ended_offset_ms=_required_integer(values, "ended_offset_ms"),
@@ -451,7 +451,7 @@ class _WebSocketRemoteStream:
             sequence = self._current_sequence_for(channel)
             return TranscriptDeltaEvent(
                 channel=channel,
-                utterance_id=f"{channel}:{sequence}",
+                utterance_id=_optional_string(values, "utterance_id") or f"{channel}:{sequence}",
                 text=_required_string(values, "text"),
                 started_offset_ms=_required_integer(values, "started_offset_ms"),
             )

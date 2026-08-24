@@ -46,9 +46,38 @@ result:
 .\.venv\Scripts\python.exe scripts\build_icon.py
 ```
 
+## Building a copy to hand to someone
+
+Produces a zip that runs on another Windows 11 x64 machine with no Python
+installed:
+
+```powershell
+.\scripts\build-app.ps1
+```
+
+It rebuilds the UI and the package, then **starts the executable and waits for
+its local service to answer** before writing
+`dist\BroccoliDesktop-<version>-win-x64.zip`. That check is the point: two
+startup defects once shipped because every check stopped at "the build
+succeeded", and running the executable from a shell hides one of them, so the
+check launches it the way a shortcut does. CI runs the same script.
+
+Whoever receives the zip extracts **the whole folder** and runs
+`BroccoliDesktop.exe` from inside it. The executable needs the `_internal`
+folder beside it; dragging the `.exe` out on its own fails with "Failed to load
+Python DLL". Microsoft Edge WebView2 Runtime must be present, which it is by
+default on Windows 11.
+
+To check an executable that is already built, without rebuilding:
+
+```powershell
+.\scripts\verify-package.ps1
+```
+
 ## Windows installer
 
-Build the installer on Windows 11 x64 with Python 3.12, Node.js/npm, uv, and
+For a real installation -- shortcuts, an uninstaller, a WebView2 check -- build
+the installer on Windows 11 x64 with Python 3.12, Node.js/npm, uv, and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) available locally. The build
 regenerates the ignored CSS and Windows package outputs from the committed locks:
 

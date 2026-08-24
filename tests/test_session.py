@@ -14,6 +14,8 @@ from broccoli_desktop.remote import (
     RemoteFailure,
     RemoteProtocolError,
     RemoteRequestError,
+    SessionEnded,
+    TranscriptSegmentEvent,
 )
 from broccoli_desktop.session import (
     AUDIO_QUEUE_MAX_FRAMES,
@@ -752,7 +754,7 @@ async def test_recovery_keeps_local_offsets_when_backend_omits_next_offset_ms(
 
 
 @pytest.mark.asyncio
-async def test_stop_during_reconnect_ends_the_logical_remote_session_without_retrying(
+async def test_stop_during_reconnect_opens_one_terminal_stream_and_waits_for_ack(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
     clock = BlockingClock()
@@ -764,9 +766,11 @@ async def test_stop_during_reconnect_ends_the_logical_remote_session_without_ret
     await controller.stop()
     await settle()
 
-    assert fake_remote.streams[0].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[0].controls == []
     assert fake_remote.streams[0].closed is True
-    assert fake_remote.stream_requests == [(None, "Speakers")]
+    assert fake_remote.streams[1].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[1].closed is True
+    assert fake_remote.stream_requests == [(None, "Speakers"), ("session-1", "Speakers")]
     assert controller.state is ConnectionState.STOPPED
 
 
@@ -1204,6 +1208,52 @@ async def test_sync_local_capture_stop_keeps_controller_stop_for_remote_finaliza
         await controller.stop()
 
     assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_audio_and_waits_for_the_final_segment_ack(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    stream.auto_end_ack = False
+    controller._enqueue_frame(AudioFrame("mic", 100, b"\x00\x00"), controller._run_generation)
+
+    stopping = asyncio.create_task(controller.stop())
+    while not stream.controls:
+        await asyncio.sleep(0)
+
+    assert [decode_audio_frame(frame).offset_ms for frame in stream.frames] == [100]
+    assert stopping.done() is False
+
+    await stream.emit(TranscriptSegmentEvent("mic", "mic:item-final", "fim", 100, 200))
+    await stream.emit(SessionEnded())
+    await stopping
+
+    segments = [event.segment for event in controller.events.snapshot() if event.type == "segment"]
+    assert [segment.text for segment in segments if segment is not None] == ["fim"]
+    assert controller.state is ConnectionState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_safely_when_finalization_ack_times_out(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import broccoli_desktop.session as session_module
+
+    monkeypatch.setattr(session_module, "STOP_FINALIZE_TIMEOUT_SECONDS", 0.01)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    fake_remote.streams[-1].auto_end_ack = False
+
+    await controller.stop()
+
+    assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
+    assert fake_remote.streams[-1].closed is True
     assert controller.state is ConnectionState.STOPPED
 
 

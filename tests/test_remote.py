@@ -329,6 +329,7 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
             {
                 "type": "transcript.delta",
                 "channel": "mic",
+                "utterance_id": "mic:item-123",
                 "text": "hello ",
                 "started_offset_ms": 100,
             }
@@ -337,6 +338,7 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
             {
                 "type": "transcript.delta",
                 "channel": "mic",
+                "utterance_id": "mic:item-123",
                 "text": "hello world",
                 "started_offset_ms": 100,
             }
@@ -345,6 +347,7 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
             {
                 "type": "transcript.segment",
                 "channel": "mic",
+                "utterance_id": "mic:item-123",
                 "text": "hello world",
                 "started_offset_ms": 100,
                 "ended_offset_ms": 900,
@@ -365,9 +368,9 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
 
     assert events == [
         SessionStarted("live-1", {"mic": 4, "system": 2}, 14_400),
-        TranscriptDeltaEvent("mic", "mic:4", "hello ", 100),
-        TranscriptDeltaEvent("mic", "mic:4", "hello world", 100),
-        TranscriptSegmentEvent("mic", "mic:4", "hello world", 100, 900),
+        TranscriptDeltaEvent("mic", "mic:item-123", "hello ", 100),
+        TranscriptDeltaEvent("mic", "mic:item-123", "hello world", 100),
+        TranscriptSegmentEvent("mic", "mic:item-123", "hello world", 100, 900),
     ]
 
 

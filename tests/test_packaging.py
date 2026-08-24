@@ -37,3 +37,29 @@ def test_main_still_reaches_the_runtime_the_way_the_spec_compensates_for() -> No
     entry_point = REPOSITORY_ROOT.joinpath("broccoli_desktop", "__main__.py").read_text()
 
     assert 'import_module("broccoli_desktop.runtime")' in entry_point
+
+
+def test_ci_runs_the_startup_check_through_the_shared_script() -> None:
+    """The check that the executable starts is the one thing that would have
+    caught both packaging defects, and it is only useful if it is the same
+    check locally and on CI. Inlining it in the workflow put it out of reach of
+    anyone building a copy to hand around, which is exactly when it matters."""
+    workflow = REPOSITORY_ROOT.joinpath(".github", "workflows", "ci.yml").read_text()
+    script = REPOSITORY_ROOT.joinpath("scripts", "verify-package.ps1")
+
+    assert script.is_file()
+    assert r"scripts\verify-package.ps1" in workflow
+
+
+def test_the_build_script_verifies_before_it_hands_over_an_archive() -> None:
+    """A zip is produced to be given to someone else, so an unverified build
+    must never reach the name someone would pick up and send on.
+
+    The archive is written under a temporary name first -- compressing a tree
+    the verification has already run would fail on the DLL handles Windows has
+    not released yet -- so what matters is that the check happens before the
+    rename, not before the compression.
+    """
+    build = REPOSITORY_ROOT.joinpath("scripts", "build-app.ps1").read_text()
+
+    assert build.index("verify-package.ps1") < build.index("Move-Item")

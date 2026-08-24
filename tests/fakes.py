@@ -22,6 +22,7 @@ from broccoli_desktop.remote import (
     RemoteFailure,
     RemoteProtocolError,
     RemoteUnauthorizedError,
+    SessionEnded,
     SessionStarted,
     TranscriptDeltaEvent,
     TranscriptSegmentEvent,
@@ -102,6 +103,7 @@ class FakeLiveRemoteStream:
     fail_control: bool = False
     fail_close: bool = False
     closed: bool = False
+    auto_end_ack: bool = True
     lifecycle: list[str] = field(default_factory=list)
     blocked: asyncio.Event | None = None
     stagger: int = 0
@@ -144,6 +146,8 @@ class FakeLiveRemoteStream:
         if self.closed:
             raise FakeRemoteClosedError()
         self.controls.append(message.copy())
+        if self.auto_end_ack and message.get("type") == "session.end":
+            await self.events_queue.put(SessionEnded())
 
     async def events(self) -> AsyncIterator[RemoteEvent]:
         while True:

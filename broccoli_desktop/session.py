@@ -67,6 +67,8 @@ MAX_BUFFERED_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
 #: The in-flight bound, deliberately equal to the reconnect buffer's: both are
 #: the same frame budget, and if they drift apart one of them is wrong.
 AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_FRAMES
+STOP_FINALIZE_TIMEOUT_SECONDS = 10.0
+STOP_DRAIN_TIMEOUT_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +176,26 @@ class DesktopSessionController:
         self._recovery_active = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._device_lookup: Callable[[], Awaitable[list[DeviceDescriptor]]] | None = None
+        self._session_ended_event = asyncio.Event()
+        self._stopping = False
+        self._produced_frames = 0
+        self._sent_frames = 0
 
     @property
     def buffered_audio_ms(self) -> int:
         return len(self._buffered_frames) * FRAME_DURATION_MS
+
+    @property
+    def audio_diagnostics(self) -> dict[str, int]:
+        """Non-sensitive counters that distinguish capture and network loss."""
+        return {
+            "produced_frames": self._produced_frames,
+            "sent_frames": self._sent_frames,
+            "queued_frames": self._audio_queue.qsize(),
+            "reconnect_buffered_frames": len(self._buffered_frames),
+            "dropped_frames": self._dropped_frames,
+            "trimmed_frames": self._trimmed_frames,
+        }
 
     @property
     def selected_devices(self) -> CaptureChoices | None:
@@ -240,30 +258,72 @@ class DesktopSessionController:
         self._muted[channel] = bool(muted)
 
     async def stop(self) -> None:
-        """Stop capture before ending the remote session and publishing stopped."""
+        """Drain captured audio and wait for the backend's final transcript."""
         if self.state is ConnectionState.STOPPED:
             return
-        # CaptureSession.start() holds its lock for the whole WASAPI open. A
-        # stop landing here while a start is still opening devices on its own
-        # thread would otherwise call capture.stop() synchronously below and
-        # block this coroutine on that same lock -- and with it the entire
-        # event loop, since nothing else can run while one coroutine is
-        # parked on a real OS lock -- for whatever is left of the open.
-        # stop_local_capture() itself stays synchronous: it is also the tray
-        # and console-shutdown teardown path (see runtime.py), which calls it
-        # from a plain background thread with no event loop to hop onto.
+        # CaptureSession.start() owns real OS locks. Keep its stop off the event
+        # loop so the transcript reader can continue receiving the final turn.
         await asyncio.to_thread(self.stop_local_capture)
-        self._clear_buffered_frames()
-        await self._cancel_tasks()
-        self._reset_audio_queue()
+        self._stopping = True
+        self._session_ended_event.clear()
         stream = self._stream or self._recovery_stream
-        self._stream = None
-        self._recovery_stream = None
-        if stream is None and self.state is ConnectionState.RECONNECTING:
-            stream = await self._connect_terminal_stream()
-        if stream is not None:
-            await self._end_and_close_stream(stream)
-        self._set_state(ConnectionState.STOPPED)
+        try:
+            try:
+                await asyncio.wait_for(
+                    self._audio_queue.join(),
+                    timeout=STOP_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("[session] Timed out draining the local audio queue")
+                sender, self._sender_task = self._sender_task, None
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                    await asyncio.gather(sender, return_exceptions=True)
+
+            if self.state is ConnectionState.RECONNECTING:
+                await self._close_stream(stream)
+                stream = await self._connect_terminal_stream()
+                if stream is not None:
+                    iterator = stream.events()
+                    started = await anext(iterator)
+                    if not isinstance(started, SessionStarted):
+                        raise RemoteProtocolError("Terminal stream did not resume the session.")
+                    self._stream = stream
+                    self._recovery_stream = None
+                    self._reader_task = asyncio.create_task(self._listen(iterator))
+                    buffered, self._buffered_frames = self._buffered_frames, []
+                    for frame in buffered:
+                        await stream.send_bytes(
+                            encode_audio_frame(
+                                channel=frame.channel,
+                                offset_ms=frame.offset_ms,
+                                pcm=frame.pcm,
+                            )
+                        )
+                        self._sent_frames += 1
+
+            if stream is not None:
+                await stream.send_control({"type": "session.end"})
+                try:
+                    await asyncio.wait_for(
+                        self._session_ended_event.wait(),
+                        timeout=STOP_FINALIZE_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning("[session] Backend did not acknowledge finalization in time")
+        except Exception:
+            logger.exception("[session] Graceful remote finalization failed")
+        finally:
+            self._stream = None
+            self._recovery_stream = None
+            await self._cancel_tasks()
+            if stream is not None:
+                await self._close_stream(stream)
+            self._clear_buffered_frames()
+            logger.info("[session] Audio diagnostics at stop: %s", self.audio_diagnostics)
+            self._reset_audio_queue()
+            self._stopping = False
+            self._set_state(ConnectionState.STOPPED)
 
     def stop_local_capture(self) -> None:
         """Stop capture synchronously while controller finalization remains pending.
@@ -396,6 +456,8 @@ class DesktopSessionController:
         )
         self._clear_buffered_frames()
         self.pending_deltas.clear()
+        self._session_ended_event = asyncio.Event()
+        self._stopping = False
         self._loop = asyncio.get_running_loop()
         self._choices = choices
         self._languages = languages
@@ -570,7 +632,7 @@ class DesktopSessionController:
         try:
             async for event in iterator:
                 await self._handle_remote_event(event)
-                if isinstance(event, RemoteFailure) or self.state not in {
+                if (isinstance(event, RemoteFailure) and not self._stopping) or self.state not in {
                     ConnectionState.STREAMING,
                     ConnectionState.RECONNECTING,
                 }:
@@ -628,13 +690,26 @@ class DesktopSessionController:
             )
             return
         if isinstance(event, SessionEnded):
+            if self._stopping:
+                self._session_ended_event.set()
+                return
             await self._end_from_remote()
             return
         if isinstance(event, RemoteFailure):
+            if self._stopping:
+                self.events.publish(
+                    UiEvent(type="error", message="A transcrição final pode estar incompleta.")
+                )
+                return
             await self._fail_from_remote()
 
     async def _recover(self) -> None:
-        if self._recovery_active or self._session_uuid is None or self._choices is None:
+        if (
+            self._stopping
+            or self._recovery_active
+            or self._session_uuid is None
+            or self._choices is None
+        ):
             return
         self._recovery_active = True
         failed_stream = self._stream
@@ -646,7 +721,7 @@ class DesktopSessionController:
         try:
             for delay in RETRY_DELAYS_SECONDS:
                 await self._sleep(delay)
-                if self.state is not ConnectionState.RECONNECTING:
+                if self._stopping or self.state is not ConnectionState.RECONNECTING:
                     return
                 stream: RemoteStream | None = None
                 try:
@@ -812,6 +887,7 @@ class DesktopSessionController:
             pipeline.skip(channel)
             return
         for frame in pipeline.feed(channel, pcm):
+            self._produced_frames += 1
             self._schedule_forward(frame)
 
     def _report_audio_level(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
@@ -920,6 +996,7 @@ class DesktopSessionController:
             await stream.send_bytes(
                 encode_audio_frame(channel=frame.channel, offset_ms=frame.offset_ms, pcm=frame.pcm)
             )
+            self._sent_frames += 1
         except Exception:
             self.enqueue_audio_frames([frame])
             await self._recover()
@@ -974,6 +1051,8 @@ class DesktopSessionController:
         self._reported_dropping = False
         self._trimmed_frames = 0
         self._reported_trimming = False
+        self._produced_frames = 0
+        self._sent_frames = 0
 
     def _on_capture_event(self, event: CaptureEvent) -> None:
         if event.type == "device_lost":
@@ -993,6 +1072,7 @@ class DesktopSessionController:
         stream = self._stream or self._recovery_stream
         self._stream = None
         self._recovery_stream = None
+        self._stopping = True
         await self._stop_capture_off_loop()
         self._clear_buffered_frames()
         if stream is not None:
@@ -1001,6 +1081,11 @@ class DesktopSessionController:
             ConnectionState.DEVICE_SELECTION_REQUIRED,
             message="Select a replacement capture device.",
         )
+        reader = self._reader_task
+        if reader is not None and reader is not asyncio.current_task():
+            await asyncio.gather(reader, return_exceptions=True)
+            self._reader_task = None
+        self._stopping = False
 
     def _stop_capture(self) -> None:
         capture = self._capture
