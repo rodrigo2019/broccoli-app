@@ -43,7 +43,13 @@ from broccoli_desktop.remote import (
     TranscriptSegmentEvent,
 )
 
-MAX_BUFFERED_AUDIO_MS = 10_000
+#: Ten minutes of 100 ms frames -- five minutes of wall clock with both
+#: channels streaming. Sized for transcript completeness rather than
+#: resources: the whole retry backoff below plus its connect attempts fits
+#: many times over, and the ceiling is ~29 MB at 4.8 KB per frame. The old
+#: ten-second bound silently threw away most of any reconnect longer than
+#: its first retry.
+MAX_BUFFERED_AUDIO_MS = 600_000
 FRAME_DURATION_MS = 100
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 15)
 AUTO_DETECT_LANGUAGE = ""
@@ -59,7 +65,7 @@ SUPPORTED_LANGUAGES = frozenset({AUTO_DETECT_LANGUAGE, "pt", "en"})
 MAX_BUFFERED_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
 
 #: The in-flight bound, deliberately equal to the reconnect buffer's: both are
-#: "ten seconds of audio", and if they drift apart one of them is wrong.
+#: the same frame budget, and if they drift apart one of them is wrong.
 AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_FRAMES
 
 logger = logging.getLogger(__name__)
@@ -162,6 +168,8 @@ class DesktopSessionController:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._dropped_frames = 0
         self._reported_dropping = False
+        self._trimmed_frames = 0
+        self._reported_trimming = False
         self._run_generation = 0
         self._recovery_active = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -346,12 +354,28 @@ class DesktopSessionController:
         return summary
 
     def enqueue_audio_frames(self, frames: Iterable[AudioFrame]) -> None:
-        """Keep a bounded, offset-ordered reconnect buffer of encoded frames."""
+        """Keep a bounded, offset-ordered reconnect buffer of encoded frames.
+
+        A trim is audio the transcript will never get back, so the first one
+        of each run is announced. Once per run, like the in-flight drop
+        warning: the situation persisting is not news, and the counter keeps
+        the full extent for diagnostics.
+        """
         self._buffered_frames.extend(frames)
         self._buffered_frames.sort(key=lambda frame: frame.offset_ms)
         excess = len(self._buffered_frames) - MAX_BUFFERED_FRAMES
         if excess > 0:
             del self._buffered_frames[:excess]
+            self._trimmed_frames += excess
+            if not self._reported_trimming:
+                self._reported_trimming = True
+                self.events.publish(
+                    UiEvent(
+                        type="warning",
+                        message="A reconexão está demorando: o áudio mais antigo "
+                        "está sendo descartado.",
+                    )
+                )
 
     async def _open(
         self,
@@ -948,6 +972,8 @@ class DesktopSessionController:
         self._run_generation += 1
         self._dropped_frames = 0
         self._reported_dropping = False
+        self._trimmed_frames = 0
+        self._reported_trimming = False
 
     def _on_capture_event(self, event: CaptureEvent) -> None:
         if event.type == "device_lost":

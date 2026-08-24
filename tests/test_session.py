@@ -20,6 +20,7 @@ from broccoli_desktop.session import (
     FRAME_DURATION_MS,
     MAX_BUFFERED_AUDIO_MS,
     MAX_BUFFERED_FRAMES,
+    RETRY_DELAYS_SECONDS,
     CaptureChoices,
     CaptureLanguages,
     DesktopSessionController,
@@ -512,16 +513,57 @@ async def test_final_segment_increments_the_local_active_session_count(
     await controller.stop()
 
 
+def test_reconnect_buffer_covers_the_full_retry_backoff() -> None:
+    """The buffer exists so a reconnect loses no speech.
+
+    Both channels stream 100 ms frames concurrently, so wall-clock coverage
+    is half the frame budget; it must exceed the whole backoff by a wide
+    margin because each connect attempt adds its own time on top of the
+    sleeps between attempts.
+    """
+    wall_coverage_ms = MAX_BUFFERED_FRAMES * FRAME_DURATION_MS // 2
+    assert wall_coverage_ms >= sum(RETRY_DELAYS_SECONDS) * 1_000 * 5
+
+
 @pytest.mark.asyncio
-async def test_reconnect_discards_audio_beyond_ten_seconds(
+async def test_reconnect_buffer_trims_only_beyond_its_bound_and_warns_once(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Losing buffered audio must be visible; losing it twice must not nag."""
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    warnings: list[UiEvent] = []
+    controller.events.subscribe(
+        lambda event: warnings.append(event) if event.type == "warning" else None
+    )
+
+    controller.enqueue_audio_frames(make_frames(milliseconds=MAX_BUFFERED_AUDIO_MS + 1_000))
+    controller.enqueue_audio_frames(make_frames(milliseconds=1_000))
+
+    assert controller.buffered_audio_ms == MAX_BUFFERED_AUDIO_MS
+    assert len(warnings) == 1
+    assert "descartado" in (warnings[0].message or "")
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_new_run_reports_its_own_reconnect_trim(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
     controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    warnings: list[UiEvent] = []
+    controller.events.subscribe(
+        lambda event: warnings.append(event) if event.type == "warning" else None
+    )
+
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames(make_frames(milliseconds=MAX_BUFFERED_AUDIO_MS + 1_000))
+    await controller.stop()
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames(make_frames(milliseconds=MAX_BUFFERED_AUDIO_MS + 1_000))
 
-    controller.enqueue_audio_frames(make_frames(milliseconds=11_000))
-
-    assert controller.buffered_audio_ms == 10_000
+    assert len(warnings) == 2
 
     await controller.stop()
 
