@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -15,11 +16,25 @@ import pyaudiowpatch
 
 from broccoli_desktop.models import CaptureEvent, DeviceDescriptor
 
+#: The usual Windows shared-mode mix rate. Devices open at their own native
+#: rate (see _open_input); this constant only sizes the default block for
+#: direct users of _QueuedCaptureHandle and for tests building 48 kHz blocks.
 SAMPLE_RATE = 48_000
 BLOCK_MS = 20
 BLOCK_FRAMES = SAMPLE_RATE * BLOCK_MS // 1_000
 BLOCK_BYTES = BLOCK_FRAMES * 2
-QUEUE_BLOCKS = 50
+
+#: Five seconds of headroom per source. The worker that drains this queue
+#: shares the GIL with the rest of the process, and a transient stall beyond
+#: the old one-second bound silently discarded meeting audio; at 20 ms blocks
+#: the memory ceiling stays under ~1 MB per source even for stereo devices.
+QUEUE_BLOCKS = 250
+
+#: How often each source's watchdog polls stream health. Device removal has
+#: no PortAudio callback signal; the poll is what notices a dead stream.
+WATCHDOG_INTERVAL_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 SourcePcmCallback = Callable[[bytes], None]
 PcmCallback = Callable[[Literal["mic", "system"], bytes], None]
@@ -60,16 +75,37 @@ class _QueuedCaptureHandle:
 
     _STOP = object()
 
-    def __init__(self, on_pcm: SourcePcmCallback) -> None:
+    def __init__(
+        self,
+        on_pcm: SourcePcmCallback,
+        *,
+        block_bytes: int = BLOCK_BYTES,
+        channels: int = 1,
+        watchdog_interval_seconds: float = WATCHDOG_INTERVAL_SECONDS,
+    ) -> None:
         self._on_pcm = on_pcm
-        self._queue: Queue[bytes | Exception | object] = Queue(maxsize=QUEUE_BLOCKS)
+        self._block_bytes = block_bytes
+        self._channels = channels
+        self._watchdog_interval_seconds = watchdog_interval_seconds
+        self._queue: Queue[bytes | object] = Queue(maxsize=QUEUE_BLOCKS)
         self._stream: object | None = None
         self._closed = Event()
         self._error_handler: CaptureErrorCallback | None = None
         self._pending_error: Exception | None = None
         self._lock = RLock()
+        # Bumped from the PortAudio callback thread, read from the worker;
+        # plain ints under the GIL, and an off-by-one in a diagnostic is
+        # cheaper than a lock on the audio path.
+        self._flagged_blocks = 0
+        self._mismatched_blocks = 0
+        self._dropped_blocks = 0
+        self._reported_degradation = False
         self._worker = Thread(target=self._run, name="broccoli-capture", daemon=True)
         self._worker.start()
+        self._watchdog = Thread(
+            target=self._watch_stream, name="broccoli-capture-watchdog", daemon=True
+        )
+        self._watchdog.start()
 
     def set_stream(self, stream: object) -> None:
         self._stream = stream
@@ -85,14 +121,22 @@ class _QueuedCaptureHandle:
     def callback(
         self, pcm: bytes, _frame_count: int, _time_info: object, status_flags: int
     ) -> tuple[None, int]:
-        """PortAudio callback: enqueue only, never call consumer or wait."""
+        """PortAudio callback: enqueue only, never call consumer or wait.
+
+        A status flag here is an xrun -- an instant PortAudio already lost
+        under load -- not a lost device, so the stream keeps running and the
+        block that carried the flag is still real audio. Aborting on any
+        flag used to end whole sessions on a single overflow; an actually
+        removed endpoint is noticed by the watchdog instead.
+        """
         if self._closed.is_set():
             return None, pyaudiowpatch.paAbort
         if status_flags:
-            self._offer(DeviceUnavailableError("capture device"))
-            return None, pyaudiowpatch.paAbort
-        if len(pcm) == BLOCK_BYTES:
+            self._flagged_blocks += 1
+        if len(pcm) == self._block_bytes:
             self._offer(pcm)
+        else:
+            self._mismatched_blocks += 1
         return None, pyaudiowpatch.paContinue
 
     def drain(self) -> None:
@@ -118,13 +162,17 @@ class _QueuedCaptureHandle:
         self._offer(self._STOP)
         if self._worker is not current_thread():
             self._worker.join(timeout=1)
+        if self._watchdog is not current_thread():
+            self._watchdog.join(timeout=1)
 
-    def _offer(self, item: bytes | Exception | object) -> None:
+    def _offer(self, item: bytes | object) -> None:
         try:
             self._queue.put_nowait(item)
         except Full:
             if isinstance(item, bytes):
+                self._dropped_blocks += 1
                 return
+            # _STOP must land even when the queue is full.
             try:
                 self._queue.get_nowait()
             except Empty:
@@ -139,14 +187,58 @@ class _QueuedCaptureHandle:
             item = self._queue.get()
             if item is self._STOP:
                 return
-            if isinstance(item, Exception):
-                self._report_error(item)
-                return
+            if not isinstance(item, bytes):
+                continue
+            pcm = _downmix_to_mono(item, self._channels) if self._channels > 1 else item
             try:
-                self._on_pcm(item)
+                self._on_pcm(pcm)
             except Exception as error:
                 self._report_error(error)
                 return
+            self._report_degradation_once()
+
+    def _watch_stream(self) -> None:
+        """Poll stream health so a dead endpoint still surfaces as device loss.
+
+        PortAudio has no removal signal in its callback: when WASAPI
+        invalidates an endpoint the processing thread just stops and
+        Pa_IsStreamActive starts answering false. Reported directly, not
+        through the PCM queue, so a full queue cannot delay or drop it.
+        """
+        while not self._closed.wait(self._watchdog_interval_seconds):
+            stream = self._stream
+            if stream is None:
+                continue
+            is_active = getattr(stream, "is_active", None)
+            if is_active is None:
+                return
+            try:
+                active = bool(is_active())
+            except Exception:
+                active = False
+            if self._closed.is_set():
+                return
+            if not active:
+                self._report_error(DeviceUnavailableError("capture device"))
+                return
+
+    def _report_degradation_once(self) -> None:
+        """Say, once per source, that capture quality is being degraded.
+
+        Transient flags and drops keep the session alive by design; what
+        must not happen is the resulting transcript gaps staying invisible.
+        """
+        if self._reported_degradation:
+            return
+        if self._flagged_blocks or self._mismatched_blocks or self._dropped_blocks:
+            self._reported_degradation = True
+            logger.warning(
+                "[capture] Degraded capture on one source: %d flagged, %d mismatched, "
+                "%d dropped blocks so far.",
+                self._flagged_blocks,
+                self._mismatched_blocks,
+                self._dropped_blocks,
+            )
 
     def _report_error(self, error: Exception) -> None:
         with self._lock:
@@ -157,11 +249,29 @@ class _QueuedCaptureHandle:
         on_error(error)
 
 
+def _downmix_to_mono(pcm: bytes, channels: int) -> bytes:
+    """Average interleaved PCM16 channels without retaining the sample data.
+
+    Averaging keeps both sides of a stereo meeting mix; taking one channel
+    of the mix format used to lose whatever the other one carried.
+    """
+    usable_samples = len(pcm) // 2 // channels * channels
+    frames = numpy.frombuffer(pcm, dtype="<i2", count=usable_samples).reshape(-1, channels)
+    mixed = numpy.rint(frames.astype(numpy.float32).mean(axis=1))
+    return mixed.astype("<i2").tobytes()
+
+
 class PyAudioCaptureBackend:
     """PyAudioWPatch adapter for direct mic and WASAPI output-loopback sources."""
 
-    def __init__(self, pyaudio: object) -> None:
+    def __init__(
+        self,
+        pyaudio: object,
+        *,
+        watchdog_interval_seconds: float = WATCHDOG_INTERVAL_SECONDS,
+    ) -> None:
         self._pyaudio = pyaudio
+        self._watchdog_interval_seconds = watchdog_interval_seconds
 
     def list_devices(self) -> list[DeviceDescriptor]:
         devices = [
@@ -176,7 +286,7 @@ class PyAudioCaptureBackend:
 
     def open_microphone(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle:
         info = self._find_info("mic", device_id)
-        return self._open_input(int(info["index"]), on_pcm)
+        return self._open_input(info, on_pcm, str(info["name"]))
 
     def open_loopback(self, device_id: str, on_pcm: SourcePcmCallback) -> CaptureHandle:
         output = self._find_info("system", device_id)
@@ -184,18 +294,40 @@ class PyAudioCaptureBackend:
             loopback = self._pyaudio.get_wasapi_loopback_analogue_by_index(int(output["index"]))
         except (LookupError, OSError) as error:
             raise DeviceUnavailableError(str(output["name"])) from error
-        return self._open_input(int(loopback["index"]), on_pcm)
+        return self._open_input(loopback, on_pcm, str(output["name"]))
 
-    def _open_input(self, device_index: int, on_pcm: SourcePcmCallback) -> CaptureHandle:
-        handle = _QueuedCaptureHandle(on_pcm)
+    def _open_input(
+        self, info: Mapping[str, object], on_pcm: SourcePcmCallback, display_name: str
+    ) -> CaptureHandle:
+        """Open one source at its own shared-mode mix format.
+
+        WASAPI shared mode runs every stream at the endpoint's mix format;
+        asking for a fixed 48 kHz mono either failed the open on 44.1 kHz
+        and Bluetooth-headset endpoints or pushed the audio through an extra
+        OS conversion. The worker downmixes multichannel blocks to mono, and
+        the pipeline resamples from whatever rate the blocks arrive at.
+        """
+        rate = int(info["defaultSampleRate"])
+        channels = max(1, int(info["maxInputChannels"]))
+        if rate <= 0 or rate * BLOCK_MS % 1_000:
+            # A rate that cannot form whole 20 ms blocks (11 025 Hz) would
+            # silently drift the meeting clock by a fraction of every block.
+            raise DeviceUnavailableError(display_name)
+        frames_per_block = rate * BLOCK_MS // 1_000
+        handle = _QueuedCaptureHandle(
+            on_pcm,
+            block_bytes=frames_per_block * channels * 2,
+            channels=channels,
+            watchdog_interval_seconds=self._watchdog_interval_seconds,
+        )
         try:
             stream = self._pyaudio.open(
                 format=pyaudiowpatch.paInt16,
-                channels=1,
-                rate=SAMPLE_RATE,
+                channels=channels,
+                rate=rate,
                 input=True,
-                input_device_index=device_index,
-                frames_per_buffer=BLOCK_FRAMES,
+                input_device_index=int(info["index"]),
+                frames_per_buffer=frames_per_block,
                 stream_callback=handle.callback,
             )
         except OSError:
@@ -212,8 +344,20 @@ class PyAudioCaptureBackend:
         raise DeviceUnavailableError(device_id)
 
     def _microphone_infos(self) -> Iterator[dict[str, object]]:
+        """Yield WASAPI capture endpoints, once each.
+
+        Windows also exposes every microphone through MME and DirectSound --
+        "Microsoft Sound Mapper", names truncated to 31 characters, one
+        duplicate per legacy API. Offering those routed the meeting through
+        an emulation layer and an extra OS conversion; the outputs below
+        were always WASAPI-only, and the microphones have to match.
+        """
         for info in self._pyaudio.get_device_info_generator():
-            if int(info["maxInputChannels"]) > 0 and not bool(info.get("isLoopbackDevice")):
+            if (
+                int(info["maxInputChannels"]) > 0
+                and not bool(info.get("isLoopbackDevice"))
+                and self._is_wasapi(info)
+            ):
                 yield info
 
     def _output_infos(self) -> Iterator[dict[str, object]]:

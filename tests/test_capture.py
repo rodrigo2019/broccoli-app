@@ -3,13 +3,14 @@ from __future__ import annotations
 from math import sqrt
 from struct import iter_unpack, pack
 from threading import Event
+from time import sleep
 
+import pyaudiowpatch
 import pytest
 
 from broccoli_desktop.capture import (
     BLOCK_BYTES,
     BLOCK_FRAMES,
-    SAMPLE_RATE,
     AudioLevelMonitor,
     CaptureSession,
     DeviceUnavailableError,
@@ -113,9 +114,16 @@ def test_audio_level_monitor_releases_the_first_source_when_the_second_cannot_op
     assert fake_capture_backend.closed_sources == {"mic-1"}
 
 
-def test_pyaudio_sources_use_48khz_mono_pcm16_20ms_blocks_and_dispatch_off_callback_thread(
+def test_pyaudio_sources_open_at_the_native_mix_format_and_dispatch_off_callback_thread(
     fake_pyaudio: FakePyAudio,
 ) -> None:
+    """A 44.1 kHz endpoint is opened at 44.1 kHz, in 20 ms blocks.
+
+    Forcing 48 kHz on every device made endpoints whose shared-mode mix
+    format runs at another rate -- 44.1 kHz interfaces, Bluetooth headset
+    microphones -- fail to open or pass through the OS converter.
+    """
+    fake_pyaudio.device_infos[0]["defaultSampleRate"] = 44_100.0
     delivered = Event()
     received: list[bytes] = []
     backend = PyAudioCaptureBackend(fake_pyaudio)
@@ -124,17 +132,99 @@ def test_pyaudio_sources_use_48khz_mono_pcm16_20ms_blocks_and_dispatch_off_callb
     handle = backend.open_microphone(
         microphone_id, lambda pcm: (received.append(pcm), delivered.set())
     )
-    fake_pyaudio.streams[0].emit(b"\x01\x00" * BLOCK_FRAMES)
+    fake_pyaudio.streams[0].emit(b"\x01\x00" * 882)
 
     assert delivered.wait(timeout=1)
-    assert received == [b"\x01\x00" * BLOCK_FRAMES]
+    assert received == [b"\x01\x00" * 882]
     assert {
-        "rate": SAMPLE_RATE,
+        "rate": 44_100,
         "channels": 1,
         "format": 8,
         "input": True,
-        "frames_per_buffer": BLOCK_FRAMES,
+        "frames_per_buffer": 882,
     }.items() <= fake_pyaudio.open_calls[0].items()
+    handle.close()
+
+
+def test_multichannel_capture_is_downmixed_to_mono_before_delivery(
+    fake_pyaudio: FakePyAudio,
+) -> None:
+    """A stereo loopback opens with both channels and delivers their average.
+
+    Opening one channel of a stereo mix format handed the resampler a single
+    speaker of the meeting; averaging keeps both sides of the mix.
+    """
+    fake_pyaudio.loopback_infos[0]["maxInputChannels"] = 2
+    delivered = Event()
+    received: list[bytes] = []
+    backend = PyAudioCaptureBackend(fake_pyaudio)
+
+    system_id = [device for device in backend.list_devices() if device.kind == "system"][
+        0
+    ].device_id
+    handle = backend.open_loopback(system_id, lambda pcm: (received.append(pcm), delivered.set()))
+    stereo_block = pack("<2h", 1_000, 3_000) * BLOCK_FRAMES
+    fake_pyaudio.streams[0].emit(stereo_block)
+
+    assert delivered.wait(timeout=1)
+    assert {"channels": 2, "frames_per_buffer": BLOCK_FRAMES}.items() <= fake_pyaudio.open_calls[
+        0
+    ].items()
+    assert received == [pack("<h", 2_000) * BLOCK_FRAMES]
+    handle.close()
+
+
+def test_transient_status_flags_do_not_end_the_capture(fake_pyaudio: FakePyAudio) -> None:
+    """An input overflow is a lost instant under load, not a lost device.
+
+    Treating any status flag as device removal ended whole sessions on a
+    single xrun; the block that arrives with the flag is still real audio.
+    """
+    delivered = Event()
+    received: list[bytes] = []
+    errors: list[Exception] = []
+    backend = PyAudioCaptureBackend(fake_pyaudio)
+
+    microphone_id = backend.list_devices()[0].device_id
+    handle = backend.open_microphone(
+        microphone_id, lambda pcm: (received.append(pcm), delivered.set())
+    )
+    handle.set_error_handler(errors.append)
+    microphone = fake_pyaudio.streams[0]
+    microphone.emit(b"\x01\x00" * BLOCK_FRAMES, status_flags=pyaudiowpatch.paInputOverflow)
+    microphone.emit(b"\x02\x00" * BLOCK_FRAMES)
+
+    assert delivered.wait(timeout=1)
+    for _ in range(200):
+        if len(received) == 2:
+            break
+        sleep(0.01)
+    assert received == [b"\x01\x00" * BLOCK_FRAMES, b"\x02\x00" * BLOCK_FRAMES]
+    assert errors == []
+    assert microphone.stopped is False
+    handle.close()
+
+
+def test_blocks_of_the_wrong_size_are_skipped_without_ending_the_capture(
+    fake_pyaudio: FakePyAudio,
+) -> None:
+    delivered = Event()
+    received: list[bytes] = []
+    errors: list[Exception] = []
+    backend = PyAudioCaptureBackend(fake_pyaudio)
+
+    microphone_id = backend.list_devices()[0].device_id
+    handle = backend.open_microphone(
+        microphone_id, lambda pcm: (received.append(pcm), delivered.set())
+    )
+    handle.set_error_handler(errors.append)
+    microphone = fake_pyaudio.streams[0]
+    microphone.emit(b"\x01\x00" * 10)
+    microphone.emit(b"\x02\x00" * BLOCK_FRAMES)
+
+    assert delivered.wait(timeout=1)
+    assert received == [b"\x02\x00" * BLOCK_FRAMES]
+    assert errors == []
     handle.close()
 
 
@@ -303,7 +393,7 @@ def test_device_loss_is_not_dropped_when_the_pcm_queue_is_full(fake_pyaudio: Fak
     processing = Event()
     release_processing = Event()
     device_lost = Event()
-    backend = PyAudioCaptureBackend(fake_pyaudio)
+    backend = PyAudioCaptureBackend(fake_pyaudio, watchdog_interval_seconds=0.01)
     devices = backend.list_devices()
     session = CaptureSession(
         backend,
@@ -317,26 +407,26 @@ def test_device_loss_is_not_dropped_when_the_pcm_queue_is_full(fake_pyaudio: Fak
     microphone = fake_pyaudio.streams[0]
     microphone.emit(b"\x01\x00" * BLOCK_FRAMES)
     assert processing.wait(timeout=1)
-    for _ in range(60):
+    for _ in range(300):
         microphone.emit(b"\x01\x00" * BLOCK_FRAMES)
-    microphone.emit(b"", status_flags=1)
+    microphone.die()
     release_processing.set()
 
-    assert device_lost.wait(timeout=1)
+    assert device_lost.wait(timeout=2)
 
 
 def test_a_device_lost_mid_stream_reaches_the_controller_through_the_real_backend(
     fake_pyaudio: FakePyAudio,
 ) -> None:
-    """The paAbort / status_flags branch at capture.py's callback is otherwise
-    only exercised as a side effect of the queue-full backpressure test above.
-    This isolates it: PyAudioCaptureBackend really is what turns PortAudio
-    status flags into a DeviceUnavailableError, and CaptureSession really is
-    what turns that into a device_lost CaptureEvent -- nothing here goes
-    through FakeCaptureBackend/FakeCaptureHandle.lose_device()'s shortcut."""
+    """PortAudio has no "device removed" callback bit: when WASAPI invalidates
+    an endpoint the processing thread just stops and Pa_IsStreamActive starts
+    answering false. The capture watchdog is what turns that dead stream into
+    a DeviceUnavailableError, and CaptureSession is what turns that into a
+    device_lost CaptureEvent -- nothing here goes through
+    FakeCaptureBackend/FakeCaptureHandle.lose_device()'s shortcut."""
     device_lost = Event()
     events: list[CaptureEvent] = []
-    backend = PyAudioCaptureBackend(fake_pyaudio)
+    backend = PyAudioCaptureBackend(fake_pyaudio, watchdog_interval_seconds=0.01)
     devices = backend.list_devices()
 
     def record_event(event: CaptureEvent) -> None:
@@ -352,10 +442,81 @@ def test_a_device_lost_mid_stream_reaches_the_controller_through_the_real_backen
     )
     session.start()
 
-    fake_pyaudio.streams[0].raise_input_overflow_then_device_removed()
+    fake_pyaudio.streams[0].die()
 
-    assert device_lost.wait(timeout=1)
+    assert device_lost.wait(timeout=2)
     assert [event.type for event in events] == ["device_lost"]
+
+
+def test_closing_a_handle_reports_no_device_loss(fake_pyaudio: FakePyAudio) -> None:
+    """A deliberate close stops the stream; the watchdog must stay quiet."""
+    errors: list[Exception] = []
+    backend = PyAudioCaptureBackend(fake_pyaudio, watchdog_interval_seconds=0.01)
+
+    microphone_id = backend.list_devices()[0].device_id
+    handle = backend.open_microphone(microphone_id, lambda _: None)
+    handle.set_error_handler(errors.append)
+    handle.close()
+    sleep(0.1)
+
+    assert errors == []
+
+
+def test_microphone_enumeration_lists_only_wasapi_endpoints(fake_pyaudio: FakePyAudio) -> None:
+    """Legacy MME/DirectSound views of the same microphone must not be offered.
+
+    Windows exposes every capture endpoint several times -- "Microsoft Sound
+    Mapper", truncated MME names, DirectSound duplicates. Picking one of
+    those routes the meeting through an emulation layer and an extra OS
+    conversion; the outputs list already filters to WASAPI, and the
+    microphone list has to match.
+    """
+
+    class HostApiFakePyAudio(FakePyAudio):
+        def get_host_api_info_by_index(self, index: int) -> dict[str, object]:
+            return {
+                0: {"type": pyaudiowpatch.paMME},
+                1: {"type": pyaudiowpatch.paWASAPI},
+            }[index]
+
+    fake = HostApiFakePyAudio()
+    fake.device_infos = [
+        {
+            "index": 0,
+            "name": "Microphone One (truncated by MM",
+            "maxInputChannels": 2,
+            "maxOutputChannels": 0,
+            "hostApi": 0,
+            "isLoopbackDevice": False,
+            "defaultSampleRate": 44_100.0,
+        },
+        {
+            "index": 1,
+            "name": "Microphone One",
+            "maxInputChannels": 2,
+            "maxOutputChannels": 0,
+            "hostApi": 1,
+            "isLoopbackDevice": False,
+            "defaultSampleRate": 48_000.0,
+        },
+        {
+            "index": 2,
+            "name": "Speakers",
+            "maxInputChannels": 0,
+            "maxOutputChannels": 2,
+            "hostApi": 1,
+            "isLoopbackDevice": False,
+            "defaultSampleRate": 48_000.0,
+        },
+    ]
+    backend = PyAudioCaptureBackend(fake)
+
+    devices = backend.list_devices()
+
+    assert [(device.kind, device.label) for device in devices] == [
+        ("mic", "Microphone One"),
+        ("system", "Speakers"),
+    ]
 
 
 def test_consumer_failure_stops_capture_without_misreporting_device_loss(

@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
-import pyaudiowpatch
 from keyring.errors import PasswordDeleteError
 
 from broccoli_desktop.capture import DeviceUnavailableError
@@ -770,23 +769,22 @@ class FakePyAudioStream:
     callback: Callable[[bytes, int, object, int], tuple[None, int]]
     closed: bool = False
     stopped: bool = False
+    dead: bool = False
 
     def emit(self, pcm: bytes, status_flags: int = 0) -> None:
         self.callback(pcm, len(pcm) // 2, {}, status_flags)
 
-    def raise_input_overflow_then_device_removed(self) -> None:
-        """Drive the real capture.py status-flag branch the way WASAPI does
-        mid-stream: a transient input-overflow flag, immediately followed by
-        the flags PortAudio keeps reporting once the endpoint itself is gone.
+    def die(self) -> None:
+        """Model WASAPI invalidating the endpoint mid-stream.
 
-        PortAudio's callback has no dedicated "device removed" bit -- both a
-        benign xrun and an actual disappearance arrive through the same
-        status_flags word, which is exactly what the production callback at
-        capture.py inspects with `if status_flags:`. The second call reuses
-        real overflow/underflow flags to model that repeated-xrun signature.
+        PortAudio's callback has no "device removed" bit -- when the endpoint
+        goes away the processing thread simply stops and Pa_IsStreamActive
+        starts answering false, which is what the capture watchdog polls.
         """
-        self.callback(b"", 0, {}, pyaudiowpatch.paInputOverflow)
-        self.callback(b"", 0, {}, pyaudiowpatch.paInputOverflow | pyaudiowpatch.paInputUnderflow)
+        self.dead = True
+
+    def is_active(self) -> bool:
+        return not (self.dead or self.stopped or self.closed)
 
     def stop_stream(self) -> None:
         self.stopped = True
@@ -808,6 +806,7 @@ class FakePyAudio:
                 "maxOutputChannels": 0,
                 "hostApi": 0,
                 "isLoopbackDevice": False,
+                "defaultSampleRate": 48_000.0,
             },
             {
                 "index": 2,
@@ -816,6 +815,7 @@ class FakePyAudio:
                 "maxOutputChannels": 2,
                 "hostApi": 0,
                 "isLoopbackDevice": False,
+                "defaultSampleRate": 48_000.0,
             },
         ]
     )
@@ -824,10 +824,11 @@ class FakePyAudio:
             {
                 "index": 3,
                 "name": "Speakers (loopback)",
-                "maxInputChannels": 2,
+                "maxInputChannels": 1,
                 "maxOutputChannels": 0,
                 "hostApi": 0,
                 "isLoopbackDevice": True,
+                "defaultSampleRate": 48_000.0,
             }
         ]
     )
