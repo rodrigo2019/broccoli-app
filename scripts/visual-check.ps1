@@ -134,9 +134,32 @@ try {
     $finalSegmentText = "we should ship"
 
     Invoke-Browser -BrowserArguments @("open", "http://127.0.0.1:8765/?k=visual-capability-token")
-    Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
+    # The real pre-login window is COMPACT_WINDOW_SIZE (1100x600, runtime.py)
+    # and cannot be dragged to any other size, so the pre-login screens are
+    # exercised at exactly that size; the viewport grows to 1440x900 after
+    # signing in, where the runtime maximizes the window.
+    Invoke-Browser -BrowserArguments @("set", "viewport", "1100", "600")
     Invoke-Browser -BrowserArguments @("set", "media", "light")
     Invoke-Browser -BrowserArguments @("wait", "--text", "Entrar")
+    # The login screen is the whole window: the sidebar and topbar render
+    # nothing before authentication, so they must not reserve space that
+    # pushes the card off the window's center -- or, once the error line is
+    # up, past the 600px edge into a scrollbar (asserted after the bad-token
+    # attempt below).
+    $loginLayout = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const doc = document.scrollingElement; const card = document.querySelector('#loginView .card').getBoundingClientRect(); return [document.getElementById('appHeader').classList.contains('hidden'), document.getElementById('appSidebar').classList.contains('hidden'), Math.round(Math.abs(card.left + card.width / 2 - innerWidth / 2)), Math.round(Math.abs(card.top + card.height / 2 - innerHeight / 2)), doc.scrollHeight - doc.clientHeight]; })()"
+    ) | ConvertFrom-Json
+    $loginLayout = @($loginLayout)
+    if ($loginLayout[0] -ne $true -or $loginLayout[1] -ne $true) {
+        throw "The empty shell chrome is visible on the login screen (header hidden: $($loginLayout[0]), sidebar hidden: $($loginLayout[1]))."
+    }
+    if ([int]$loginLayout[2] -gt 8 -or [int]$loginLayout[3] -gt 8) {
+        throw "The login card sits $($loginLayout[2])px / $($loginLayout[3])px off the compact window's center."
+    }
+    if ([int]$loginLayout[4] -gt 0) {
+        throw "The compact login screen overflows the window by $($loginLayout[4])px."
+    }
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "login.png"))
     # The login screen never had an axe scan, so the token field's accessible

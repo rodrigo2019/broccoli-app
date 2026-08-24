@@ -270,7 +270,10 @@ async def test_a_muted_channel_sends_nothing_while_the_other_keeps_streaming(
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
     controller.set_channel_muted("mic", True)
 
-    for _ in range(5):
+    # Six blocks, not five: the continuous resampler holds back its filter
+    # delay, so the first 100 ms frame completes one block after the naive
+    # 5 x 20 ms arithmetic says it would.
+    for _ in range(6):
         fake_capture.handles["mic-1"].emit(pcm_20ms_block())
         fake_capture.handles["system-1"].emit(pcm_20ms_block())
     await settle()
@@ -294,7 +297,9 @@ async def test_unmuting_resumes_where_the_meeting_is_rather_than_where_it_stoppe
     for _ in range(5):
         fake_capture.handles["mic-1"].emit(pcm_20ms_block())
     controller.set_channel_muted("mic", False)
-    for _ in range(5):
+    # Six blocks after the unmute -- see the muted-channel test above for why
+    # the resampler's held filter delay costs the naive count one block.
+    for _ in range(6):
         fake_capture.handles["mic-1"].emit(pcm_20ms_block())
     await settle()
 

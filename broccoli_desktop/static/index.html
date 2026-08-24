@@ -50,7 +50,15 @@
       <input id="drawer-toggle" type="checkbox" class="drawer-toggle" />
 
       <div class="drawer-content flex min-h-screen min-w-0 flex-col">
-        <header class="app-topbar header sticky top-0 z-10 flex min-h-16 items-center justify-between gap-4 border-b px-4 py-3 transition-all duration-300 sm:px-6">
+        <!--
+          Hidden by renderView on the login screen: every control in it is
+          authenticated-only there, and an empty 64px bar above the hero is
+          what used to push the login card off the window's vertical center
+          -- and past 600px entirely once the login error line appeared. The
+          pre-login settings screen keeps it: the back button and the screen
+          title live here.
+        -->
+        <header id="appHeader" class="app-topbar header sticky top-0 z-10 flex min-h-16 items-center justify-between gap-4 border-b px-4 py-3 transition-all duration-300 sm:px-6">
           <div class="header-content flex min-w-0 items-center gap-2">
             <label for="drawer-toggle" class="btn-menu-toggle drawer-button btn btn-ghost btn-sm lg:hidden" aria-label="Alternar barra lateral">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-linejoin="round" stroke-linecap="round" stroke-width="2" fill="none" stroke="currentColor" class="size-4"><path d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z"></path><path d="M9 4v16"></path><path d="M14 10l2 2l-2 2"></path></svg>
@@ -192,7 +200,14 @@
           </div>
         </section>
 
-        <section id="settingsView" class="hidden min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-7 sm:px-6 lg:min-h-0 lg:px-8">
+        <!--
+          No overflow of its own: the page is this app's one scroller (see the
+          note above <body>), and an `overflow-y-auto` here never engaged
+          anyway -- the flex column it sits in has no definite height to force
+          this section shorter than its content -- while leaving a second
+          scrollbar waiting to appear inside the page's.
+        -->
+        <section id="settingsView" class="hidden flex-1 px-4 pb-8 pt-7 sm:px-6 lg:px-8">
           <main class="mx-auto w-full max-w-4xl">
             <form id="settingsForm" class="grid gap-4 lg:grid-cols-2">
               <section id="settingsDevicesSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl lg:col-span-2">
@@ -264,12 +279,13 @@
                     <h2 class="card-title text-lg">Aparência</h2>
                     <p class="mt-1 text-sm text-base-content/60">Escolha como o desktop deve aparecer.</p>
                   </div>
-                  <fieldset class="grid gap-3" aria-label="Tema da aplicação">
-                    <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                  <!-- `whitespace-normal`: see the note on #settingsConnectionSection. -->
+                  <fieldset class="grid min-w-0 gap-3" aria-label="Tema da aplicação">
+                    <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                       <input id="themeLightOption" class="radio radio-primary" type="radio" name="theme" value="light" />
                       <span class="min-w-0"><span class="block font-medium">Claro</span><span class="block text-xs text-base-content/60">Superfícies claras e contraste suave.</span></span>
                     </label>
-                    <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                    <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                       <input id="themeDarkOption" class="radio radio-primary" type="radio" name="theme" value="dark" />
                       <span class="min-w-0"><span class="block font-medium">Escuro</span><span class="block text-xs text-base-content/60">A experiência padrão do Broccoli.</span></span>
                     </label>
@@ -277,13 +293,26 @@
                 </div>
               </section>
 
-              <section class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
+              <!--
+                renderView stretches this card across both grid columns before
+                login (`lg:col-span-2`): the other two sections are hidden
+                then, and a lone card parked in the left half of a two-column
+                grid is what the pre-login network screen used to look like.
+
+                `whitespace-normal` on every bordered option label in this
+                form, because DaisyUI's `.label` sets `white-space: nowrap`:
+                a description that cannot wrap defines the label's minimum
+                width, and through it the fieldset's (`min-inline-size:
+                min-content`) and the grid track's -- which is how the proxy
+                fields used to overflow the card's right edge.
+              -->
+              <section id="settingsConnectionSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div>
                     <h2 class="card-title text-lg">Conexão</h2>
                     <p class="mt-1 text-sm text-base-content/60">Configure uma rota de proxy para a conexão com o Broccoli.</p>
                   </div>
-                  <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                  <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                     <input id="proxyEnabled" class="toggle toggle-primary" type="checkbox" data-testid="proxy-toggle" />
                     <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Rotear a conexão com o Broccoli através de um proxy.</span></span>
                   </label>
@@ -306,42 +335,44 @@
                       caveat above applies to a <legend> standing in for a
                       sibling <input>'s name, which is not the shape here.
                     -->
-                    <fieldset class="grid gap-3" aria-label="Forma de configuração do proxy">
-                      <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                    <fieldset class="grid min-w-0 gap-3" aria-label="Forma de configuração do proxy">
+                      <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                         <input id="proxyModeManual" class="radio radio-primary" type="radio" name="proxyMode" value="manual" data-testid="proxy-mode-manual" />
                         <span class="min-w-0"><span class="block font-medium">Manual</span><span class="block text-xs text-base-content/60">Informe o endereço e a porta do proxy.</span></span>
                       </label>
-                      <label class="label cursor-pointer justify-start gap-3 rounded-box border border-base-content/10 bg-base-200/40 p-4">
+                      <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                         <input id="proxyModeScript" class="radio radio-primary" type="radio" name="proxyMode" value="script" data-testid="proxy-mode-script" />
                         <span class="min-w-0"><span class="block font-medium">Script automático</span><span class="block text-xs text-base-content/60">O Windows lê o script e escolhe o proxy para cada destino.</span></span>
                       </label>
                     </fieldset>
-                    <div id="proxyManualFields" class="grid gap-3">
-                      <fieldset class="fieldset">
+                    <!--
+                      Address and port share one row, the way every proxy form
+                      pairs them, with the address taking the wider track. They
+                      used to sit on separate rows -- the port alone inside a
+                      two-column grid whose second cell held nothing.
+                    -->
+                    <div id="proxyManualFields" class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                      <fieldset class="fieldset min-w-0">
                         <legend id="proxyHostLegend" class="fieldset-legend text-xs">Endereço</legend>
                         <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" aria-labelledby="proxyHostLegend" />
                       </fieldset>
-                      <div class="grid gap-3 sm:grid-cols-2">
-                        <fieldset class="fieldset">
-                          <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
-                          <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
-                        </fieldset>
-                      </div>
+                      <fieldset class="fieldset min-w-0">
+                        <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
+                        <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
+                      </fieldset>
                     </div>
                     <div id="proxyScriptFields" class="hidden grid gap-3">
-                      <fieldset class="fieldset">
+                      <fieldset class="fieldset min-w-0">
                         <legend id="proxyScriptUrlLegend" class="fieldset-legend text-xs">Endereço do script</legend>
                         <input id="proxyScriptUrl" class="input w-full" type="text" placeholder="http://exemplo.local/proxy.pac" autocomplete="off" data-testid="proxy-script-url" aria-labelledby="proxyScriptUrlLegend" aria-describedby="proxyScriptUrlHelp" />
                         <p id="proxyScriptUrlHelp" class="fieldset-label leading-snug">O mesmo endereço que o Windows usa em Rede e Internet &gt; Proxy &gt; Usar script de instalação. O script decide o proxy por destino, então conexões internas podem sair direto.</p>
                       </fieldset>
                     </div>
-                    <div class="grid gap-3 sm:grid-cols-2">
-                      <fieldset class="fieldset">
-                        <legend id="proxyUsernameLegend" class="fieldset-legend text-xs">Usuário</legend>
-                        <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" aria-labelledby="proxyUsernameLegend" />
-                      </fieldset>
-                    </div>
-                    <fieldset class="fieldset">
+                    <fieldset class="fieldset min-w-0">
+                      <legend id="proxyUsernameLegend" class="fieldset-legend text-xs">Usuário</legend>
+                      <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" aria-labelledby="proxyUsernameLegend" />
+                    </fieldset>
+                    <fieldset class="fieldset min-w-0">
                       <legend id="proxyPasswordLegend" class="fieldset-legend text-xs">Senha</legend>
                       <input id="proxyPassword" class="input w-full" type="password" placeholder="Deixe em branco para manter a senha salva" autocomplete="new-password" data-testid="proxy-password" aria-labelledby="proxyPasswordLegend" aria-describedby="proxyPasswordHelp" />
                       <p id="proxyPasswordHelp" class="fieldset-label leading-snug">A senha é salva no Gerenciador de Credenciais do Windows e nunca é exibida aqui novamente. "Testar conexão" usa apenas o que estiver preenchido aqui, então digite a senha de novo para testar um proxy que a exija.</p>
@@ -481,7 +512,14 @@
         </section>
       </div>
 
-      <div class="drawer-side z-20">
+      <!--
+        Hidden by renderView before authentication: every entry in it (new
+        session, history, settings, logout) is gated on a session, so all the
+        sidebar contributed to the login and pre-login settings screens was a
+        256px column with a logo in it -- the other half of what pushed those
+        screens off the window's horizontal center.
+      -->
+      <div id="appSidebar" class="drawer-side z-20">
         <label for="drawer-toggle" aria-label="Fechar barra lateral" class="drawer-overlay"></label>
         <nav class="flex h-screen w-64 flex-col overflow-y-auto bg-base-200 p-3 text-base-content">
           <div class="p-2 pb-3">

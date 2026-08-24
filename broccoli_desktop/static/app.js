@@ -71,6 +71,8 @@
 
   const elements = {
     skipLink: document.querySelector("#skipLink"),
+    appHeader: document.querySelector("#appHeader"),
+    appSidebar: document.querySelector("#appSidebar"),
     loginView: document.querySelector("#loginView"),
     mainView: document.querySelector("#mainView"),
     settingsView: document.querySelector("#settingsView"),
@@ -113,6 +115,7 @@
     networkSettingsButton: document.querySelector("#networkSettingsButton"),
     settingsDevicesSection: document.querySelector("#settingsDevicesSection"),
     settingsAppearanceSection: document.querySelector("#settingsAppearanceSection"),
+    settingsConnectionSection: document.querySelector("#settingsConnectionSection"),
     themeLightOption: document.querySelector("#themeLightOption"),
     themeDarkOption: document.querySelector("#themeDarkOption"),
     proxyEnabled: document.querySelector("#proxyEnabled"),
@@ -972,6 +975,18 @@
     // /api/settings is unauthenticated on the server. Keeping the screen itself
     // behind `state.authenticated` made that server-side decision unreachable.
     const settingsOpen = state.activeView === "settings";
+    // The shell chrome earns its space only once there is something to put in
+    // it. Before authentication the sidebar is a bare logo column and the
+    // topbar an empty bar, and together they pushed the login card well off
+    // the compact window's center -- and the card past its bottom edge once
+    // the login error line appeared. The pre-login settings screen keeps the
+    // topbar: the back button and the screen title render there.
+    elements.appHeader.classList.toggle("hidden", !state.authenticated && !settingsOpen);
+    elements.appSidebar.classList.toggle("hidden", !state.authenticated);
+    // With its sibling sections hidden pre-login, the connection card is the
+    // form's sole content: let it span the two-column grid instead of sitting
+    // alone in the left half.
+    elements.settingsConnectionSection.classList.toggle("lg:col-span-2", !state.authenticated);
     elements.loginView.classList.toggle("hidden", state.authenticated || settingsOpen);
     elements.mainView.classList.toggle("hidden", !state.authenticated || settingsOpen);
     // #mainView is what the skip link jumps to, and it carries `hidden` on the
@@ -1086,7 +1101,10 @@
     if (elements.proxyModeScript !== focused) elements.proxyModeScript.checked = script;
     writable(elements.proxyScriptUrl, state.proxy.script_url);
     writable(elements.proxyHost, state.proxy.host);
-    writable(elements.proxyPort, state.proxy.port);
+    // The server's unconfigured port is the integer 0 (settings.py), which is
+    // not a port anyone can type into this field on purpose -- render it as
+    // the empty field it means, so the "8080" placeholder shows through.
+    writable(elements.proxyPort, state.proxy.port || "");
     writable(elements.proxyUsername, state.proxy.username);
     // The saved password never comes back from the server -- this field starts
     // empty on every render and stays that way unless the user types a new one.

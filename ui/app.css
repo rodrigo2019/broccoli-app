@@ -202,9 +202,15 @@
      document does, so rows pass behind the fixed capture dock and give its
      backdrop-filter something to blur. Boxing the transcript in its own
      scroller would clip every row at the surface's edge and leave nothing
-     behind the glass. */
+     behind the glass.
+
+     `flex: 1 1 auto` because the surface sits in a column that fills the
+     viewport: without it an empty transcript renders as a strip the height
+     of its one placeholder line, and the placeholder's `margin: auto 0`
+     below has no free space to center within. */
   .transcript-surface {
     display: flex;
+    flex: 1 1 auto;
     flex-direction: column;
     gap: 0.65rem;
     padding: 0.75rem 0.2rem 0.5rem;
@@ -428,64 +434,6 @@
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-  }
-
-  .audio-level-card__header {
-    color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .audio-level-card__reading {
-    color: var(--color-base-content);
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0;
-    text-transform: none;
-  }
-
-  .audio-level-card__meter {
-    display: grid;
-    grid-template-columns: repeat(18, minmax(0, 1fr));
-    align-items: end;
-    gap: 0.16rem;
-    height: 2rem;
-  }
-
-  .audio-level-card__segment {
-    height: var(--segment-height, 50%);
-    min-height: 0.35rem;
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--color-primary) 14%, var(--color-base-300));
-    opacity: 0.42;
-    transition: background-color 100ms linear, box-shadow 100ms linear, opacity 100ms linear;
-  }
-
-  .audio-level-card__segment.is-active {
-    background: var(--color-primary);
-    opacity: 0.98;
-    box-shadow: 0 0 0.55rem color-mix(in oklch, var(--color-primary) 40%, transparent);
-  }
-
-  .audio-level-card__meter--system .audio-level-card__segment.is-active {
-    background: var(--color-secondary);
-    box-shadow: 0 0 0.55rem color-mix(in oklch, var(--color-secondary) 45%, transparent);
-  }
-
-  .audio-level-card__segment:nth-child(n + 15).is-active {
-    background: var(--color-warning);
-    box-shadow: 0 0 0.55rem color-mix(in oklch, var(--color-warning) 48%, transparent);
-  }
-
-  .audio-level-card__segment.is-peak {
-    outline: 1px solid var(--color-base-content);
-    outline-offset: 2px;
-  }
-
-  .audio-test-control {
     margin-top: 0.25rem;
     padding-top: 1rem;
     border-top: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
@@ -767,20 +715,16 @@
       flex-direction: column;
     }
 
-    .capture-dock {
-      right: 0.5rem;
-      bottom: 0.5rem;
-      left: 0.5rem;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.5rem;
-      border-radius: 0.65rem;
-    }
-
     /* Cards stay side by side -- stacking them would make the dock taller
        than the transcript it is docked to -- and the transport takes the
        row underneath, where the divider becomes a rule above it. */
     .capture-dock {
+      right: 0.5rem;
+      bottom: 0.5rem;
+      left: 0.5rem;
       grid-template-columns: minmax(0, 1fr);
+      gap: 0.5rem;
+      border-radius: 0.65rem;
     }
 
     .capture-dock__actions {
