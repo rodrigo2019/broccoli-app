@@ -225,6 +225,33 @@ def test_unmuting_starts_a_fresh_resampler_stream(
     assert len(fake_factory.created) == 2
 
 
+def test_frames_are_stamped_with_the_offset_of_the_block_that_fed_the_stream() -> None:
+    """A stream's filter delay can swallow the whole first block's output.
+
+    The samples it releases later still belong to the block that went in, so
+    the first frame must carry that block's meeting offset -- not the offset
+    of whichever later block finally produced bytes.
+    """
+
+    class DelayedStream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def process(self, pcm: bytes) -> bytes:
+            self.calls += 1
+            return b"" if self.calls == 1 else b"\x02\x00" * 480
+
+    class DelayedFactory:
+        def create(self, input_rate: int, output_rate: int) -> DelayedStream:
+            return DelayedStream()
+
+    pipeline = AudioPipeline(resampler_factory=DelayedFactory())
+
+    frames = [frame for _ in range(6) for frame in pipeline.feed("mic", pcm_20ms())]
+
+    assert [frame.offset_ms for frame in frames] == [0]
+
+
 def test_pipeline_rejects_skipping_an_unknown_channel(
     fake_factory: FakeResamplerFactory,
 ) -> None:
