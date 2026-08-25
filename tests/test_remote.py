@@ -13,6 +13,7 @@ from broccoli_desktop.remote import (
     HttpListeningRemote,
     SessionStarted,
     TranscriptDeltaEvent,
+    TranscriptDiscardEvent,
     TranscriptSegmentEvent,
     last_page_cursor,
 )
@@ -303,6 +304,7 @@ async def test_stream_uses_handshake_query_and_derives_segment_id(
     assert (
         fake_socket_factory.url == "ws://127.0.0.1:8000/ws/listening/"
         "?device=Speakers&language_mic=pt&language_system=en&title=Daily+review"
+        "&features=transcript_discard"
     )
     assert fake_socket_factory.socket.sent == []
     assert events == [
@@ -375,6 +377,48 @@ async def test_stream_uses_the_pending_segment_id_for_transcript_deltas(
 
 
 @pytest.mark.asyncio
+async def test_stream_parses_a_targeted_transcript_discard(
+    fake_socket_factory: FakeSocketFactory,
+) -> None:
+    fake_socket_factory.socket.received = [
+        json.dumps(
+            {
+                "type": "session.started",
+                "uuid_code": "live-1",
+                "next_seq": {"mic": 4, "system": 2},
+                "max_duration_s": 14_400,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "transcript.discard",
+                "channel": "mic",
+                "utterance_id": "mic:item-123",
+                "reason": "empty",
+            }
+        ),
+    ]
+    remote = HttpListeningRemote(
+        "http://127.0.0.1:8000",
+        "secret",
+        websocket_path="/ws/listening/",
+        socket_factory=fake_socket_factory,
+    )
+
+    stream = await remote.connect_stream(
+        resume_code=None,
+        device_label="Speakers",
+        language_mic="pt",
+        language_system="en",
+    )
+
+    assert [event async for event in stream.events()] == [
+        SessionStarted("live-1", {"mic": 4, "system": 2}, 14_400),
+        TranscriptDiscardEvent("mic", "mic:item-123", "empty"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_includes_nonempty_resume_in_the_handshake_query(
     fake_socket_factory: FakeSocketFactory,
 ) -> None:
@@ -395,6 +439,7 @@ async def test_stream_includes_nonempty_resume_in_the_handshake_query(
     assert (
         fake_socket_factory.url == "wss://broccoli.example/ws/listening/"
         "?resume=live+1&device=Laptop+speakers&language_mic=en&language_system=en"
+        "&features=transcript_discard"
     )
     assert fake_socket_factory.headers == {"Authorization": "Token secret"}
 

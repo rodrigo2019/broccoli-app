@@ -2272,6 +2272,13 @@
     appendProvisionalRow(row);
   }
 
+  function renderDiscard(discard) {
+    const pending = state.pendingDeltas.get(discard.utterance_id);
+    if (!pending) return;
+    pending.remove();
+    state.pendingDeltas.delete(discard.utterance_id);
+  }
+
   /**
    * Promote a finalized segment from the provisional (aria-live="off") region
    * into the log.
@@ -2769,6 +2776,8 @@
       applyBootstrap(event.bootstrap);
     } else if (event.type === "delta" && event.delta) {
       renderDelta(event.delta);
+    } else if (event.type === "discard" && event.discard) {
+      renderDiscard(event.discard);
     } else if (event.type === "segment" && event.segment) {
       renderSegment(event.segment);
     } else if (event.type === "status" && event.state) {

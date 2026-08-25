@@ -15,6 +15,8 @@ from broccoli_desktop.remote import (
     RemoteProtocolError,
     RemoteRequestError,
     SessionEnded,
+    TranscriptDeltaEvent,
+    TranscriptDiscardEvent,
     TranscriptSegmentEvent,
 )
 from broccoli_desktop.session import (
@@ -285,6 +287,46 @@ async def test_a_muted_channel_sends_nothing_while_the_other_keeps_streaming(
     assert [frame.channel for frame in sent] == ["system"]
     assert controller.muted_channels == {"mic": True, "system": False}
 
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["mic", "system"])
+async def test_mute_sends_one_flush_after_already_queued_audio(
+    channel: str,
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    controller._enqueue_frame(AudioFrame(channel, 100, b"\x00\x00"), controller._run_generation)  # type: ignore[arg-type]
+
+    controller.set_channel_muted(channel, True)  # type: ignore[arg-type]
+    controller.set_channel_muted(channel, True)  # type: ignore[arg-type]
+    controller.set_channel_muted(channel, False)  # type: ignore[arg-type]
+    controller.set_channel_muted(channel, True)  # type: ignore[arg-type]
+    await controller._audio_queue.join()
+
+    assert [decode_audio_frame(frame).offset_ms for frame in stream.frames] == [100]
+    assert stream.controls == [{"type": "channel.flush", "channel": channel}]
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_frame_scheduled_before_mute_is_revalidated_when_it_reaches_the_loop(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.set_channel_muted("mic", True)
+
+    controller._enqueue_frame(AudioFrame("mic", 100, b"\x00\x00"), controller._run_generation)
+    await controller._audio_queue.join()
+
+    assert fake_remote.streams[-1].frames == []
+    assert fake_remote.streams[-1].controls == [{"type": "channel.flush", "channel": "mic"}]
     await controller.stop()
 
 
@@ -596,6 +638,61 @@ async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_f
     ]
     assert controller.state is ConnectionState.STREAMING
 
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_mute_flush_survives_reconnection_and_follows_replayed_audio(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    class GateClock:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def sleep(self, _delay: float) -> None:
+            self.entered.set()
+            await self.release.wait()
+
+    clock = GateClock()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    controller.enqueue_audio_frames([AudioFrame("mic", 100, b"\x00\x00")])
+
+    await fake_remote.emit_failure()
+    await clock.entered.wait()
+    controller.set_channel_muted("mic", True)
+    await controller._audio_queue.join()
+    clock.release.set()
+    await settle()
+
+    reconnected = fake_remote.streams[-1]
+    assert [decode_audio_frame(frame).offset_ms for frame in reconnected.frames] == [100]
+    assert reconnected.controls == [{"type": "channel.flush", "channel": "mic"}]
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_discard_removes_only_the_matching_provisional_without_counting_a_segment(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    await stream.emit(TranscriptDeltaEvent("mic", "mic:item-1", "ruído", 100))
+    await stream.emit(TranscriptDeltaEvent("system", "system:item-2", "fala", 200))
+    await settle()
+
+    await stream.emit(TranscriptDiscardEvent("mic", "mic:item-1", "empty"))
+    await settle()
+
+    assert set(controller.pending_deltas) == {"system:item-2"}
+    assert controller.session is not None
+    assert controller.session.segment_count == started.segment_count
+    discards = [event.discard for event in controller.events.snapshot() if event.type == "discard"]
+    assert [discard.utterance_id for discard in discards if discard is not None] == ["mic:item-1"]
     await controller.stop()
 
 

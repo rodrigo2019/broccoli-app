@@ -23,6 +23,7 @@ from broccoli_desktop.models import (
     DeviceDescriptor,
     SessionSummary,
     TranscriptDelta,
+    TranscriptDiscard,
     TranscriptSegment,
     UiEvent,
 )
@@ -40,6 +41,7 @@ from broccoli_desktop.remote import (
     SessionEnded,
     SessionStarted,
     TranscriptDeltaEvent,
+    TranscriptDiscardEvent,
     TranscriptSegmentEvent,
 )
 
@@ -67,7 +69,7 @@ MAX_BUFFERED_FRAMES = MAX_BUFFERED_AUDIO_MS // FRAME_DURATION_MS
 #: The in-flight bound, deliberately equal to the reconnect buffer's: both are
 #: the same frame budget, and if they drift apart one of them is wrong.
 AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_FRAMES
-STOP_FINALIZE_TIMEOUT_SECONDS = 10.0
+STOP_FINALIZE_TIMEOUT_SECONDS = 20.0
 STOP_DRAIN_TIMEOUT_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,15 @@ class CaptureLanguages:
 #: the choice existed. A shared instance because the value is frozen and it
 #: is the default of three signatures below.
 DETECT_LANGUAGES = CaptureLanguages()
+
+
+@dataclass(frozen=True)
+class _ChannelFlush:
+    channel: Literal["mic", "system"]
+    generation: int
+
+
+type _OutboundItem = AudioFrame | _ChannelFlush
 
 
 class _RunReclaimed(Exception):
@@ -163,9 +174,13 @@ class DesktopSessionController:
         # toggle landing between two blocks takes effect on the next one,
         # which is exactly what muting means.
         self._muted: dict[Literal["mic", "system"], bool] = {"mic": False, "system": False}
+        self._pending_flush_channels: set[Literal["mic", "system"]] = set()
+        self._reconnect_flush_channels: set[Literal["mic", "system"]] = set()
         self._device_label: str | None = None
         self._reader_task: asyncio.Task[None] | None = None
-        self._audio_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
+        self._audio_queue: asyncio.Queue[_OutboundItem] = asyncio.Queue(
+            maxsize=AUDIO_QUEUE_MAX_FRAMES + 2
+        )
         self._sender_task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
         self._dropped_frames = 0
@@ -255,7 +270,16 @@ class DesktopSessionController:
         """
         if channel not in self._muted:
             raise ValueError("Unknown audio channel.")
-        self._muted[channel] = bool(muted)
+        muted = bool(muted)
+        was_muted = self._muted[channel]
+        self._muted[channel] = muted
+        if (
+            muted
+            and not was_muted
+            and self.state
+            in {ConnectionState.STARTING, ConnectionState.STREAMING, ConnectionState.RECONNECTING}
+        ):
+            self._enqueue_flush(channel, self._run_generation)
 
     async def stop(self) -> None:
         """Drain captured audio and wait for the backend's final transcript."""
@@ -301,6 +325,7 @@ class DesktopSessionController:
                             )
                         )
                         self._sent_frames += 1
+                    await self._send_pending_flushes(stream)
 
             if stream is not None:
                 await stream.send_control({"type": "session.end"})
@@ -661,6 +686,15 @@ class DesktopSessionController:
             self.pending_deltas[delta.utterance_id] = delta
             self.events.publish(UiEvent(type="delta", delta=delta))
             return
+        if isinstance(event, TranscriptDiscardEvent):
+            discard = TranscriptDiscard(
+                channel=self._channel(event.channel),
+                utterance_id=event.utterance_id,
+                reason=event.reason,
+            )
+            self.pending_deltas.pop(discard.utterance_id, None)
+            self.events.publish(UiEvent(type="discard", discard=discard))
+            return
         if isinstance(event, TranscriptSegmentEvent):
             segment = TranscriptSegment(
                 utterance_id=event.utterance_id,
@@ -805,6 +839,7 @@ class DesktopSessionController:
                         # not a gap to fill in.
                         if pending and self._buffer_generation == generation:
                             self.enqueue_audio_frames(pending)
+                    await self._send_pending_flushes(stream)
                     self._set_state(ConnectionState.STREAMING, session=self._session)
                     # Cancel before overwriting: a reader left over from the
                     # connection that just failed would otherwise keep running
@@ -927,7 +962,10 @@ class DesktopSessionController:
         streaming, look perfectly live to any state check, and be transmitted
         under a finished session's offsets.
         """
-        if generation != self._run_generation:
+        if generation != self._run_generation or self._muted[frame.channel]:
+            return
+        if self._audio_queue.qsize() >= AUDIO_QUEUE_MAX_FRAMES:
+            self._record_dropped_frame()
             return
         while True:
             try:
@@ -939,15 +977,30 @@ class DesktopSessionController:
                     self._audio_queue.task_done()
                 except asyncio.QueueEmpty:
                     return
-                self._dropped_frames += 1
-                if not self._reported_dropping:
-                    self._reported_dropping = True
-                    self.events.publish(
-                        UiEvent(
-                            type="warning",
-                            message="Áudio está sendo descartado: a conexão não está acompanhando.",
-                        )
-                    )
+                self._record_dropped_frame()
+
+    def _record_dropped_frame(self) -> None:
+        self._dropped_frames += 1
+        if not self._reported_dropping:
+            self._reported_dropping = True
+            self.events.publish(
+                UiEvent(
+                    type="warning",
+                    message="Áudio está sendo descartado: a conexão não está acompanhando.",
+                )
+            )
+
+    def _enqueue_flush(self, channel: Literal["mic", "system"], generation: int) -> None:
+        if generation != self._run_generation or channel in self._pending_flush_channels:
+            return
+        self._pending_flush_channels.add(channel)
+        try:
+            self._audio_queue.put_nowait(_ChannelFlush(channel=channel, generation=generation))
+        except asyncio.QueueFull:
+            # The queue reserves two slots beyond the audio budget, one for
+            # each coalesced channel marker. Retain it if that invariant ever
+            # changes instead of silently losing a mute boundary.
+            self._reconnect_flush_channels.add(channel)
 
     async def _send_audio_forever(self) -> None:
         """The only consumer of the audio queue.
@@ -971,9 +1024,12 @@ class DesktopSessionController:
                 # one's counter -- or raise, on the way out of a cancel, where
                 # the error is swallowed.
                 queue = self._audio_queue
-                frame = await queue.get()
+                item = await queue.get()
                 try:
-                    await self._forward_frame(frame)
+                    if isinstance(item, _ChannelFlush):
+                        await self._forward_flush(item)
+                    else:
+                        await self._forward_frame(item)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1000,6 +1056,35 @@ class DesktopSessionController:
         except Exception:
             self.enqueue_audio_frames([frame])
             await self._recover()
+
+    async def _forward_flush(self, marker: _ChannelFlush) -> None:
+        if marker.generation != self._run_generation:
+            self._pending_flush_channels.discard(marker.channel)
+            self._reconnect_flush_channels.discard(marker.channel)
+            return
+        stream = self._stream or self._recovery_stream
+        if self.state is ConnectionState.RECONNECTING:
+            self._reconnect_flush_channels.add(marker.channel)
+            return
+        if self.state is not ConnectionState.STREAMING or stream is None:
+            self._pending_flush_channels.discard(marker.channel)
+            self._reconnect_flush_channels.discard(marker.channel)
+            return
+        try:
+            await stream.send_control({"type": "channel.flush", "channel": marker.channel})
+            self._pending_flush_channels.discard(marker.channel)
+            self._reconnect_flush_channels.discard(marker.channel)
+        except Exception:
+            self._reconnect_flush_channels.add(marker.channel)
+            await self._recover()
+
+    async def _send_pending_flushes(self, stream: RemoteStream) -> None:
+        for channel in ("mic", "system"):
+            if channel not in self._reconnect_flush_channels:
+                continue
+            await stream.send_control({"type": "channel.flush", "channel": channel})
+            self._reconnect_flush_channels.discard(channel)
+            self._pending_flush_channels.discard(channel)
 
     def _track(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
         """Hold a strong reference for the task's lifetime.
@@ -1045,7 +1130,9 @@ class DesktopSessionController:
         stall is reported as its own, and the run generation moves on so that
         frames captured for the run that just ended are refused on arrival.
         """
-        self._audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES)
+        self._audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX_FRAMES + 2)
+        self._pending_flush_channels.clear()
+        self._reconnect_flush_channels.clear()
         self._run_generation += 1
         self._dropped_frames = 0
         self._reported_dropping = False

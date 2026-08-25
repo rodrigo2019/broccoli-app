@@ -111,6 +111,13 @@ class TranscriptDeltaEvent:
 
 
 @dataclass(frozen=True)
+class TranscriptDiscardEvent:
+    channel: str
+    utterance_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class TranscriptSegmentEvent:
     channel: str
     utterance_id: str
@@ -142,6 +149,7 @@ class Pong:
 type RemoteEvent = (
     SessionStarted
     | TranscriptDeltaEvent
+    | TranscriptDiscardEvent
     | TranscriptSegmentEvent
     | CreditWarning
     | SessionEnded
@@ -455,6 +463,12 @@ class _WebSocketRemoteStream:
                 text=_required_string(values, "text"),
                 started_offset_ms=_required_integer(values, "started_offset_ms"),
             )
+        if event_type == "transcript.discard":
+            return TranscriptDiscardEvent(
+                channel=_channel(values),
+                utterance_id=_required_string(values, "utterance_id"),
+                reason=_required_string(values, "reason"),
+            )
         if event_type == "credit.warning":
             return CreditWarning()
         if event_type == "session.ended":
@@ -583,6 +597,7 @@ def _stream_url(
                 "language_mic": language_mic,
                 "language_system": language_system,
                 "title": title,
+                "features": "transcript_discard",
             }.items()
             if value
         }

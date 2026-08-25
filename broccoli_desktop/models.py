@@ -103,10 +103,18 @@ class TranscriptDelta:
 
 
 @dataclass(frozen=True)
+class TranscriptDiscard:
+    channel: Literal["mic", "system"]
+    utterance_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class UiEvent:
     type: str
     state: ConnectionState | None = None
     session: SessionSummary | None = None
     delta: TranscriptDelta | None = None
+    discard: TranscriptDiscard | None = None
     segment: TranscriptSegment | None = None
     message: str | None = None

@@ -37,6 +37,7 @@ from broccoli_desktop.models import (
     SessionPage,
     SessionSummary,
     TranscriptDelta,
+    TranscriptDiscard,
     TranscriptSegment,
     UiEvent,
     validate_title,
@@ -1495,6 +1496,14 @@ def _delta_payload(delta: TranscriptDelta) -> dict[str, object]:
     }
 
 
+def _discard_payload(discard: TranscriptDiscard) -> dict[str, object]:
+    return {
+        "utterance_id": discard.utterance_id,
+        "channel": discard.channel,
+        "reason": discard.reason,
+    }
+
+
 def _event_payload(event: UiEvent) -> dict[str, object]:
     payload: dict[str, object] = {"type": event.type}
     if event.state is not None:
@@ -1503,6 +1512,8 @@ def _event_payload(event: UiEvent) -> dict[str, object]:
         payload["session"] = _session_payload(event.session)
     if event.delta is not None:
         payload["delta"] = _delta_payload(event.delta)
+    if event.discard is not None:
+        payload["discard"] = _discard_payload(event.discard)
     if event.segment is not None:
         payload["segment"] = _segment_payload(event.segment)
     if event.message is not None:

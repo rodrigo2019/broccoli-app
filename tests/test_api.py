@@ -24,6 +24,7 @@ from broccoli_desktop.api import (
     Services,
     _audio_level_events,
     _default_proxy_prober,
+    _event_payload,
     _RedactCapabilityKeyFilter,
     create_app,
     create_uvicorn_config,
@@ -36,6 +37,7 @@ from broccoli_desktop.models import (
     SegmentPage,
     SessionPage,
     SessionSummary,
+    TranscriptDiscard,
     TranscriptSegment,
     UiEvent,
 )
@@ -52,6 +54,19 @@ from tests.fakes import (
     visual_test_remote,
 )
 from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
+
+
+def test_discard_event_payload_targets_one_utterance() -> None:
+    discard = TranscriptDiscard(channel="mic", utterance_id="mic:item-1", reason="empty")
+
+    assert _event_payload(UiEvent(type="discard", discard=discard)) == {
+        "type": "discard",
+        "discard": {
+            "channel": "mic",
+            "utterance_id": "mic:item-1",
+            "reason": "empty",
+        },
+    }
 
 
 @dataclass
@@ -1192,6 +1207,38 @@ def test_the_shell_and_its_assets_do_not_require_the_token(
     """The page has to boot before it can present a key."""
     assert tokened_client.get("/").status_code == 200
     assert tokened_client.get("/static/app.js").status_code == 200
+
+
+def test_transcript_discard_removes_only_its_matching_provisional_row(
+    tokened_client: TestClient,
+) -> None:
+    app_js = tokened_client.get("/static/app.js").text
+    start = app_js.index("  function renderDiscard(discard)")
+    end = app_js.index("\n  /**", start)
+    function_source = app_js[start:end]
+    script = f"""
+const state = {{ pendingDeltas: new Map() }};
+const matching = {{ removed: 0, remove() {{ this.removed += 1; }} }};
+const other = {{ removed: 0, remove() {{ this.removed += 1; }} }};
+state.pendingDeltas.set("mic:item-1", matching);
+state.pendingDeltas.set("system:item-2", other);
+{function_source}
+renderDiscard({{ utterance_id: "mic:item-1" }});
+renderDiscard({{ utterance_id: "mic:unknown" }});
+process.stdout.write(JSON.stringify({{
+  matchingRemoved: matching.removed,
+  otherRemoved: other.removed,
+  remaining: [...state.pendingDeltas.keys()],
+}}));
+"""
+    completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "matchingRemoved": 1,
+        "otherRemoved": 0,
+        "remaining": ["system:item-2"],
+    }
 
 
 def test_a_non_ascii_capability_key_is_rejected_rather_than_crashing(
