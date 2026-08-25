@@ -18,7 +18,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -30,6 +30,11 @@ from broccoli_desktop.capture import (
     DeviceUnavailableError,
 )
 from broccoli_desktop.credentials import CredentialStorageError
+from broccoli_desktop.i18n import (
+    SUPPORTED_UI_LOCALES,
+    all_catalogs,
+    resolve_locale,
+)
 from broccoli_desktop.models import (
     ConnectionState,
     DeviceDescriptor,
@@ -66,19 +71,28 @@ from broccoli_desktop.settings import (
     DeviceSettings,
     InMemoryDeviceSettings,
     InMemoryProxySettings,
+    InMemoryUiSettings,
     ProxyMode,
     ProxySettings,
     ProxySettingsStore,
+    UiSettingsStore,
 )
 
 LOOPBACK_HOST = "127.0.0.1"
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 
+#: Replaced with the interface catalogs when the shell is served -- see
+#: _render_shell. A comment rather than a template placeholder because
+#: index.html has to stay a file a browser can open on its own.
+I18N_MARKER = "<!--i18n-bootstrap-->"
+#: The one attribute the shell carries that the served copy rewrites.
+DOCUMENT_LANGUAGE_MARKER = '<html lang="en">'
+
 #: Long enough that a burst of calls costs one enumeration, short enough that
 #: plugging in a headset shows up without a restart.
 DEVICE_CACHE_TTL_SECONDS = 5.0
 
-#: Bounds the "Testar conexão" probe so a proxy that never answers cannot hang
+#: Bounds the "Test connection" probe so a proxy that never answers cannot hang
 #: the settings screen -- generous next to REQUEST_TIMEOUT in remote.py since
 #: this is a one-off manual check, not a request on the hot path.
 PROXY_TEST_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
@@ -172,7 +186,8 @@ class Services:
     controller_factory: ControllerFactory = DesktopSessionController
     device_settings: DeviceSettings = field(default_factory=InMemoryDeviceSettings)
     proxy_settings: ProxySettingsStore = field(default_factory=InMemoryProxySettings)
-    #: The backend origin the "Testar conexão" probe is aimed at -- production
+    ui_settings: UiSettingsStore = field(default_factory=InMemoryUiSettings)
+    #: The backend origin the "Test connection" probe is aimed at -- production
     #: wires this to the same server the app talks to. Left blank by default so
     #: an injected Services never reaches the network unless a test opts in.
     backend_url: str = ""
@@ -198,6 +213,10 @@ class Services:
 
     def __post_init__(self) -> None:
         self.audio_levels = AudioLevelMonitor(self.capture_backend)
+
+    def active_locale(self) -> str:
+        """The interface language right now: the stored choice, or Windows."""
+        return resolve_locale(self.ui_settings.load())
 
     async def list_devices(self) -> list[DeviceDescriptor]:
         """Enumerate capture devices off the loop, at most once per TTL.
@@ -265,7 +284,7 @@ class Services:
         ``remote_factory`` reads ``proxy_url()`` at the moment it runs, and
         ``authenticated()`` only reran it when the *token* changed. So a proxy
         saved after login stayed inert until sign-out or a restart -- while
-        "Testar conexão" reported success, actively telling the user the thing
+        "Test connection" reported success, actively telling the user the thing
         it had just failed to apply was working.
 
         Callers refuse to run while a capture is active (see save_settings), so
@@ -347,7 +366,7 @@ class Services:
             # A mistyped address or a script server that is down must not raise
             # out of whichever request happened to rebuild the transport. The
             # connection made without a proxy fails on its own on a network that
-            # needs one, and "Testar conexão" is where the user is told why.
+            # needs one, and "Test connection" is where the user is told why.
             logging.getLogger(__name__).warning(
                 "The proxy configuration script could not be read.", exc_info=True
             )
@@ -543,6 +562,12 @@ class ProxyPayload(BaseModel):
 
 class SettingsRequest(BaseModel):
     proxy: ProxyPayload
+
+
+class LanguageRequest(BaseModel):
+    """An interface locale, or "" to go back to following Windows."""
+
+    locale: str
 
 
 class ProxyTestRequest(BaseModel):
@@ -885,6 +910,33 @@ def create_app(services: Services) -> FastAPI:
         services.save_proxy_settings(settings, password=proxy.password)
         return Response(status_code=204)
 
+    @app.put("/api/settings/language")
+    async def save_language(request: LanguageRequest) -> dict[str, str]:
+        """Choose the interface language, or clear the choice to follow Windows.
+
+        Deliberately its own endpoint rather than a field on /api/settings.
+        That one refuses while a capture is running, because swapping the
+        proxy under a live stream would leave the transport disagreeing with
+        itself -- a reason that has nothing to do with wording. Nothing here
+        touches the transport, so changing language mid-meeting is allowed.
+
+        Unauthenticated for the same reason the proxy panel is: the settings
+        screen opens before login, and a language picker nobody can reach until
+        they have signed in is a language picker in the wrong place.
+
+        Answers with the locale that is now in effect rather than 204, because
+        an empty request means "follow Windows" and the window has no way of
+        its own to find out what Windows is set to.
+        """
+        locale = request.locale.strip()
+        if not locale:
+            services.ui_settings.clear()
+        elif locale not in SUPPORTED_UI_LOCALES:
+            raise ApiError(422, "The selected interface language is unsupported.")
+        else:
+            services.ui_settings.save(locale)
+        return {"locale": services.active_locale()}
+
     @app.post("/api/settings/test-proxy")
     async def test_proxy(request: ProxyTestRequest) -> dict[str, bool]:
         """Try one request through the submitted (not necessarily saved) proxy
@@ -1145,10 +1197,41 @@ def create_app(services: Services) -> FastAPI:
             controller.events.unsubscribe(subscriber)
 
     @app.get("/", include_in_schema=False)
-    async def root() -> FileResponse:
-        return FileResponse(STATIC_DIRECTORY / "index.html")
+    async def root() -> HTMLResponse:
+        return HTMLResponse(_render_shell(services.active_locale(), services.ui_settings.load()))
 
     return app
+
+
+def _render_shell(locale: str, stored: str | None) -> str:
+    """Serve index.html with the catalogs already in it.
+
+    The catalogs are injected rather than fetched so that the window has them
+    before anything is painted. app.js is deferred -- the same reason the theme
+    is applied by an inline script in the head (see index.html) -- so a
+    catalog that arrived over a round trip would be one frame too late, and the
+    first frame would be painted in the wrong language.
+
+    All three catalogs travel, not just the active one: together they are a
+    few tens of kilobytes over loopback, and it is what makes changing the
+    language take effect without a reload or a second request.
+
+    A single str.replace, not a template engine: index.html has to stay a file
+    that opens in a browser on its own.
+    """
+    html = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
+    if I18N_MARKER not in html or DOCUMENT_LANGUAGE_MARKER not in html:
+        # Loudly, rather than serving a shell that renders in whatever language
+        # the markup happens to be written in. A renamed marker is a defect
+        # that has to surface at the first request, not in a screenshot.
+        raise RuntimeError("index.html is missing its interface-language markers.")
+    payload = {"locale": locale, "stored": stored, "catalogs": all_catalogs()}
+    # Escaping "<" makes a "</script>" inside a translation impossible, whatever
+    # a catalog happens to contain.
+    serialized = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    bootstrap = f"<script>window.__I18N__={serialized};window.__I18N_MISSING__=[];</script>"
+    html = html.replace(DOCUMENT_LANGUAGE_MARKER, f'<html lang="{locale}">', 1)
+    return html.replace(I18N_MARKER, bootstrap, 1)
 
 
 async def _send_events(

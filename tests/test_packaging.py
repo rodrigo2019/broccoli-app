@@ -31,6 +31,16 @@ def test_the_spec_bundles_the_application_package_itself() -> None:
     assert 'collect_submodules("broccoli_desktop")' in specification
 
 
+def test_the_spec_bundles_the_interface_catalogs() -> None:
+    """The window is served by reading index.html and the catalogs off disk, so
+    a locales directory left out of the archive fails at the first request --
+    not at build time, which is the same shape as the two packaging defects
+    that already shipped here."""
+    specification = REPOSITORY_ROOT.joinpath("installer", "BroccoliDesktop.spec").read_text()
+
+    assert '"broccoli_desktop/locales"' in specification
+
+
 def test_main_still_reaches_the_runtime_the_way_the_spec_compensates_for() -> None:
     """The test above is only worth its weight while the dynamic import it
     describes is still there. If __main__ ever imports the runtime normally,

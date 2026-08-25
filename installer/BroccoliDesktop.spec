@@ -38,7 +38,13 @@ WINDOWS_RUNTIME_IMPORTS = (
     "PIL.Image",
 )
 
-datas = [(str(PROJECT_ROOT / "broccoli_desktop" / "static"), "broccoli_desktop/static")]
+# The shell and the interface catalogs are both read from disk at runtime, so
+# both have to travel: without the catalogs the first request for the window
+# fails on an open() the build itself never performs.
+datas = [
+    (str(PROJECT_ROOT / "broccoli_desktop" / "static"), "broccoli_desktop/static"),
+    (str(PROJECT_ROOT / "broccoli_desktop" / "locales"), "broccoli_desktop/locales"),
+]
 datas.extend(copy_metadata("keyring"))
 binaries = []
 # __main__ reaches the runtime through import_module(), whose argument is a

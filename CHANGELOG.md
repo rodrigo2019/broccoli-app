@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- English, Portuguese (Brazil) and German, chosen in the settings screen and
+  applied everywhere the application speaks: the window, the notification-area
+  menu and its status line, and the Windows dialogs -- without a restart and
+  without reloading the window. A fresh install follows the Windows display
+  language and falls back to English; "Follow Windows" in the picker goes back
+  to that. German is also offered as a forced transcription language per
+  channel. The automatic titles given to unnamed sessions stay in Portuguese by
+  choice: a title is written into the session when it is created and travels
+  with it as data, so translating it would change only the next one and leave a
+  history reading in two languages at once.
 - One running copy per environment. A second launch no longer opens a second
   window, a second tray icon, and a second capture competing for the same audio
   device: it brings the window that is already running forward -- back from the

@@ -10,9 +10,9 @@
   // shell and /static/* still serve, so the window rendered normally, but
   // every /api/* answered 403 and the event socket closed with 1008. No
   // bootstrap ever arrived, so state.authenticated stayed false and the socket
-  // close handler bailed without retrying; typing a token only produced "Esta
-  // ação só pode partir do aplicativo.". The window was dead until relaunch
-  // and nothing said so.
+  // close handler bailed without retrying; typing a token only produced the
+  // "Local key required." refusal. The window was dead until relaunch and
+  // nothing said so.
   //
   // sessionStorage is what makes a reload survivable while keeping the
   // original intent. It is scoped to this one window and is dropped when the
@@ -116,6 +116,8 @@
     settingsDevicesSection: document.querySelector("#settingsDevicesSection"),
     settingsAppearanceSection: document.querySelector("#settingsAppearanceSection"),
     settingsConnectionSection: document.querySelector("#settingsConnectionSection"),
+    settingsLanguageSection: document.querySelector("#settingsLanguageSection"),
+    settingsLocaleSelect: document.querySelector("#settingsLocaleSelect"),
     themeLightOption: document.querySelector("#themeLightOption"),
     themeDarkOption: document.querySelector("#themeDarkOption"),
     proxyEnabled: document.querySelector("#proxyEnabled"),
@@ -158,6 +160,22 @@
     drawerToggle: document.querySelector("#drawer-toggle"),
   };
 
+  // The interface catalogs, put into the document by _render_shell in api.py
+  // and already applied to the markup by the inline script at the end of
+  // <body> -- which is also where `t` and `apply` are defined. They are read
+  // off the bundle rather than redeclared here so one key cannot resolve two
+  // ways. The inert fallback is for opening index.html directly, with no
+  // server to inject anything: every lookup then answers with its own key.
+  const I18N = window.__I18N__ || {
+    locale: "en",
+    stored: null,
+    catalogs: {},
+    t: (key) => key,
+    apply: () => {},
+  };
+  const t = (key, params) => I18N.t(key, params);
+  const SUPPORTED_UI_LOCALES = ["en", "pt-BR", "de"];
+
   // Same key and same values the platform writes, so the two surfaces agree on
   // what "dark" means and a theme picked in one reads naturally in the other.
   const THEME_STORAGE_KEY = "theme";
@@ -167,7 +185,7 @@
   // started, and it travels in that request -- there is nothing for a second
   // stored copy to stay in sync with. Empty means automatic detection.
   const LANGUAGE_STORAGE_KEY = "capture-languages";
-  const SUPPORTED_LANGUAGES = ["", "pt", "en"];
+  const SUPPORTED_LANGUAGES = ["", "pt", "en", "de"];
   const DEFAULT_LANGUAGES = { microphone: "", system: "" };
 
   // The proxy password is never part of this shape and never travels through
@@ -249,6 +267,10 @@
   const state = {
     authenticated: false,
     sessions: [],
+    // The last device list rendered, so a language change can repaint the
+    // selects from it (see rerenderAll). Not a cache the app reads from:
+    // /api/devices is still the only source.
+    devices: [],
     nextCursor: null,
     searchQuery: "",
     searchTimer: null,
@@ -340,7 +362,7 @@
     const closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.className = "btn btn-ghost btn-sm btn-circle";
-    closeButton.setAttribute("aria-label", "Fechar");
+    closeButton.setAttribute("aria-label", t("common.close"));
     closeButton.innerHTML = '<i class="bi bi-x-lg" aria-hidden="true"></i>';
     closeButton.addEventListener("click", () => dismissNotification(alert));
 
@@ -613,7 +635,7 @@
   }
 
   function formatDecibels(value) {
-    if (!value || value < 0.003) return "−∞ dB";
+    if (!value || value < 0.003) return t("settings.devices.meter.silence");
     return `${Math.max(-48, Math.round(20 * Math.log10(value)))} dB`;
   }
 
@@ -634,24 +656,52 @@
     container.setAttribute("aria-valuenow", String(percent));
     container.setAttribute(
       "aria-valuetext",
-      active ? `${formatDecibels(level)}, pico ${formatDecibels(peak)}` : "Teste não iniciado",
+      active
+        ? t("settings.devices.meter.reading", {
+            level: formatDecibels(level),
+            peak: formatDecibels(peak),
+          })
+        : t("settings.devices.meter.notStarted"),
     );
-    reading.textContent = active ? formatDecibels(level) : "Aguardando";
+    reading.textContent = active
+      ? formatDecibels(level)
+      : t("settings.devices.meter.waiting");
   }
 
   function renderAudioTestControls() {
-    elements.settingsAudioTestButton.textContent = state.audioTestActive
-      ? "Parar teste"
-      : "Testar entrada e saída";
+    elements.settingsAudioTestButton.textContent = t(
+      state.audioTestActive ? "settings.audioTest.stop" : "settings.audioTest.start",
+    );
     elements.settingsAudioTestButton.classList.toggle("btn-error", state.audioTestActive);
     elements.settingsAudioTestButton.classList.toggle("btn-outline", !state.audioTestActive);
   }
 
-  function finishAudioTest(message = "Escolha os dispositivos e inicie o teste.") {
+  // The audio-test status line is the one piece of text the interface writes
+  // to directly instead of deriving from state, so what is remembered here is
+  // the catalog key rather than the sentence: applying a new language repaints
+  // the node from its data-i18n default, and re-asserting a sentence built in
+  // the old language would only trade stale text for wrong text. `detail` is
+  // the exception -- the API's own English string, which has its own lookup.
+  let audioTestStatusKey = "settings.audioTest.idle";
+  let audioTestStatusDetail = null;
+
+  function renderAudioTestStatus() {
+    elements.settingsAudioTestStatus.textContent = audioTestStatusDetail
+      ? translateApiMessage(audioTestStatusDetail)
+      : t(audioTestStatusKey);
+  }
+
+  function setAudioTestStatus(key, { detail = null } = {}) {
+    audioTestStatusKey = key;
+    audioTestStatusDetail = detail;
+    renderAudioTestStatus();
+  }
+
+  function finishAudioTest(key = "settings.audioTest.chooseDevices", options) {
     state.audioTestActive = false;
     renderAudioMeter("microphone");
     renderAudioMeter("system");
-    elements.settingsAudioTestStatus.textContent = message;
+    setAudioTestStatus(key, options);
     renderAudioTestControls();
   }
 
@@ -660,9 +710,7 @@
     captureMotion.setLevels(levels);
     if (!state.audioTestActive) return;
     if (!levels.active) {
-      finishAudioTest(
-        "O teste foi interrompido. Selecione os dispositivos novamente para tentar de novo.",
-      );
+      finishAudioTest("settings.audioTest.interrupted");
       return;
     }
     renderAudioMeter("microphone", levels.microphone, true);
@@ -704,7 +752,7 @@
       try {
         handleAudioLevelSnapshot(JSON.parse(event.data));
       } catch {
-        showNotification("Não foi possível processar o nível de áudio.", "error");
+        showNotification(t("settings.audioTest.levelFailed"), "error");
       }
     });
 
@@ -718,7 +766,7 @@
       }
       // `detail` is the API's English text, so it has to go through the same
       // lookup as every other API error before it reaches the screen.
-      finishAudioTest(detail ? translateApiMessage(detail) : "Não foi possível iniciar o teste de áudio.");
+      finishAudioTest("settings.audioTest.failed", { detail });
       // The server closes the stream after this, and a completed stream is one
       // EventSource happily reopens -- which would retry the dead device on a
       // loop. Reopen the passive observer instead.
@@ -731,7 +779,7 @@
       if (source.readyState !== EventSource.CLOSED) return;
       state.audioLevelSource = null;
       if (deviceTest) {
-        finishAudioTest("Não foi possível iniciar o teste de áudio.");
+        finishAudioTest("settings.audioTest.failed");
         connectAudioLevels();
         return;
       }
@@ -745,26 +793,25 @@
     const microphoneId = elements.settingsMicrophoneSelect.value;
     const systemDeviceId = elements.settingsSystemDeviceSelect.value;
     if (!microphoneId || !systemDeviceId) {
-      finishAudioTest("Escolha um microfone e uma saída de áudio antes de testar.");
+      finishAudioTest("settings.audioTest.selectDevices");
       return;
     }
     // The server refuses this with a 409, but a refused EventSource surfaces as
     // a bare connection error with no body to read -- so the one refusal the
     // user can act on is caught here, where the reason is still known.
     if (isCaptureActive()) {
-      finishAudioTest("Pare a captura antes de testar os dispositivos.");
+      finishAudioTest("settings.audioTest.stopCapture");
       return;
     }
     state.audioTestActive = true;
-    elements.settingsAudioTestStatus.textContent =
-      "Teste em execução. Fale no microfone e reproduza um som no computador.";
+    setAudioTestStatus("settings.audioTest.running");
     renderAudioTestControls();
     connectAudioLevels({ microphone_id: microphoneId, system_device_id: systemDeviceId });
   }
 
-  function stopAudioTest(message = "Teste de áudio encerrado.") {
+  function stopAudioTest(key = "settings.audioTest.finished") {
     const wasActive = state.audioTestActive;
-    finishAudioTest(message);
+    finishAudioTest(key);
     if (!wasActive) return;
     connectAudioLevels();
   }
@@ -778,78 +825,29 @@
   // ------------------------------------------------------------------------ fetch
 
   // The API keeps returning machine-readable English detail strings -- that is the
-  // right contract for an API. The interface is pt-BR, so the mapping lives here.
+  // right contract for an API. What the user reads is a translation of it, and
+  // it lives in the catalogs (broccoli_desktop/locales/*.json) beside every
+  // other piece of wording, under the "api" map keyed by the English detail
+  // itself.
   //
-  // This table covers every `detail` the local API can produce: each ApiError in
+  // That map covers every `detail` the local API can produce: each ApiError in
   // api.py, each JSONResponse detail raised by its exception handlers and by
   // _remote_unavailable, the three LoopbackHostMiddleware rejections, and the
-  // device_error detail the audio-level SSE stream emits. A partial table is
-  // worse than no table: an unmapped detail reaches the user as the generic
-  // "tente novamente" toast, which is correct Portuguese that says nothing,
-  // where the untranslated English at least named the problem. If you add an
-  // ApiError, add its line here -- translateApiMessage logs a warning naming
-  // the missing key when one slips through.
-  const API_MESSAGES = {
-    // Authentication and the local-origin guards.
-    "A credential is required.": "Informe o token de acesso.",
-    "Authentication is required.": "Faça login novamente para continuar.",
-    "The account has no Listening credit available.": "Sua conta está sem créditos para transcrição. Fale com o administrador do seu workspace.",
-    "The session reached its maximum duration.": "A reunião atingiu a duração máxima permitida.",
-    "Credential storage is unavailable.": "O armazenamento de credenciais não está disponível.",
-    "Local host required.": "Esta ação só pode partir do aplicativo.",
-    "Local origin required.": "Esta ação só pode partir do aplicativo.",
-    // Distinct from the two above on purpose: this one means the window lost
-    // the launch key its process was started with -- reloading normally
-    // recovers it from sessionStorage, so reaching this message means even
-    // that failed and only a relaunch will fix the window. Saying "só pode
-    // partir do aplicativo" here would leave the user retrying inside an
-    // application that can no longer talk to its own service.
-    "Local key required.":
-      "Esta janela perdeu a chave desta sessão. Feche e abra o Broccoli Desktop novamente.",
-    // Requests the server could not parse or accept.
-    "Invalid request.": "Não foi possível processar os dados enviados.",
-    "The session changes are invalid.": "As alterações da reunião não são válidas.",
-    "Choose a session property to update.": "Escolha o que deseja alterar na reunião.",
-    "The session title is invalid.": "O título da reunião não é válido.",
-    "The selected transcription language is unsupported.":
-      "O idioma selecionado não está disponível para transcrição.",
-    "The pin state is invalid.": "Não foi possível alterar a fixação da reunião.",
-    // Capture lifecycle conflicts.
-    "A capture is active.": "Já existe uma captura em andamento.",
-    "The current session cannot be changed.": "Não é possível alterar a reunião em andamento.",
-    "Stop the active capture before changing audio devices.":
-      "Pare a captura em andamento antes de alterar os dispositivos de áudio.",
-    "Stop the active capture before testing audio devices.":
-      "Pare a captura em andamento antes de testar os dispositivos de áudio.",
-    "Stop the live capture before deleting this session.":
-      "Pare a captura em andamento antes de excluir esta reunião.",
-    // Audio devices.
-    "Select an available microphone and system device.":
-      "Selecione um microfone e uma saída de áudio disponíveis.",
-    "The selected capture device is unavailable.":
-      "O dispositivo de captura selecionado não está disponível.",
-    "The selected audio device is unavailable.":
-      "O dispositivo de áudio selecionado não está disponível.",
-    // Remote service.
-    "The remote service is unavailable.": "O serviço do Broccoli não está disponível.",
-    "The requested session was not found.": "A reunião solicitada não foi encontrada.",
-    // Proxy settings.
-    "Proxy host and port are required.": "Informe o endereço e a porta do proxy.",
-    "A proxy configuration script address is required.":
-      "Informe o endereço do script de configuração.",
-    "Stop the active capture before changing the proxy.":
-      "Pare a captura em andamento antes de alterar o proxy.",
-  };
-
+  // device_error detail the audio-level SSE stream emits. A partial map is
+  // worse than no map: an unmapped detail reaches the user as the generic
+  // "try again" toast, which says nothing, where the untranslated English at
+  // least named the problem. If you add an ApiError, add its line to all three
+  // catalogs -- a test in tests/test_api.py compares the two sets and fails
+  // when they disagree, and translateApiMessage logs a warning naming the
+  // missing key if one ever slips through at runtime.
   function translateApiMessage(detail) {
-    const message = API_MESSAGES[detail];
+    const active = I18N.catalogs[I18N.locale];
+    const fallback = I18N.catalogs.en;
+    const message = active?.api?.[detail] ?? fallback?.api?.[detail];
     if (!message) {
-      // Every detail the table above does not cover lands here. The fallback
-      // has to say something a user can act on, and the gap has to stay
-      // discoverable instead of silently showing a generic toast forever.
       console.warn(`Unmapped API error detail: ${JSON.stringify(detail)}`);
     }
-    return message || "Não foi possível concluir a ação. Tente novamente.";
+    return message || t("api.fallback");
   }
 
   async function localFetch(path, options = {}) {
@@ -864,13 +862,14 @@
     // server has already discarded the credential by the time it answers (see
     // the RemoteUnauthorizedError handler in api.py). Showing only a toast
     // left the window sitting on the capture screen with a dead token and no
-    // way forward -- the user could read "faça login novamente" and had
+    // way forward -- the user could read "sign in again" and had
     // nowhere to do it. Send them to the screen that fixes it.
     if (response.status === 401 && state.authenticated) signOutLocally();
     const payload = await response.json().catch(() => ({}));
     // The raw English detail travels on the error itself so reportError can
     // route it through translateApiMessage -- a client-side validation error
-    // (already pt-BR) is not tagged and passes through untouched instead.
+    // (already translated, see saveDeviceSelection) is not tagged and passes
+    // through untouched instead.
     const error = new Error(payload.detail || "");
     error.isApiDetail = true;
     throw error;
@@ -899,7 +898,7 @@
    * Every candidate is filtered for visibility, because a screen is not
    * uniformly visible: renderView hides sections *inside* the screen it just
    * showed. #settingsView is the case that proved it -- pre-login its first
-   * <h2> is "Dispositivos de áudio", inside the #settingsDevicesSection that
+   * <h2> is the audio-devices heading, inside the #settingsDevicesSection that
    * renderView has just hidden, and .focus() inside a display:none ancestor is
    * a silent no-op. #loginView is hidden by the same render, so focus fell
    * back to <body>: exactly the defect this function exists to prevent, and
@@ -986,7 +985,10 @@
     // With its sibling sections hidden pre-login, the connection card is the
     // form's sole content: let it span the two-column grid instead of sitting
     // alone in the left half.
-    elements.settingsConnectionSection.classList.toggle("lg:col-span-2", !state.authenticated);
+    // The connection card always spans both columns (see index.html); before
+    // signing in the language card is the only other section on the screen, so
+    // it widens to match instead of sitting alone in the left half.
+    elements.settingsLanguageSection.classList.toggle("lg:col-span-2", !state.authenticated);
     elements.loginView.classList.toggle("hidden", state.authenticated || settingsOpen);
     elements.mainView.classList.toggle("hidden", !state.authenticated || settingsOpen);
     // #mainView is what the skip link jumps to, and it carries `hidden` on the
@@ -1005,6 +1007,8 @@
     // only the network section it was opened for.
     elements.settingsDevicesSection.classList.toggle("hidden", !state.authenticated);
     elements.settingsAppearanceSection.classList.toggle("hidden", !state.authenticated);
+    // The language card stays: it is a preference of this machine, not of an
+    // account, and /api/settings/language is unauthenticated for that reason.
     elements.sidebarFooter.classList.toggle("hidden", !state.authenticated);
     elements.newSessionButton.classList.toggle("hidden", !state.authenticated);
     elements.sessionHistorySection.classList.toggle("hidden", !state.authenticated);
@@ -1013,7 +1017,7 @@
     elements.backToTranscriptButton.classList.toggle("hidden", !settingsOpen);
     elements.backToTranscriptButton.setAttribute(
       "aria-label",
-      state.authenticated ? "Voltar para a captura" : "Voltar para o login",
+      t(state.authenticated ? "header.back.toCapture" : "header.back.toLogin"),
     );
     // The capture badge and the code button describe an open session, so the
     // login screen and the settings screen show neither.
@@ -1028,6 +1032,9 @@
   }
 
   function renderDevices(devices) {
+    // Kept so rerenderAll can repaint the two selects -- their placeholder
+    // option is translated -- without asking the service for the list again.
+    state.devices = devices;
     const selected = state.selectedDevices || {};
     const microphoneId = selected.microphone_id || state.pendingDevices.microphone_id;
     const systemDeviceId = selected.system_device_id || state.pendingDevices.system_device_id;
@@ -1054,7 +1061,7 @@
     select.replaceChildren();
     const empty = document.createElement("option");
     empty.value = "";
-    empty.textContent = "Selecionar dispositivo";
+    empty.textContent = t("settings.devices.placeholder");
     empty.title = empty.textContent;
     select.append(empty);
     for (const device of devices) {
@@ -1110,8 +1117,84 @@
     // empty on every render and stays that way unless the user types a new one.
     writable(elements.proxyPassword, "");
     elements.proxyTestStatus.textContent = "";
+    // The select shows the *stored* choice, not the resolved locale: with
+    // nothing stored the honest answer is "Follow Windows", and showing the
+    // language Windows happens to be in would make the option look unselected
+    // the moment it was chosen.
+    writable(elements.settingsLocaleSelect, I18N.stored || "");
     updateProxyFieldsVisibility();
     renderAudioTestControls();
+  }
+
+  /**
+   * Repaint everything the interface language reaches.
+   *
+   * The same set signOutLocally already runs, for the same reason: these
+   * render functions are idempotent and derive their text from state, so
+   * calling them is how the window adopts a new language without a reload. A
+   * reload would work -- the launch key survives one, by design -- but it
+   * would drop the transcript rows currently on screen, and doing that
+   * mid-meeting to change a label is not a trade worth making.
+   */
+  function rerenderAll() {
+    renderView();
+    renderSettings();
+    renderSessions();
+    renderSessionDetails();
+    renderConnectionState();
+    renderDevices(state.devices || []);
+    renderAudioTestControls();
+    renderAudioTestStatus();
+  }
+
+  /**
+   * Re-label the transcript rows already on screen.
+   *
+   * They are append-only: no render function owns them, so nothing above
+   * would touch them. Only the speaker name and the avatar initial are
+   * language-dependent; the transcribed text and the timestamps are not.
+   */
+  function retranslateTranscript() {
+    const rows = document.querySelectorAll(".transcript-preview__entry");
+    for (const row of rows) {
+      const self = row.dataset.channel === "mic";
+      const initial = row.querySelector(".avatar-placeholder > div");
+      const speaker = row.querySelector(".transcript-preview__speaker");
+      if (initial) {
+        initial.textContent = t(
+          self ? "transcript.speaker.selfInitial" : "transcript.speaker.othersInitial",
+        );
+      }
+      if (speaker) {
+        speaker.textContent = t(self ? "transcript.speaker.self" : "transcript.speaker.others");
+      }
+    }
+  }
+
+  /**
+   * Adopt an interface language, or "" to go back to following Windows.
+   *
+   * The server is asked first and the window follows, never the other way
+   * round: the notification-area menu and the Windows dialogs read the same
+   * stored value (see Translator in i18n.py), so a window that relabelled
+   * itself on a request that failed would be a window disagreeing with its own
+   * tray. /api/settings/language answers with the locale it resolved, which is
+   * what the "follow Windows" option needs -- the window cannot work out what
+   * Windows is set to on its own.
+   */
+  async function setUiLocale(locale) {
+    if (!SUPPORTED_UI_LOCALES.includes(locale) && locale !== "") return;
+    const resolved = await localFetch("/api/settings/language", {
+      method: "PUT",
+      body: JSON.stringify({ locale }),
+    });
+    I18N.stored = locale || null;
+    I18N.locale = resolved?.locale || locale || I18N.locale;
+    document.documentElement.lang = I18N.locale;
+    I18N.apply(document);
+    retranslateTranscript();
+    rerenderAll();
+    showNotification(t("settings.language.changed"), "success");
   }
 
   /**
@@ -1195,7 +1278,7 @@
       return;
     }
     if (!microphoneId || !systemDeviceId) {
-      throw new Error("Selecione um microfone e uma saída de áudio para salvar a configuração.");
+      throw new Error(t("settings.devices.saveIncomplete"));
     }
     await localFetch("/api/devices/selection", {
       method: "PUT",
@@ -1227,7 +1310,7 @@
     }
     updateDeviceRequirement();
     renderSettings();
-    showNotification("Configurações salvas nesta máquina.", "success");
+    showNotification(t("settings.saved"), "success");
   }
 
   async function resetSettings() {
@@ -1239,7 +1322,7 @@
       elements.settingsMicrophoneSelect.value = "";
       elements.settingsSystemDeviceSelect.value = "";
       state.pendingDevices = { microphone_id: "", system_device_id: "" };
-      stopAudioTest("Configurações restauradas. O teste de áudio foi encerrado.");
+      stopAudioTest("settings.audioTest.restored");
     }
     try {
       if (state.authenticated) {
@@ -1259,23 +1342,20 @@
     await loadProxySettings();
     renderSettings();
     updateDeviceRequirement();
-    showNotification("Configurações restauradas.", "info");
+    showNotification(t("settings.restored"), "info");
   }
 
-  // The probe deliberately tests the values as typed and never reaches for the
-  // saved password (see _default_proxy_prober's docstring for why the answer
-  // never says more than yes/no). So against an authenticating proxy, testing
-  // with the password field left blank always fails -- correctly, but for a
-  // reason the old bare "não foi possível conectar" never gave. The behaviour
-  // is right; the message is what was missing.
-  const PROXY_TEST_FAILED =
-    "Não foi possível conectar através do proxy. Se ele exigir senha, digite-a acima antes de testar.";
-
-  // A script that cannot be read and a proxy that refuses the connection need
-  // different fixes -- correct the address, or correct the credentials -- so
-  // the backend reports them apart and so does this.
-  const PROXY_SCRIPT_FAILED =
-    "Não foi possível ler o script de configuração. Confira o endereço e se ele está acessível desta rede.";
+  // settings.proxy.testFailed: the probe deliberately tests the values as typed
+  // and never reaches for the saved password (see _default_proxy_prober's
+  // docstring for why the answer never says more than yes/no). So against an
+  // authenticating proxy, testing with the password field left blank always
+  // fails -- correctly, but for a reason a bare "could not connect" never
+  // gave. The behaviour is right; the message is what was missing.
+  //
+  // settings.proxy.scriptFailed: a script that cannot be read and a proxy that
+  // refuses the connection need different fixes -- correct the address, or
+  // correct the credentials -- so the backend reports them apart and so does
+  // this.
 
   async function testProxyConnection() {
     const script = elements.proxyModeScript.checked;
@@ -1289,33 +1369,33 @@
     if (script) {
       request.script_url = elements.proxyScriptUrl.value.trim();
       if (!request.script_url) {
-        elements.proxyTestStatus.textContent = "Informe o endereço do script antes de testar.";
+        elements.proxyTestStatus.textContent = t("settings.proxy.scriptUrlRequired");
         return;
       }
     } else {
       request.host = elements.proxyHost.value.trim();
       request.port = Number(elements.proxyPort.value.trim()) || 0;
       if (!request.host || !request.port) {
-        elements.proxyTestStatus.textContent = "Informe o endereço e a porta antes de testar.";
+        elements.proxyTestStatus.textContent = t("settings.proxy.hostRequired");
         return;
       }
     }
     elements.proxyTestButton.disabled = true;
-    elements.proxyTestStatus.textContent = "Testando conexão...";
+    elements.proxyTestStatus.textContent = t("settings.proxy.testing");
     try {
       const result = await localFetch("/api/settings/test-proxy", {
         method: "POST",
         body: JSON.stringify(request),
       });
       if (result.script_error) {
-        elements.proxyTestStatus.textContent = PROXY_SCRIPT_FAILED;
+        elements.proxyTestStatus.textContent = t("settings.proxy.scriptFailed");
       } else {
-        elements.proxyTestStatus.textContent = result.ok
-          ? "Conexão bem-sucedida."
-          : PROXY_TEST_FAILED;
+        elements.proxyTestStatus.textContent = t(
+          result.ok ? "settings.proxy.testOk" : "settings.proxy.testFailed",
+        );
       }
     } catch {
-      elements.proxyTestStatus.textContent = PROXY_TEST_FAILED;
+      elements.proxyTestStatus.textContent = t("settings.proxy.testFailed");
     } finally {
       elements.proxyTestButton.disabled = false;
     }
@@ -1343,7 +1423,7 @@
 
   /** "20 ago" -- the day a session started, for the row itself and its group heading. */
   function formatSessionDate(startedAt) {
-    return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(
+    return new Intl.DateTimeFormat(I18N.locale, { day: "2-digit", month: "short" }).format(
       new Date(startedAt),
     );
   }
@@ -1352,12 +1432,19 @@
   function formatSessionDuration(startedAt, endedAt) {
     if (!endedAt) return "";
     const minutes = Math.max(1, Math.round((new Date(endedAt) - new Date(startedAt)) / 60000));
-    return `${minutes} min`;
+    return t("session.duration.minutes", { minutes });
   }
 
-  /** "1 segmento" vs "3 segmentos" -- the header tooltip had this hardcoded plural. */
+  /**
+   * "1 segment" vs "3 segments" -- the header tooltip had this hardcoded plural.
+   *
+   * A binary rule, not Intl.PluralRules: English, Portuguese and German each
+   * have exactly two cardinal categories, so a plural library would buy
+   * nothing here. A fourth language with a three-way rule is when it earns
+   * its keep -- not before.
+   */
   function segmentCountLabel(count) {
-    return count === 1 ? "1 segmento" : `${count} segmentos`;
+    return count === 1 ? t("session.segments.one") : t("session.segments.other", { count });
   }
 
   /**
@@ -1447,8 +1534,8 @@
   function pinIcon() {
     const element = icon("pin-angle-fill", "session-row-pin shrink-0 text-primary text-xs");
     element.removeAttribute("aria-hidden");
-    element.setAttribute("aria-label", "Sessão fixada");
-    element.title = "Sessão fixada";
+    element.setAttribute("aria-label", t("session.pinned"));
+    element.title = t("session.pinned");
     return element;
   }
 
@@ -1493,14 +1580,14 @@
     const trigger = document.createElement("button");
     trigger.type = "button";
     trigger.className = "session-menu-trigger btn btn-sm h-[30px] w-[30px] min-h-0 bg-transparent";
-    trigger.title = "Opções da sessão";
+    trigger.title = t("session.menu.label");
     trigger.append(icon("three-dots"));
     const menu = document.createElement("ul");
     menu.className = "dropdown-content menu z-[1] w-36 rounded-box bg-base-100 p-1 shadow";
     menu.tabIndex = 0;
 
     const pinRefs = addSessionMenuAction(menu, {
-      label: "Fixar",
+      label: t("session.pin"),
       iconName: "pin-angle-fill",
       onClick: () => {
         closeSessionMenu(trigger);
@@ -1508,7 +1595,7 @@
       },
     });
     addSessionMenuAction(menu, {
-      label: "Renomear",
+      label: t("common.rename"),
       iconName: "pencil",
       onClick: () => {
         closeSessionMenu(trigger);
@@ -1516,7 +1603,7 @@
       },
     });
     const deleteRefs = addSessionMenuAction(menu, {
-      label: "Excluir",
+      label: t("common.delete"),
       iconName: "trash",
       className: "text-error",
       onClick: () => {
@@ -1541,13 +1628,15 @@
    */
   function updateSessionActionMenu(menuRefs, session) {
     const label = sessionLabel(session);
-    menuRefs.trigger.setAttribute("aria-label", `Opções para ${label}`);
-    menuRefs.pinRefs.text.textContent = session.is_pinned ? "Desafixar" : "Fixar";
+    menuRefs.trigger.setAttribute("aria-label", t("session.menu.labelFor", { label }));
+    menuRefs.pinRefs.text.textContent = t(session.is_pinned ? "session.unpin" : "session.pin");
     setIconName(menuRefs.pinRefs.iconElement, session.is_pinned ? "pin-angle" : "pin-angle-fill");
-    menuRefs.deleteRefs.text.textContent = session.is_live ? "Excluir sessão ativa" : "Excluir";
+    menuRefs.deleteRefs.text.textContent = t(
+      session.is_live ? "session.delete.live" : "common.delete",
+    );
     menuRefs.deleteRefs.action.disabled = session.is_live;
     if (session.is_live) {
-      menuRefs.deleteRefs.action.title = "Pare a captura antes de excluir esta sessão.";
+      menuRefs.deleteRefs.action.title = t("session.delete.blocked");
     } else {
       menuRefs.deleteRefs.action.removeAttribute("title");
     }
@@ -1652,7 +1741,7 @@
     refs.holder.session = session;
     item.classList.toggle("is-active", state.selectedSession?.uuid_code === session.uuid_code);
     const label = sessionLabel(session);
-    refs.content.setAttribute("aria-label", `Abrir sessão ${label}`);
+    refs.content.setAttribute("aria-label", t("session.open.label", { label }));
     refs.title.title = label;
     refs.title.textContent = label;
     const existingPin = refs.titleLine.querySelector(".session-row-pin");
@@ -1669,7 +1758,7 @@
   }
 
   /**
-   * Build one sidebar section heading -- either "Fixadas" or a "20 ago" day
+   * Build one sidebar section heading -- either the pinned one or a "20 ago" day
    * heading.
    *
    * Only structure, same split as buildSessionRow/updateSessionRow: this has
@@ -1714,13 +1803,15 @@
     if (!state.sessions.length) {
       elements.sessionLibrary.replaceChildren(
         state.sessionsLoading
-          ? sessionListPlaceholder({ title: "Carregando sessões…", spinner: true })
+          ? sessionListPlaceholder({ title: t("sessions.loading"), spinner: true })
           : sessionListPlaceholder({
               iconName: "mic",
-              title: state.searchQuery ? "Nenhum resultado" : "Nenhuma sessão ainda",
-              description: state.searchQuery
-                ? "Tente outro termo de busca."
-                : "Inicie uma captura para criar a primeira.",
+              title: t(
+                state.searchQuery ? "sessions.empty.noResults" : "sessions.empty.none",
+              ),
+              description: t(
+                state.searchQuery ? "sessions.empty.noResultsHint" : "sessions.empty.noneHint",
+              ),
             }),
       );
       return;
@@ -1744,7 +1835,7 @@
 
     const renderItems = [];
     if (pinnedSessions.length) {
-      renderItems.push({ kind: "group", key: "group:pinned", label: "Fixadas" });
+      renderItems.push({ kind: "group", key: "group:pinned", label: t("session.pinnedGroup") });
       for (const session of pinnedSessions) {
         renderItems.push({ kind: "session", key: session.uuid_code, session });
       }
@@ -1937,14 +2028,17 @@
 
   // ---------------------------------------------------------------------- capture
 
-  const CONNECTION_LABELS = {
-    idle: "Pronto",
-    starting: "Iniciando",
-    streaming: "Transmitindo",
-    reconnecting: "Reconectando",
-    stopped: "Parado",
-    failed: "Falha",
-    device_selection_required: "Dispositivo necessário",
+  // Catalog keys, not text: the same seven labels name the states in the
+  // notification-area menu (see _STATE_KEYS in tray.py), and one concept with
+  // two sets of wording is two sets to keep in step across three languages.
+  const CONNECTION_LABEL_KEYS = {
+    idle: "capture.state.idle",
+    starting: "capture.state.starting",
+    streaming: "capture.state.streaming",
+    reconnecting: "capture.state.reconnecting",
+    stopped: "capture.state.stopped",
+    failed: "capture.state.failed",
+    device_selection_required: "capture.state.deviceRequired",
   };
   // Only the tone varies, so only the tone is swapped -- assigning a whole
   // className here would silently drop whatever `hidden` renderView had put on
@@ -1969,8 +2063,8 @@
       badge: "microphoneStatusBadge",
       liveIcon: "mic",
       mutedIcon: "mic-mute-fill",
-      mute: "Silenciar microfone",
-      unmute: "Reativar microfone",
+      mute: "capture.mute.microphone",
+      unmute: "capture.unmute.microphone",
     },
     system: {
       channel: "systemChannel",
@@ -1978,8 +2072,8 @@
       badge: "systemStatusBadge",
       liveIcon: "volume-up",
       mutedIcon: "volume-mute-fill",
-      mute: "Silenciar áudio do sistema",
-      unmute: "Reativar áudio do sistema",
+      mute: "capture.mute.system",
+      unmute: "capture.unmute.system",
     },
   };
 
@@ -1987,13 +2081,15 @@
     for (const [channel, control] of Object.entries(MUTE_CONTROLS)) {
       const muted = Boolean(state.muted[channel]);
       const button = elements[control.button];
-      const label = muted ? control.unmute : control.mute;
+      const label = t(muted ? control.unmute : control.mute);
       elements[control.channel].dataset.muted = muted ? "true" : "false";
       button.setAttribute("aria-pressed", muted ? "true" : "false");
       button.setAttribute("aria-label", label);
       button.title = label;
       button.replaceChildren(icon(muted ? control.mutedIcon : control.liveIcon));
-      elements[control.badge].textContent = muted ? "Mudo" : "Ativo";
+      elements[control.badge].textContent = t(
+        muted ? "capture.channel.muted" : "capture.channel.active",
+      );
     }
     // The histogram's colour comes from the stylesheet, read back once and
     // cached (see CaptureMotion.refreshTheme). Muting changes which rule
@@ -2005,8 +2101,6 @@
   // The language reaches the service in the handshake that opens the remote
   // session, so it can only be chosen while there is no session open. The
   // title says why rather than leaving a control that is simply dead.
-  const LANGUAGE_LOCKED_TITLE = "Pare a captura para trocar o idioma";
-
   function renderCaptureLanguages() {
     const locked = isCaptureActive();
     const selects = {
@@ -2016,7 +2110,7 @@
     for (const [channel, select] of Object.entries(selects)) {
       select.value = state.languages[channel];
       select.disabled = locked;
-      select.closest("label").title = locked ? LANGUAGE_LOCKED_TITLE : "";
+      select.closest("label").title = locked ? t("capture.language.locked") : "";
     }
   }
 
@@ -2033,15 +2127,15 @@
     const microphoneMuted = Boolean(state.muted.microphone);
     const systemMuted = Boolean(state.muted.system);
     if (microphoneMuted && systemMuted) {
-      return active ? "Nenhuma fonte ativa" : "Ative uma fonte para transcrever";
+      return t(active ? "capture.scope.noneActive" : "capture.scope.none");
     }
     if (microphoneMuted) {
-      return active ? "Transcrevendo só o áudio do sistema" : "Transcrever só o áudio do sistema";
+      return t(active ? "capture.scope.systemOnlyActive" : "capture.scope.systemOnly");
     }
     if (systemMuted) {
-      return active ? "Transcrevendo só o microfone" : "Transcrever só o microfone";
+      return t(active ? "capture.scope.microphoneOnlyActive" : "capture.scope.microphoneOnly");
     }
-    return active ? "Transcrevendo as duas fontes" : "Transcrever as duas fontes";
+    return t(active ? "capture.scope.bothActive" : "capture.scope.both");
   }
 
   function everySourceMuted() {
@@ -2053,7 +2147,7 @@
     elements.captureDock.dataset.captureState = state.connectionState;
     renderMuteControls();
     renderCaptureLanguages();
-    const label = active ? "Parar transcrição" : "Iniciar transcrição";
+    const label = t(active ? "capture.toggle.stop" : "capture.toggle.start");
     elements.captureToggleButton.classList.toggle("btn-error", active);
     elements.captureToggleButton.classList.toggle("btn-primary", !active);
     elements.captureToggleButton.title = label;
@@ -2073,8 +2167,9 @@
   let lastNotifiedConnectionState = null;
 
   function renderConnectionState() {
-    elements.captureIndicatorLabel.textContent =
-      CONNECTION_LABELS[state.connectionState] || CONNECTION_LABELS.idle;
+    elements.captureIndicatorLabel.textContent = t(
+      CONNECTION_LABEL_KEYS[state.connectionState] || CONNECTION_LABEL_KEYS.idle,
+    );
     const tone = CONNECTION_BADGE_TONES[state.connectionState];
     elements.captureIndicator.classList.remove(...BADGE_TONES);
     if (tone) elements.captureIndicator.classList.add(tone);
@@ -2083,10 +2178,10 @@
     }
     if (state.connectionState !== lastNotifiedConnectionState) {
       if (state.connectionState === "reconnecting") {
-        showNotification("Reconectando à transcrição…", "warning");
+        showNotification(t("capture.state.reconnectingToast"), "warning");
       }
       if (state.connectionState === "device_selection_required") {
-        showNotification("Selecione os dispositivos antes de continuar.", "error");
+        showNotification(t("capture.state.deviceRequiredToast"), "error");
       }
       lastNotifiedConnectionState = state.connectionState;
     }
@@ -2244,7 +2339,15 @@
       entry.channel === "mic"
         ? "w-9 rounded-full bg-primary/20 text-sm font-semibold text-primary"
         : "w-9 rounded-full bg-secondary/20 text-sm font-semibold text-secondary";
-    avatarFace.textContent = entry.channel === "mic" ? "V" : "P";
+    // The initials are their own catalog entries rather than the first letter
+    // of the speaker name: in German the two names are "Sie" and "Teilnehmer"
+    // in one place and "Systemton" in another, and two identical single-glyph
+    // avatars is a regression nothing would catch.
+    avatarFace.textContent = t(
+      entry.channel === "mic"
+        ? "transcript.speaker.selfInitial"
+        : "transcript.speaker.othersInitial",
+    );
     avatar.append(avatarFace);
     const content = document.createElement("div");
     content.className = "min-w-0 flex-1";
@@ -2252,7 +2355,9 @@
     heading.className = "mb-1 flex items-center gap-2";
     const speaker = document.createElement("strong");
     speaker.className = "transcript-preview__speaker";
-    speaker.textContent = entry.channel === "mic" ? "Você" : "Participantes";
+    speaker.textContent = t(
+      entry.channel === "mic" ? "transcript.speaker.self" : "transcript.speaker.others",
+    );
     const timestamp = document.createElement("time");
     timestamp.className = "text-xs text-base-content/50";
     timestamp.textContent = formatTranscriptTimestamp(entry.started_offset_ms);
@@ -2321,7 +2426,7 @@
     const empty = document.createElement("p");
     empty.id = "emptyTimeline";
     empty.className = "transcript-preview__empty";
-    empty.textContent = "A transcrição aparecerá aqui.";
+    empty.textContent = t("transcript.empty");
     elements.transcriptTimeline.append(empty, elements.transcriptProvisional);
   }
 
@@ -2346,7 +2451,7 @@
     button.type = "button";
     button.className = "btn btn-ghost btn-sm mx-auto my-2";
     button.dataset.testid = "load-more-segments";
-    button.textContent = "Carregar mais da transcrição";
+    button.textContent = t("transcript.loadMore");
     button.addEventListener("click", () => {
       button.disabled = true;
       loadSegments(session).catch((error) => {
@@ -2392,7 +2497,7 @@
         const empty = document.createElement("p");
         empty.id = "emptyTimeline";
         empty.className = "transcript-preview__empty";
-        empty.textContent = "Esta sessão não tem transcrição registrada.";
+        empty.textContent = t("transcript.emptySession");
         elements.transcriptTimeline.insertBefore(empty, elements.transcriptProvisional || null);
       }
     } finally {
@@ -2402,7 +2507,7 @@
 
   async function selectSession(session) {
     if (isCaptureActive() && state.selectedSession?.uuid_code !== session.uuid_code) {
-      showNotification("Pare a captura antes de abrir outra sessão.", "warning");
+      showNotification(t("session.stopBeforeOpening"), "warning");
       return;
     }
     state.selectedSession = session;
@@ -2412,7 +2517,7 @@
     renderSessionDetails();
     focusScreen(elements.mainView);
     state.segments = { cursor: null, loading: false, requestId: 0 };
-    setTimelineLoading("Carregando transcrição…");
+    setTimelineLoading(t("transcript.loading"));
     try {
       await loadSegments(session, { first: true });
     } catch (error) {
@@ -2432,12 +2537,12 @@
     }
     renderSessions();
     renderSessionDetails();
-    const message = Object.hasOwn(changes, "is_pinned")
+    const key = Object.hasOwn(changes, "is_pinned")
       ? updated.is_pinned
-        ? "Sessão fixada."
-        : "Sessão desafixada."
-      : "Sessão renomeada.";
-    showNotification(message, "success");
+        ? "session.pinned.done"
+        : "session.unpinned.done"
+      : "session.renamed.done";
+    showNotification(t(key), "success");
     return updated;
   }
 
@@ -2496,7 +2601,7 @@
     closeDeleteSession();
     renderSessions();
     renderSessionDetails();
-    showNotification("Sessão removida do histórico.", "success");
+    showNotification(t("session.removed.done"), "success");
   }
 
   function renderSessionDetails() {
@@ -2511,8 +2616,11 @@
     }
     elements.renameSessionButton.disabled = !session;
     const detailText = session
-      ? `Código ${session.uuid_code} · ${segmentCountLabel(session.segment_count)}`
-      : "Inicie uma captura para gerar um código local.";
+      ? t("session.meta.detail", {
+          code: session.uuid_code,
+          segments: segmentCountLabel(session.segment_count),
+        })
+      : t("session.meta.empty");
     // This used to render as visible header text, wide enough at a narrow
     // window to squeeze the title input down to a couple of pixels (see
     // index.html's #sessionMeta comment and visual-check.ps1's 375px
@@ -2524,7 +2632,7 @@
   }
 
   async function refreshDevices() {
-    stopAudioTest("Dispositivos atualizados. Inicie um novo teste para verificar o sinal.");
+    stopAudioTest("settings.audioTest.devicesRefreshed");
     try {
       const response = await localFetch("/api/devices");
       renderDevices(response.devices);
@@ -2556,8 +2664,7 @@
       // is the settings screen's one role="status" region, so writing the
       // reason there gets it announced, and focus goes straight to the
       // control that fixes it instead of the screen's own heading.
-      elements.settingsAudioTestStatus.textContent =
-        "Selecione um microfone e uma saída de áudio antes de iniciar a captura.";
+      setAudioTestStatus("settings.devices.startRequired");
       showSettings(elements.settingsMicrophoneSelect);
       return;
     }
@@ -2571,7 +2678,7 @@
       ? { ...devices, ...languages }
       : { ...devices, ...languages, title: elements.sessionTitle.value };
     try {
-      stopAudioTest("Teste de áudio encerrado para iniciar a captura.");
+      stopAudioTest("settings.audioTest.finishedForCapture");
       state.connectionState = "starting";
       // Only wipe the screen when this really is a different meeting. Resuming
       // (`currentSession` set, POST .../resume) continues the same session, and
@@ -2599,7 +2706,7 @@
       await localFetch("/api/sessions/stop", { method: "POST" });
       state.connectionState = "stopped";
       renderConnectionState();
-      showNotification("Captura encerrada.", "success");
+      showNotification(t("capture.stopped"), "success");
     } catch (error) {
       reportError(error);
     }
@@ -2636,10 +2743,7 @@
     // that reaches the handler another way, so a session that could only
     // record silence is never opened.
     if (everySourceMuted()) {
-      showNotification(
-        "Ative o microfone ou o áudio do sistema antes de iniciar a transcrição.",
-        "warning",
-      );
+      showNotification(t("capture.needSource"), "warning");
       return Promise.resolve();
     }
     return startSession();
@@ -2654,7 +2758,7 @@
       // Same rule the rename dialog enforces: a session with no name is one the
       // user cannot find again.
       elements.sessionTitle.value = session.title || "";
-      showNotification("A sessão precisa de um nome.", "warning");
+      showNotification(t("session.nameRequired"), "warning");
       return;
     }
     await updateSessionMetadata(session, { title });
@@ -2664,9 +2768,9 @@
     if (!state.selectedSession) return;
     try {
       await navigator.clipboard.writeText(state.selectedSession.uuid_code);
-      showNotification("Código copiado.", "success");
+      showNotification(t("session.copyCode.done"), "success");
     } catch {
-      showNotification("Não foi possível copiar o código.", "error");
+      showNotification(t("session.copyCode.failed"), "error");
     }
   }
 
@@ -2681,7 +2785,7 @@
    */
   async function prepareNewSession() {
     if (isCaptureActive()) {
-      showNotification("Pare a captura antes de iniciar uma nova sessão.", "warning");
+      showNotification(t("session.stopBeforeNew"), "warning");
       return;
     }
     showTranscript();
@@ -2700,7 +2804,7 @@
   /**
    * Put a suggested name in the draft title field, if it is still empty.
    *
-   * Shared by "Nova sessão" and by startup, because opening the app already
+   * Shared by the new-session button and by startup, because opening the app already
    * puts you in front of an unnamed draft -- the field just sat blank until
    * you pressed a button you had no reason to press.
    *
@@ -2764,7 +2868,7 @@
       loadSessions({ reset: true }).catch(reportError);
     }
     // Opening the app with no session selected leaves you on an unnamed draft,
-    // which is the same state "Nova sessão" produces -- so it gets the same
+    // which is the same state the new-session button produces -- so it gets the same
     // suggested name instead of a blank field. Guarded on there being no
     // selected session so a reconnect bootstrap for a running capture cannot
     // overwrite that session's real title.
@@ -2795,7 +2899,10 @@
       renderSessions();
       renderSessionDetails();
     } else if ((event.type === "warning" || event.type === "error") && event.message) {
-      showNotification(event.message, event.type === "error" ? "error" : "warning");
+      // `message` is a catalog key (see the UiEvent calls in session.py). `t`
+      // answers an unknown key with the key itself, so a service that predates
+      // this contract still puts its own text on screen rather than nothing.
+      showNotification(t(event.message), event.type === "error" ? "error" : "warning");
     }
   }
 
@@ -2813,7 +2920,7 @@
       try {
         handleEvent(JSON.parse(message.data));
       } catch {
-        showNotification("Não foi possível processar uma atualização local.", "error");
+        showNotification(t("notify.updateFailed"), "error");
       }
     });
     socket.addEventListener("close", () => {
@@ -2846,11 +2953,11 @@
    * left the capture screen on display with nothing behind it.
    *
    * `closeNotifications` runs before the caller's own `reportError`, so the
-   * "faça login novamente" toast still lands on top of the login screen and
+   * "sign in again" toast still lands on top of the login screen and
    * explains why it appeared.
    */
   function signOutLocally() {
-    stopAudioTest("Teste de áudio encerrado.");
+    stopAudioTest();
     closeAudioLevelStream();
     state.authenticated = false;
     state.eventSocket?.close();
@@ -2907,7 +3014,7 @@
       // reportError uses so no other API detail reaches the screen in English.
       setLoginError(
         error.message === "Authentication is required."
-          ? "Token inválido."
+          ? t("login.invalidToken")
           : translateApiMessage(error.message),
       );
       elements.tokenInput.focus();
@@ -2962,6 +3069,16 @@
   elements.proxyTestButton.addEventListener("click", () => {
     testProxyConnection().catch(reportError);
   });
+  elements.settingsLocaleSelect.addEventListener("change", () => {
+    const chosen = elements.settingsLocaleSelect.value;
+    setUiLocale(chosen).catch((error) => {
+      // Put the control back to the language the application is actually
+      // speaking. Leaving it showing a choice the service refused would be a
+      // window claiming a language its tray does not have.
+      elements.settingsLocaleSelect.value = I18N.stored || "";
+      reportError(error);
+    });
+  });
   elements.themeLightOption.addEventListener("change", () => {
     if (elements.themeLightOption.checked) setTheme("light");
   });
@@ -2972,14 +3089,14 @@
     state.pendingDevices.microphone_id = elements.settingsMicrophoneSelect.value;
     syncDeviceSelectTitle(elements.settingsMicrophoneSelect);
     if (state.audioTestActive) {
-      stopAudioTest("Microfone alterado. Inicie o teste novamente para verificar o novo sinal.");
+      stopAudioTest("settings.audioTest.microphoneChanged");
     }
   });
   elements.settingsSystemDeviceSelect.addEventListener("change", () => {
     state.pendingDevices.system_device_id = elements.settingsSystemDeviceSelect.value;
     syncDeviceSelectTitle(elements.settingsSystemDeviceSelect);
     if (state.audioTestActive) {
-      stopAudioTest("Saída alterada. Inicie o teste novamente para verificar o novo sinal.");
+      stopAudioTest("settings.audioTest.outputChanged");
     }
   });
   elements.captureToggleButton.addEventListener("click", () => {

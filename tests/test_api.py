@@ -21,17 +21,20 @@ from starlette.websockets import WebSocketDisconnect
 
 import broccoli_desktop
 from broccoli_desktop.api import (
+    I18N_MARKER,
     Services,
     _audio_level_events,
     _default_proxy_prober,
     _event_payload,
     _RedactCapabilityKeyFilter,
+    _render_shell,
     create_app,
     create_uvicorn_config,
 )
 from broccoli_desktop.autoproxy import AutoProxyError, ResolvedProxy
 from broccoli_desktop.console import ensure_standard_streams
 from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
+from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES, load_catalog
 from broccoli_desktop.models import (
     ConnectionState,
     SegmentPage,
@@ -309,9 +312,9 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     assert 'data-testid="sessions-sentinel"' in response.text
     assert 'data-testid="load-more"' not in response.text
     assert 'data-testid="transcript-timeline"' in response.text
-    # The token field's accessible name must come from its visible Portuguese
-    # <legend>, not an overriding English aria-label (WCAG 2.5.3 Label in
-    # Name). A bare <legend> does not, by itself, name a sibling <input> (this
+    # The token field's accessible name must come from its visible <legend>,
+    # not an overriding aria-label (WCAG 2.5.3 Label in Name). A bare <legend>
+    # does not, by itself, name a sibling <input> (this
     # app's own rename-session field uses the same fieldset/legend shape and
     # gets its name from `placeholder` alone), so aria-labelledby points the
     # field at the legend's own id explicitly. Its helper text is wired in via
@@ -324,8 +327,8 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     # The proxy fields carry the same fieldset/legend shape as the token field,
     # so they need the same explicit wiring -- without it their accessible
     # names fall through to `placeholder` and they announce as
-    # "proxy.broccoli.local", "8080", "usuario-local" and "Deixe em branco para
-    # manter a senha salva" instead of Endereço, Porta, Usuário and Senha.
+    # "proxy.broccoli.local", "8080", "local-user" and "Leave blank to keep the
+    # saved password" instead of Address, Port, Username and Password.
     #
     # Checked as a pairing, on the parsed document, and against the legend's
     # visible text. Asserting that `id="proxyHostLegend"` and
@@ -335,18 +338,20 @@ def test_root_serves_the_desktop_shell(client: TestClient) -> None:
     # passes it too, because the name is then wrong but present. Comparing the
     # name to the visible text is also the WCAG 2.5.3 property itself, rather
     # than a proxy for it.
+    #
+    # The expected text is read from the English catalog rather than typed
+    # here, because the visible text is a translation now: a literal would only
+    # say the two files agree in one language, and the property has to hold in
+    # all three. Asserting the legend's own data-i18n key is what carries it
+    # there -- see test_every_named_field_is_named_in_every_language.
+    catalog = load_catalog("en")["ui"]
     labelled = _parse_labelled_fields(response.text)
-    for field_id, visible_label in (
-        ("tokenInput", "Token de acesso"),
-        ("proxyHost", "Endereço"),
-        ("proxyPort", "Porta"),
-        ("proxyScriptUrl", "Endereço do script"),
-        ("proxyUsername", "Usuário"),
-        ("proxyPassword", "Senha"),
-    ):
+    for field_id, key in _NAMED_FIELDS:
         legend_id = labelled.attributes[field_id]["aria-labelledby"]
-        assert labelled.attributes[legend_id]["tag"] == "legend"
-        assert labelled.element_text[legend_id].strip() == visible_label
+        assert labelled.attributes[legend_id].get("data-i18n") == key
+        assert labelled.element_text[legend_id].strip() == catalog[key]
+        if legend_id.endswith("Legend"):
+            assert labelled.attributes[legend_id]["tag"] == "legend"
     # The login screen needs its own way into the settings panel: /api/settings
     # is unauthenticated precisely so a proxy can be configured before the login
     # request can reach the backend, and #settingsButton lives in the sidebar
@@ -911,6 +916,30 @@ def test_a_capture_carries_the_language_chosen_for_each_channel(
 
     assert started.status_code == 201
     assert fake_remote_factory.remote.stream_languages == [("pt", "en")]
+
+
+def test_german_is_offered_as_a_forced_transcription_language(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    """The interface speaks three languages, so the transcription offers the
+    same three: a German window whose capture dock could only force Portuguese
+    or English would be translated chrome around an untranslated product."""
+    login(client)
+
+    started = client.post(
+        "/api/sessions",
+        json={
+            "title": "Besprechung",
+            "microphone_id": "mic-1",
+            "system_device_id": "system-1",
+            "microphone_language": "de",
+            "system_language": "de",
+        },
+    )
+
+    assert started.status_code == 201
+    assert fake_remote_factory.remote.stream_languages == [("de", "de")]
 
 
 def test_a_capture_with_no_language_chosen_leaves_both_channels_detected(
@@ -2305,6 +2334,221 @@ def _parse_labelled_fields(document: str) -> _LabelledFields:
     return parser
 
 
+#: Every control whose accessible name is supplied by a separate element it
+#: points aria-labelledby at, and the catalog key that element renders. The
+#: pairing is the WCAG 2.5.3 property; the key is what carries it into the two
+#: languages the served document is not written in.
+_NAMED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("tokenInput", "login.token.label"),
+    ("proxyHost", "settings.proxy.host.label"),
+    ("proxyPort", "settings.proxy.port.label"),
+    ("proxyScriptUrl", "settings.proxy.scriptUrl.label"),
+    ("proxyUsername", "settings.proxy.username.label"),
+    ("proxyPassword", "settings.proxy.password.label"),
+    ("settingsMicrophoneSelect", "settings.devices.input.label"),
+    ("settingsSystemDeviceSelect", "settings.devices.output.label"),
+    ("settingsLocaleSelect", "settings.language.fieldLabel"),
+    ("microphoneLanguageSelect", "capture.language.microphone"),
+    ("systemLanguageSelect", "capture.language.system"),
+)
+
+
+def test_every_named_field_is_named_in_every_language(tokened_client: TestClient) -> None:
+    """WCAG 2.5.3 has to survive translation, not just hold in one language.
+
+    The accessible name is the visible text by construction here -- one
+    element, named through aria-labelledby, rendering one catalog key -- so the
+    property holds in a language nobody has read as long as that key resolves
+    to something in it. Which is the check: a key present in the served
+    document and missing from the German catalog would leave the field
+    announcing its own key, and an axe scan would still pass it.
+    """
+    labelled = _parse_labelled_fields(tokened_client.get("/static/index.html").text)
+
+    for field_id, key in _NAMED_FIELDS:
+        label_id = labelled.attributes[field_id]["aria-labelledby"]
+        assert labelled.attributes[label_id].get("data-i18n") == key, field_id
+        for locale in SUPPORTED_UI_LOCALES:
+            assert load_catalog(locale)["ui"].get(key), (locale, key)
+
+
+class _MarkedText(HTMLParser):
+    """Collect the inline text of every data-i18n element, and each attribute key.
+
+    One entry per element rather than per key: several keys are used more than
+    once -- the settings heading names both the topbar and the sidebar entry --
+    and folding them together would concatenate two correct copies into one
+    wrong string.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.marked: list[tuple[str, str]] = []
+        self.attribute_keys: set[str] = set()
+        self._open: list[int | None] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {name: value or "" for name, value in attrs}
+        for pair in attributes.get("data-i18n-attr", "").split(";"):
+            parts = pair.split(":")
+            if len(parts) == 2:
+                self.attribute_keys.add(parts[1].strip())
+        key = attributes.get("data-i18n")
+        if key:
+            self.marked.append((key, ""))
+            self._open.append(len(self.marked) - 1)
+        else:
+            self._open.append(None)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self._open.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._open:
+            self._open.pop()
+
+    def handle_data(self, data: str) -> None:
+        for index in self._open:
+            if index is not None:
+                key, collected = self.marked[index]
+                self.marked[index] = (key, collected + data)
+
+
+def _parse_marked_text(document: str) -> _MarkedText:
+    parser = _MarkedText()
+    parser.feed(document)
+    parser.close()
+    return parser
+
+
+def test_the_shell_text_matches_the_english_catalog_word_for_word(
+    tokened_client: TestClient,
+) -> None:
+    """Two copies of the same wording, pinned to each other.
+
+    The literals in index.html are never rendered once the interface script has
+    run -- it overwrites every data-i18n node from the catalog before the first
+    paint -- so nothing about the running application would notice the two
+    drifting apart. What that costs is the file's own readability, and the
+    honesty of "English is the fallback": a document whose markup says one
+    thing and whose fallback catalog says another has two defaults.
+    """
+    catalog = load_catalog("en")["ui"]
+    marked = _parse_marked_text(tokened_client.get("/static/index.html").text).marked
+
+    assert len(marked) >= 60
+    for key, inline in marked:
+        assert key in catalog, key
+        assert inline.strip() == catalog[key], key
+
+
+def test_every_key_the_shell_asks_for_exists_in_every_catalog(
+    tokened_client: TestClient,
+) -> None:
+    """A key in the markup that no catalog answers renders as the key itself.
+
+    Covers the attribute keys too -- an aria-label naming a control
+    "capture.mute.system" is worse than one naming it in the wrong language,
+    and it is exactly what renaming one side of the pair produces.
+    """
+    parser = _parse_marked_text(tokened_client.get("/static/index.html").text)
+    keys = {key for key, _text in parser.marked} | parser.attribute_keys
+    assert len(keys) >= 70
+
+    for locale in SUPPORTED_UI_LOCALES:
+        catalog = load_catalog(locale)["ui"]
+        assert not sorted(key for key in keys if not catalog.get(key)), locale
+
+
+def test_the_shell_is_served_in_the_stored_language_with_its_catalogs(
+    client: TestClient,
+) -> None:
+    """The window has the catalogs before it paints anything.
+
+    Injected rather than fetched because app.js is deferred: a catalog that
+    arrived over a round trip would be one frame late, and that frame would be
+    painted in the wrong language -- the same reason the theme is applied by an
+    inline script in the head.
+    """
+    client.put("/api/settings/language", json={"locale": "de"})
+    document = client.get("/").text
+
+    assert '<html lang="de">' in document
+    assert I18N_MARKER not in document
+    assert "window.__I18N__=" in document
+    # All three travel, which is what makes changing the language take effect
+    # without a reload and without a second request.
+    for locale in SUPPORTED_UI_LOCALES:
+        assert f'"{locale}"' in document
+    # The catalogs are user-visible prose; escaping "<" is what stops any of it
+    # from ever closing the script element it rides inside.
+    bootstrap = document[document.index("window.__I18N__=") :]
+    assert "</script>" not in bootstrap[: bootstrap.index(";window.__I18N_MISSING__")]
+
+
+def test_the_shell_refuses_to_serve_without_its_language_markers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Loudly, rather than serving a document in whatever language its markup
+    happens to be written in. A renamed marker is a defect that has to surface
+    at the first request, not in a screenshot somebody looks at later."""
+    (tmp_path / "index.html").write_text('<html lang="en"></html>', encoding="utf-8")
+    monkeypatch.setattr(broccoli_desktop.api, "STATIC_DIRECTORY", tmp_path)
+
+    with pytest.raises(RuntimeError):
+        _render_shell("en", None)
+
+
+def test_the_language_can_be_chosen_and_cleared_without_a_credential(
+    client: TestClient,
+) -> None:
+    """Unauthenticated, like the proxy panel it sits beside: the settings screen
+    opens before login, and a language picker nobody can reach until they have
+    signed in is a picker in the wrong place. An empty locale clears the stored
+    choice, and the answer names what the detection resolved to instead --
+    which the window cannot work out on its own."""
+    for locale in SUPPORTED_UI_LOCALES:
+        response = client.put("/api/settings/language", json={"locale": locale})
+        assert response.status_code == 200
+        assert response.json() == {"locale": locale}
+        assert f'<html lang="{locale}">' in client.get("/").text
+
+    cleared = client.put("/api/settings/language", json={"locale": ""})
+    assert cleared.status_code == 200
+    assert cleared.json()["locale"] in SUPPORTED_UI_LOCALES
+
+
+def test_the_language_can_be_changed_while_a_capture_is_running(client: TestClient) -> None:
+    """The reason this is not a field on /api/settings.
+
+    That endpoint refuses with a 409 while a capture runs, because swapping the
+    proxy under a live stream would leave the transport disagreeing with
+    itself. Nothing here touches the transport, and refusing to relabel a
+    button mid-meeting for the proxy's reasons would be a refusal with no
+    reason at all.
+    """
+    login(client)
+    start_capture(client)
+
+    refused = client.post("/api/settings", json={"proxy": {"enabled": False}})
+    accepted = client.put("/api/settings/language", json={"locale": "de"})
+
+    assert refused.status_code == 409
+    assert accepted.status_code == 200
+    assert accepted.json() == {"locale": "de"}
+    client.post("/api/sessions/stop")
+
+
+def test_an_unsupported_language_is_refused(client: TestClient) -> None:
+    """The stored value is handed to a catalog lookup and, before that, to a
+    filename table. Refusing it here is the outer half of that guard."""
+    response = client.put("/api/settings/language", json={"locale": "../../../etc/passwd"})
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "The selected interface language is unsupported."}
+
+
 def _backend_error_details() -> set[str]:
     """Every `detail` string this application can put on the wire.
 
@@ -2346,69 +2590,27 @@ def _backend_error_details() -> set[str]:
     return details
 
 
-def _translated_error_details(source: str) -> set[str]:
-    """Read the keys of app.js's API_MESSAGES out of the file itself.
-
-    A string literal is a key when the next non-space character after it is a
-    `:` -- unambiguous inside an object literal, where values are followed by a
-    comma or the closing brace -- which is what lets this survive the comments
-    and the wrapped multi-line entries the table actually contains.
-    """
-    opening = "const API_MESSAGES = {"
-    start = source.index(opening) + len(opening)
-    depth = 1
-    index = start
-    while depth:
-        depth += {"{": 1, "}": -1}.get(source[index], 0)
-        index += 1
-    body = source[start : index - 1]
-
-    keys: set[str] = set()
-    position = 0
-    while position < len(body):
-        if body.startswith("//", position):
-            position = body.index("\n", position) + 1
-            continue
-        if body[position] != '"':
-            position += 1
-            continue
-        characters: list[str] = []
-        cursor = position + 1
-        while body[cursor] != '"':
-            if body[cursor] == "\\":
-                characters.append(body[cursor + 1])
-                cursor += 2
-                continue
-            characters.append(body[cursor])
-            cursor += 1
-        cursor += 1
-        after = cursor
-        while body[after].isspace():
-            after += 1
-        if body[after] == ":":
-            keys.add("".join(characters))
-        position = cursor
-    return keys
-
-
-def test_every_error_detail_the_backend_can_send_has_a_portuguese_message(
-    tokened_client: TestClient,
-) -> None:
+def test_every_error_detail_the_backend_can_send_has_a_message_in_every_locale() -> None:
     """The table was right, and nothing was keeping it right.
 
     translateApiMessage falls back to a generic toast and reports the gap with
     console.warn -- which the visual gate's `errors --json` check does not
-    collect. Emptying API_MESSAGES entirely leaves the suite green, so the next
+    collect. Emptying the "api" map entirely leaves the suite green, so the next
     ApiError silently reopens the finding that fifteen of twenty-two details
-    reached a pt-BR surface untranslated. Both sides are derived from source, so
-    this cannot be satisfied by editing a list in this file.
+    reached a translated surface untranslated. One side is derived from source,
+    so this cannot be satisfied by editing a list in this file.
+
+    Every locale, not only one: a detail that is answered in Portuguese and not
+    in German is exactly the half-translated application this whole mechanism
+    exists to prevent, and it would be invisible to a check that only ever
+    looked at the language the author happened to be writing in.
     """
     details = _backend_error_details()
-    translated = _translated_error_details(tokened_client.get("/static/app.js").text)
 
-    # Both extractors have to have found something: two empty sets are equal.
+    # The extractor has to have found something: two empty sets are equal.
     assert len(details) >= 20
-    assert details == translated
+    for locale in SUPPORTED_UI_LOCALES:
+        assert set(load_catalog(locale)["api"]) == details, locale
 
 
 _HISTORY_ORDER_HARNESS = """
@@ -2729,14 +2931,19 @@ def test_the_device_selects_are_named_by_the_label_the_user_reads(
     visible legend read "Microfone" -- a name that is present and wrong, which
     an axe scan passes and someone driving the app by voice cannot use.
     """
+    catalog = load_catalog("en")["ui"]
     labelled = _parse_labelled_fields(tokened_client.get("/static/index.html").text)
 
-    for field_id, visible_label in (
-        ("settingsMicrophoneSelect", "Dispositivo de entrada"),
-        ("settingsSystemDeviceSelect", "Dispositivo de saída"),
+    for field_id, key in (
+        ("settingsMicrophoneSelect", "settings.devices.input.label"),
+        ("settingsSystemDeviceSelect", "settings.devices.output.label"),
+        ("settingsLocaleSelect", "settings.language.fieldLabel"),
+        ("microphoneLanguageSelect", "capture.language.microphone"),
+        ("systemLanguageSelect", "capture.language.system"),
     ):
         label_id = labelled.attributes[field_id]["aria-labelledby"]
-        assert labelled.element_text[label_id].strip() == visible_label
+        assert labelled.attributes[label_id].get("data-i18n") == key
+        assert labelled.element_text[label_id].strip() == catalog[key]
 
 
 # ------------------------------------------------- automatic proxy configuration

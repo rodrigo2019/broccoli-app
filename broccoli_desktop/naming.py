@@ -6,6 +6,12 @@ from a package: nothing compatible is vendored here, the desktop must work
 offline, and a handful of literals is easier to keep grammatical in pt-BR than a
 generic library would be.
 
+Deliberately not translated with the rest of the interface. A title is written
+into the session the moment it is created and then travels with it -- it is the
+meeting's data, not a label on a control -- so translating it would only change
+what the next session is called, while leaving every existing one as it was and
+making a history that reads in two languages at once.
+
 Grammar is the reason subjects carry a gender: "Pinguim Produtivo" and "Capivara
 Produtiva" are both correct, "Capivara Produtivo" is not. Prepositional phrases
 agree with anything, so they are listed once.

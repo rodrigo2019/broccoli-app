@@ -96,6 +96,32 @@ WebSocket path by design (see `config.py`), along with the default proxy
 configuration script address (see `settings.py`); do not include a token or a
 production transcript in build inputs, CI configuration, or release artifacts.
 
+## Interface language
+
+English, Portuguese (Brazil) and German. The wording lives in
+`broccoli_desktop/locales/*.json`, one file per language, each holding two flat
+maps: `ui`, keyed by a semantic name, and `api`, keyed by the English
+`ApiError` detail the local service sends -- that detail is a wire contract and
+stays English, the translation of it is what the user reads.
+
+There is one copy of every string and three surfaces read it. The `/` route
+puts all three catalogs into the served document, so the window has them before
+it paints and changing the language needs neither a request nor a reload; the
+notification-area menu and the Windows dialogs read the same stored choice
+through `i18n.Translator`, which re-reads it per call so they follow a change
+made in the settings screen without a restart. The choice is saved to
+`ui-settings.json` beside the other selections under `%LOCALAPPDATA%`; with
+nothing saved -- a fresh install, or "Follow Windows" in the picker -- the
+Windows display language decides, falling back to English.
+
+Adding a string means adding the same key to all three files: a test compares
+the key sets, another pins every literal in `index.html` to the English
+catalog, and a third checks that every `ApiError` detail the service can send
+is answered in every language.
+
+The automatic titles for unnamed sessions (`naming.py`) are deliberately not
+translated -- see the note in that module.
+
 ## Proxy
 
 The settings screen configures the proxy either manually, with a host and port,

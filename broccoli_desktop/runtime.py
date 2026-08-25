@@ -21,10 +21,16 @@ from broccoli_desktop.branding import APPLICATION_ICON, apply_taskbar_identity
 from broccoli_desktop.capture import PyAudioCaptureBackend
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.credentials import CredentialStore
+from broccoli_desktop.i18n import Translator
 from broccoli_desktop.instance import InstanceGuardProtocol, SingleInstanceGuard
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
-from broccoli_desktop.settings import LocalDeviceSettings, LocalProxySettings
+from broccoli_desktop.settings import (
+    LocalDeviceSettings,
+    LocalProxySettings,
+    LocalUiSettings,
+    UiSettingsStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,14 +107,22 @@ class LoopbackServerProtocol(Protocol):
 
 
 class WindowsDialog:
-    """Minimal Win32 dialogs that never render remote or credential data."""
+    """Minimal Win32 dialogs that never render remote or credential data.
+
+    Holds a translator rather than a locale: these dialogs are built once at
+    startup and shown much later, so a language chosen in between has to reach
+    them, and the translator re-reads the stored choice on every call.
+    """
+
+    def __init__(self, translator: Translator) -> None:
+        self._translator = translator
 
     def confirm_quit(self) -> bool:
         from ctypes import windll
 
         result = windll.user32.MessageBoxW(
             None,
-            "Há uma captura em andamento. Deseja pará-la e sair do Broccoli Desktop?",
+            self._translator.t("native.quit.confirm"),
             "Broccoli Desktop",
             0x00000024,
         )
@@ -487,9 +501,17 @@ def start_runtime(
     dialog: DialogProtocol | None = None,
     webview_start: Callable[[], None] | None = None,
     guard_factory: Callable[[RuntimeConfig], InstanceGuardProtocol] | None = None,
+    ui_settings: UiSettingsStore | None = None,
 ) -> DesktopRuntime | None:
     """Hold this environment's lock, or hand the launch to the copy that has it."""
-    runtime_dialog = dialog or WindowsDialog()
+    # First of everything, because the very next thing that can happen is an
+    # error dialog: the "already running" message below is shown before there
+    # is a loopback service, so the chosen language has to be readable without
+    # one. The same store instance then reaches Services, so a language saved
+    # through the API is the one this translator reads next.
+    locale_settings = ui_settings or LocalUiSettings()
+    translator = Translator(locale_settings)
+    runtime_dialog = dialog or WindowsDialog(translator)
     # Before the loopback port, the window, and the tray, so a launch that finds
     # the lock taken costs none of them: it asks the copy holding it to come
     # forward and leaves. Saying so out loud is the fallback, for a launch that
@@ -497,7 +519,7 @@ def start_runtime(
     guard = (guard_factory or _create_instance_guard)(config)
     if not guard.acquire():
         if not guard.signal_existing():
-            runtime_dialog.show_error("O Broccoli Desktop já está em execução.")
+            runtime_dialog.show_error(translator.t("native.error.alreadyRunning"))
         guard.release()
         return None
     try:
@@ -509,6 +531,8 @@ def start_runtime(
             tray_factory=tray_factory,
             dialog=runtime_dialog,
             webview_start=webview_start,
+            translator=translator,
+            ui_settings=locale_settings,
         )
     finally:
         # Every way out below: a local service that never came up, a window that
@@ -525,16 +549,21 @@ def _start_the_only_runtime(
     tray_factory: Callable[[DesktopRuntime], TrayProtocol] | None,
     dialog: DialogProtocol,
     webview_start: Callable[[], None] | None,
+    translator: Translator,
+    ui_settings: UiSettingsStore,
 ) -> DesktopRuntime | None:
     """Start the loopback service before creating the no-binding native window."""
+    create_server = server_factory or (
+        lambda runtime_config: _create_production_server(runtime_config, ui_settings=ui_settings)
+    )
     try:
-        server = (server_factory or _create_production_server)(config)
+        server = create_server(config)
     except RuntimeError:
-        dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
+        dialog.show_error(translator.t("native.error.serviceUnavailable"))
         return None
     if not server.start():
         server.shutdown()
-        dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
+        dialog.show_error(translator.t("native.error.serviceUnavailable"))
         return None
 
     runtime: DesktopRuntime | None = None
@@ -544,7 +573,9 @@ def _start_the_only_runtime(
         apply_taskbar_identity()
         create_window = window_factory or _create_pywebview_window
         window = create_window("Broccoli Desktop", server.window_url)
-        create_tray = tray_factory or _create_system_tray
+        create_tray = tray_factory or (
+            lambda desktop_runtime: _create_system_tray(desktop_runtime, translator)
+        )
         tray = create_tray_placeholder(create_tray, dialog, server, window)
         runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=dialog)
         if hasattr(tray, "set_runtime"):
@@ -559,7 +590,7 @@ def _start_the_only_runtime(
             server.shutdown()
         else:
             runtime.shutdown()
-        dialog.show_error("O Broccoli Desktop não conseguiu abrir a janela.")
+        dialog.show_error(translator.t("native.error.windowUnavailable"))
         return None
 
     previous_interrupt_handler = _install_interrupt_handler(runtime)
@@ -694,8 +725,16 @@ def _stop_browser_only_server(server: LoopbackServerProtocol) -> None:
 
 
 def _create_production_server(
-    config: RuntimeConfig, *, port: int | None = None
+    config: RuntimeConfig,
+    *,
+    port: int | None = None,
+    ui_settings: UiSettingsStore | None = None,
 ) -> UvicornLoopbackServer:
+    # The very same store the tray and the dialogs read, when start_runtime
+    # passes one in: saving a language through the API has to reach them, and
+    # two LocalUiSettings over one file would each memoise their own answer.
+    locale_settings = ui_settings or LocalUiSettings()
+
     def create_services(port: int) -> Services:
         # `services` is read inside the lambda, not passed to it -- the remote
         # is only built once a token exists (login, or a token change), which
@@ -715,6 +754,7 @@ def _create_production_server(
             loopback_port=port,
             device_settings=LocalDeviceSettings(),
             proxy_settings=LocalProxySettings(),
+            ui_settings=locale_settings,
             backend_url=config.server_url,
         )
         return services
@@ -834,10 +874,10 @@ def _start_pywebview(runtime: DesktopRuntime) -> None:
         gui._sigint_handler = original_interrupt_handler
 
 
-def _create_system_tray(runtime: DesktopRuntime) -> TrayProtocol:
+def _create_system_tray(runtime: DesktopRuntime, translator: Translator) -> TrayProtocol:
     from broccoli_desktop.tray import build_system_tray
 
-    return build_system_tray(runtime)
+    return build_system_tray(runtime, translator)
 
 
 def create_tray_placeholder(

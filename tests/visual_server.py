@@ -10,7 +10,9 @@ import uvicorn
 
 from broccoli_desktop.api import Services, create_app, create_uvicorn_config
 from broccoli_desktop.autoproxy import ResolvedProxy
+from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES
 from broccoli_desktop.models import DeviceDescriptor
+from broccoli_desktop.settings import InMemoryUiSettings
 from tests.fakes import (
     FakeCaptureBackend,
     visual_test_remote_factory,
@@ -59,8 +61,15 @@ def _visual_script_resolver(_target_url: str, _script_url: str) -> ResolvedProxy
     return ResolvedProxy(host="proxy.visual.local", port=8080)
 
 
-def create_visual_app(*, port: int):
-    """Build an app containing only deterministic task fakes and loopback metadata."""
+def create_visual_app(*, port: int, locale: str = "pt-BR"):
+    """Build an app containing only deterministic task fakes and loopback metadata.
+
+    The interface language is pinned, like the credential store, the proxy
+    prober and the script resolver above: scripts/visual-check.ps1 waits on
+    literal page text, and the production default follows the Windows display
+    language -- which would make the gate pass or hang depending on whose
+    machine it ran on.
+    """
     capture_backend = FakeCaptureBackend(
         devices=[
             DeviceDescriptor("mic-1", "Microphone One", "mic"),
@@ -76,6 +85,7 @@ def create_visual_app(*, port: int):
             capability_token=VISUAL_CAPABILITY_TOKEN,
             proxy_prober=_visual_proxy_prober,
             script_resolver=_visual_script_resolver,
+            ui_settings=InMemoryUiSettings(locale),
         )
     )
 
@@ -90,8 +100,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     """
     parser = argparse.ArgumentParser(prog="python -m tests.visual_server")
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--locale", default="pt-BR", choices=SUPPORTED_UI_LOCALES)
     arguments = parser.parse_args(argv)
-    config = create_uvicorn_config(create_visual_app(port=arguments.port), port=arguments.port)
+    config = create_uvicorn_config(
+        create_visual_app(port=arguments.port, locale=arguments.locale), port=arguments.port
+    )
     uvicorn.Server(config).run()
 
 

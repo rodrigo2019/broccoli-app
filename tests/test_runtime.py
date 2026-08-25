@@ -19,6 +19,7 @@ from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.branding import APPLICATION_ICON
 from broccoli_desktop.browser_only import print_window_url
 from broccoli_desktop.config import RuntimeConfig
+from broccoli_desktop.i18n import translate
 from broccoli_desktop.instance import SingleInstanceGuard, instance_name
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
@@ -32,6 +33,7 @@ from broccoli_desktop.runtime import (
     start_browser_only,
     start_runtime,
 )
+from broccoli_desktop.settings import InMemoryUiSettings
 from tests.fakes import (
     VISUAL_TEST_TOKEN,
     FakeCaptureBackend,
@@ -1005,12 +1007,13 @@ def test_server_start_failure_never_creates_a_window() -> None:
         tray_factory=lambda _runtime: FakeTray(),
         dialog=dialog,
         webview_start=lambda: None,
+        ui_settings=InMemoryUiSettings("pt-BR"),
     )
 
     assert result is None
     assert created_windows == []
     assert server.shutdown_calls == 1
-    assert dialog.errors == ["O Broccoli Desktop não conseguiu iniciar o serviço local."]
+    assert dialog.errors == [translate("pt-BR", "native.error.serviceUnavailable")]
 
 
 def test_window_start_failure_stops_the_loopback_server() -> None:
@@ -1028,11 +1031,12 @@ def test_window_start_failure_stops_the_loopback_server() -> None:
         tray_factory=lambda _runtime: FakeTray(),
         dialog=dialog,
         webview_start=lambda: None,
+        ui_settings=InMemoryUiSettings("pt-BR"),
     )
 
     assert result is None
     assert server.shutdown_calls == 1
-    assert dialog.errors == ["O Broccoli Desktop não conseguiu abrir a janela."]
+    assert dialog.errors == [translate("pt-BR", "native.error.windowUnavailable")]
 
 
 def test_a_second_launch_opens_nothing_and_hands_the_window_over(
@@ -1076,10 +1080,11 @@ def test_a_second_launch_that_cannot_reach_the_first_says_so(
         tray_factory=lambda _runtime: FakeTray(),
         dialog=fake_dialog,
         webview_start=lambda: None,
+        ui_settings=InMemoryUiSettings("pt-BR"),
     )
 
     assert result is None
-    assert fake_dialog.errors == ["O Broccoli Desktop já está em execução."]
+    assert fake_dialog.errors == [translate("pt-BR", "native.error.alreadyRunning")]
 
 
 def test_a_later_launch_brings_the_running_window_forward(

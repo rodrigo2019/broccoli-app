@@ -104,9 +104,14 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+    # --locale, explicitly: every literal this script waits on below is
+    # pt-BR, and a fresh install now follows the Windows display language.
+    # Without pinning it, this gate would pass or hang depending on the
+    # language of the machine it runs on -- and a wait on missing text hangs
+    # rather than failing, so it would not even say why.
     $server = Start-Process `
         -FilePath $python `
-        -ArgumentList @("-m", "tests.visual_server", "--port", "8765") `
+        -ArgumentList @("-m", "tests.visual_server", "--port", "8765", "--locale", "pt-BR") `
         -WindowStyle Hidden `
         -PassThru
 
@@ -206,10 +211,11 @@ try {
     # walks -- the post-login settings scan below runs while #proxyFields is
     # collapsed and structurally cannot see them.
     Invoke-Browser -BrowserArguments @("find", "testid", "proxy-toggle", "click")
-    # The connection card is the only section on this screen, so it takes the
-    # form's full width instead of half a two-column grid; its fields stay
-    # inside it (nowrap option labels used to push the grid tracks past the
-    # card's edge); and the address shares its row with the port.
+    # The connection card takes the form's full width instead of half a
+    # two-column grid; its fields stay inside it (nowrap option labels used to
+    # push the grid tracks past the card's edge); and the address shares its
+    # row with the port. The language card, the only other section on this
+    # screen, is widened to match by renderView.
     $proxyLayout = Invoke-Browser -BrowserArguments @(
         "eval",
         "(() => { const card = document.getElementById('settingsConnectionSection'); const cardBox = card.getBoundingClientRect(); const form = document.getElementById('settingsForm').getBoundingClientRect(); let spill = 0; card.querySelectorAll('*').forEach((el) => { spill = Math.max(spill, Math.round(el.getBoundingClientRect().right - cardBox.right)); }); const host = document.getElementById('proxyHost').getBoundingClientRect(); const port = document.getElementById('proxyPort').getBoundingClientRect(); return [Math.round(form.width - cardBox.width), spill, Math.round(Math.abs(host.top - port.top))]; })()"
@@ -472,6 +478,38 @@ try {
     }
     if ($audioCards[3] -ne "visible") {
         throw "The settings screen grew a scroller of its own (overflow-y: $($audioCards[3]))."
+    }
+    # The interface language, end to end: German and back. The round trip is
+    # what proves it, not the catalogs -- the window has to ask the service,
+    # adopt the answer and repaint without reloading, because the notification
+    # area and the Windows dialogs read the same stored value.
+    Invoke-Browser -BrowserArguments @("select", "#settingsLocaleSelect", "de")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Verbindung")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.documentElement.lang === 'de'"
+    )
+    Invoke-Browser -BrowserArguments @("snapshot", "-i")
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "settings-german.png"))
+    Assert-NoAccessibilityViolations -Screen "the settings screen in German"
+    Invoke-Browser -BrowserArguments @("select", "#settingsLocaleSelect", "pt-BR")
+    Invoke-Browser -BrowserArguments @("wait", "--text", "Conex$([char]0x00E3)o")
+    Invoke-Browser -BrowserArguments @(
+        "wait",
+        "--fn",
+        "document.documentElement.lang === 'pt-BR'"
+    )
+    # Every key the window asked for and no catalog answered. The console
+    # warning translateApiMessage logs cannot stand in for this: the axe scan
+    # collects errors, not warnings, so nothing else here would see a label
+    # rendering as its own key.
+    $missingKeys = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(window.__I18N_MISSING__ || []).join(', ')"
+    ) | ConvertFrom-Json
+    if ($missingKeys) {
+        throw "The window asked for interface keys no catalog has: $missingKeys"
     }
     Invoke-Browser -BrowserArguments @("select", "#settingsMicrophoneSelect", "mic-1")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")

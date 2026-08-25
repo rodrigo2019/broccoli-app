@@ -1,4 +1,4 @@
-"""Local storage for the two opaque selected-device identities only."""
+"""Local storage for the selected devices, the proxy route and the interface language."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES
 from broccoli_desktop.session import CaptureChoices
 
 _SETTINGS_DIRECTORY = "Broccoli Desktop"
@@ -253,6 +254,108 @@ class LocalProxySettings:
         )
 
     def clear(self) -> None:
+        try:
+            self._path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+_UI_SETTINGS_FILENAME = "ui-settings.json"
+_UI_SETTINGS_KEYS = frozenset({"locale"})
+
+
+class UiSettingsStore(Protocol):
+    """The stored interface language, mirroring the other two settings boundaries.
+
+    ``load`` answers ``None`` rather than a default locale: absent means nobody
+    has chosen, which is what tells broccoli_desktop.i18n to ask Windows.
+    """
+
+    def load(self) -> str | None: ...
+
+    def save(self, locale: str) -> None: ...
+
+    def clear(self) -> None: ...
+
+
+@dataclass
+class InMemoryUiSettings:
+    """Non-persistent interface language used by injected local/test compositions."""
+
+    locale: str | None = None
+
+    def load(self) -> str | None:
+        return self.locale
+
+    def save(self, locale: str) -> None:
+        self.locale = locale
+
+    def clear(self) -> None:
+        self.locale = None
+
+
+class LocalUiSettings:
+    """Persist the chosen interface language beside the other selection files.
+
+    The value is memoised because the notification-area menu asks for it every
+    time Windows paints that menu, and a disk read per paint is not what a tray
+    label should cost. Writes go to both the memo and the file, and the memo is
+    a single ``str`` assignment -- atomic under the GIL -- which is what makes
+    the hand-off safe from the server thread that saves it to the tray thread
+    that reads it, with no lock between them.
+    """
+
+    def __init__(self, *, path: Path | None = None) -> None:
+        self._path = path or _local_app_data_path(_UI_SETTINGS_FILENAME)
+        self._memo: str | None = None
+        self._loaded = False
+
+    def load(self) -> str | None:
+        if self._loaded:
+            return self._memo
+        self._memo = self._read()
+        self._loaded = True
+        return self._memo
+
+    def _read(self) -> str | None:
+        try:
+            contents = self._path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            payload = json.loads(contents)
+        except json.JSONDecodeError:
+            self._discard()
+            return None
+        if not isinstance(payload, dict) or set(payload) != _UI_SETTINGS_KEYS:
+            self._discard()
+            return None
+        locale = payload["locale"]
+        # An unrecognised locale is discarded rather than kept: it can only come
+        # from a hand-edited file or a downgrade, and it must never be handed on
+        # as a filename (see broccoli_desktop.i18n's catalog table).
+        if locale not in SUPPORTED_UI_LOCALES:
+            self._discard()
+            return None
+        return str(locale)
+
+    def save(self, locale: str) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(
+            json.dumps({"locale": locale}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        self._memo = locale
+        self._loaded = True
+
+    def clear(self) -> None:
+        self._discard()
+        self._memo = None
+        self._loaded = True
+
+    def _discard(self) -> None:
         try:
             self._path.unlink()
         except FileNotFoundError:

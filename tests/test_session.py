@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import threading
 
 import pytest
 
+import broccoli_desktop.session
 from broccoli_desktop.capture import DeviceUnavailableError
 from broccoli_desktop.events import EVENT_HISTORY_MAX, EventHub
+from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES, translate
 from broccoli_desktop.models import AudioFrame, ConnectionState, SessionSummary, UiEvent
 from broccoli_desktop.protocol import decode_audio_frame
 from broccoli_desktop.remote import (
@@ -586,7 +590,7 @@ async def test_reconnect_buffer_trims_only_beyond_its_bound_and_warns_once(
 
     assert controller.buffered_audio_ms == MAX_BUFFERED_AUDIO_MS
     assert len(warnings) == 1
-    assert "descartado" in (warnings[0].message or "")
+    assert warnings[0].message == "notify.reconnect.trimmingAudio"
 
     await controller.stop()
 
@@ -1268,14 +1272,56 @@ async def test_the_audio_sender_survives_a_failure_outside_the_frame_handler(
     await controller.stop()
 
 
+#: The event types whose `message` the window renders. Everything else this
+#: file publishes rides on `status`, whose message the interface never reads --
+#: those stay English diagnostics.
+_RENDERED_EVENT_TYPES = frozenset({"warning", "error", "recoverable_error"})
+
+
+def _rendered_event_message_keys() -> set[str]:
+    """Every catalog key a UiEvent in session.py can put in front of the user.
+
+    Read out of the source rather than listed here, for the same reason the
+    backend error details are: a hand-kept list is satisfied by editing this
+    file, which is exactly what the next untranslated warning would do.
+    """
+    tree = ast.parse(inspect.getsource(broccoli_desktop.session))
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "UiEvent":
+            continue
+        arguments = {
+            keyword.arg: keyword.value.value
+            for keyword in node.keywords
+            if isinstance(keyword.value, ast.Constant)
+        }
+        if arguments.get("type") in _RENDERED_EVENT_TYPES and arguments.get("message"):
+            keys.add(str(arguments["message"]))
+    return keys
+
+
+def test_every_message_this_file_can_show_is_translated_everywhere() -> None:
+    """These strings reach a toast verbatim, so a key with no catalog entry is
+    a toast that reads "notify.audio.dropping" -- in every language, including
+    the one whoever added it was writing in."""
+    keys = _rendered_event_message_keys()
+
+    assert len(keys) >= 5
+    for locale in SUPPORTED_UI_LOCALES:
+        for key in keys:
+            assert translate(locale, key) != key, (locale, key)
+
+
 @pytest.mark.asyncio
-async def test_the_low_credit_warning_reaches_the_interface_in_portuguese(
+async def test_the_low_credit_warning_reaches_the_interface_as_a_catalog_key(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
     """`warning` is one of the two event types whose message the interface
-    renders verbatim, so an English string here is an English toast on a pt-BR
-    screen. This file already published its drop warning in Portuguese, so it
-    shipped both conventions at once."""
+    renders, so a literal string here is a string in one language on a window
+    that can be in any of three. The key is the contract; the wording lives in
+    the catalogs, once, beside every other piece of it."""
     controller = DesktopSessionController(fake_remote, fake_capture)
     await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
 
@@ -1283,7 +1329,7 @@ async def test_the_low_credit_warning_reaches_the_interface_in_portuguese(
     await settle()
 
     warnings = [event for event in controller.events.snapshot() if event.type == "warning"]
-    assert [event.message for event in warnings] == ["Os créditos desta sessão estão acabando."]
+    assert [event.message for event in warnings] == ["notify.credits.low"]
 
     await controller.stop()
 
@@ -1608,9 +1654,7 @@ async def test_dropping_audio_tells_the_user_once_per_stall(
     await capture_frames(controller, AUDIO_QUEUE_MAX_FRAMES * 2)
 
     warnings = [event for event in controller.events.snapshot() if event.type == "warning"]
-    assert [event.message for event in warnings] == [
-        "Áudio está sendo descartado: a conexão não está acompanhando."
-    ]
+    assert [event.message for event in warnings] == ["notify.audio.dropping"]
 
     await controller.stop()
 

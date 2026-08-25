@@ -58,7 +58,7 @@ AUTO_DETECT_LANGUAGE = ""
 
 #: The languages a capture may be forced into, alongside automatic detection.
 #: ISO-639-1, which is the form the transcription service takes.
-SUPPORTED_LANGUAGES = frozenset({AUTO_DETECT_LANGUAGE, "pt", "en"})
+SUPPORTED_LANGUAGES = frozenset({AUTO_DETECT_LANGUAGE, "pt", "en", "de"})
 
 #: The reconnect buffer's bound, in frames. Named rather than recomputed at the
 #: one place that trims, so that a test about the trim can size its buffer from
@@ -455,11 +455,7 @@ class DesktopSessionController:
             if not self._reported_trimming:
                 self._reported_trimming = True
                 self.events.publish(
-                    UiEvent(
-                        type="warning",
-                        message="A reconexão está demorando: o áudio mais antigo "
-                        "está sendo descartado.",
-                    )
+                    UiEvent(type="warning", message="notify.reconnect.trimmingAudio")
                 )
 
     async def _open(
@@ -711,17 +707,15 @@ class DesktopSessionController:
             self.events.publish(UiEvent(type="segment", segment=segment))
             return
         if isinstance(event, CreditWarning):
-            # pt-BR, like every other message this file publishes for the user
-            # to read. `warning` and `error` are the only event types whose
-            # `message` the interface renders verbatim (see handleEvent in
-            # app.js), and this file already published the drop warning below in
-            # Portuguese -- so it shipped both conventions at once. The English
-            # strings that remain here ride on `status` events, whose `message`
-            # the interface never reads; they are diagnostics, and the interface
-            # derives its own pt-BR text from the state enum.
-            self.events.publish(
-                UiEvent(type="warning", message="Os créditos desta sessão estão acabando.")
-            )
+            # A catalog key, like every other message this file publishes for
+            # the user to read: the interface owns the wording in all three
+            # languages, and this process has no business holding a fourth copy
+            # of it. `warning` and `error` are the only event types whose
+            # `message` the interface renders (see handleEvent in app.js). The
+            # English strings that remain in this file ride on `status` events,
+            # whose `message` the interface never reads; they are diagnostics,
+            # and the interface derives its own text from the state enum.
+            self.events.publish(UiEvent(type="warning", message="notify.credits.low"))
             return
         if isinstance(event, SessionEnded):
             if self._stopping:
@@ -732,7 +726,7 @@ class DesktopSessionController:
         if isinstance(event, RemoteFailure):
             if self._stopping:
                 self.events.publish(
-                    UiEvent(type="error", message="A transcrição final pode estar incompleta.")
+                    UiEvent(type="error", message="notify.transcript.mayBeIncomplete")
                 )
                 return
             await self._fail_from_remote()
@@ -870,7 +864,7 @@ class DesktopSessionController:
                     self.events.publish(
                         UiEvent(
                             type="recoverable_error",
-                            message="A tentativa de reconexão falhou.",
+                            message="notify.reconnect.attemptFailed",
                         )
                     )
             await self._discard_recovery_stream(self._recovery_stream)
@@ -983,12 +977,7 @@ class DesktopSessionController:
         self._dropped_frames += 1
         if not self._reported_dropping:
             self._reported_dropping = True
-            self.events.publish(
-                UiEvent(
-                    type="warning",
-                    message="Áudio está sendo descartado: a conexão não está acompanhando.",
-                )
-            )
+            self.events.publish(UiEvent(type="warning", message="notify.audio.dropping"))
 
     def _enqueue_flush(self, channel: Literal["mic", "system"], generation: int) -> None:
         if generation != self._run_generation or channel in self._pending_flush_channels:

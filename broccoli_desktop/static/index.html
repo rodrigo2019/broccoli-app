@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -11,6 +11,15 @@
          no network at all, so the font ships inside the installer. -->
     <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css" />
     <link rel="stylesheet" href="/static/output.css" />
+    <!--
+      Replaced when this file is served, by _render_shell in api.py, with the
+      interface catalogs and the active locale. It stays a comment in the file
+      itself so index.html is still a document that opens in a browser on its
+      own -- in the language its markup is written in, which is why every
+      literal below is the English source string and matches locales/en.json
+      exactly (a test pins the two together).
+    -->
+    <!--i18n-bootstrap-->
     <script src="/static/app.js" defer></script>
     <!-- Applies the theme before the first paint, the same way base.html does on
          the platform: app.js is deferred, so reading the preference there would
@@ -37,7 +46,7 @@
     last row can still be read once you reach the end.
   -->
   <body class="min-h-screen bg-base-100 text-base-content">
-    <a id="skipLink" href="#mainView" class="skip-link hidden" data-testid="skip-to-main">Pular para o conteúdo</a>
+    <a id="skipLink" href="#mainView" class="skip-link hidden" data-testid="skip-to-main" data-i18n="app.skipToContent">Skip to content</a>
     <div class="app-shell drawer lg:drawer-open min-h-screen">
       <div class="app-shell__backdrop" aria-hidden="true">
         <span class="app-shell__blob app-shell__blob--one"></span>
@@ -60,21 +69,25 @@
         -->
         <header id="appHeader" class="app-topbar header sticky top-0 z-10 flex min-h-16 items-center justify-between gap-4 border-b px-4 py-3 transition-all duration-300 sm:px-6">
           <div class="header-content flex min-w-0 items-center gap-2">
-            <label for="drawer-toggle" class="btn-menu-toggle drawer-button btn btn-ghost btn-sm lg:hidden" aria-label="Alternar barra lateral">
+            <label for="drawer-toggle" class="btn-menu-toggle drawer-button btn btn-ghost btn-sm lg:hidden" data-i18n-attr="aria-label:app.sidebar.toggle" aria-label="Toggle sidebar">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-linejoin="round" stroke-linecap="round" stroke-width="2" fill="none" stroke="currentColor" class="size-4"><path d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z"></path><path d="M9 4v16"></path><path d="M14 10l2 2l-2 2"></path></svg>
             </label>
-            <button id="backToTranscriptButton" class="btn btn-ghost btn-sm btn-square hidden" type="button" aria-label="Voltar para a captura">
+            <!--
+              No data-i18n-attr here: renderView owns this label, because it
+              names a different destination before and after signing in.
+            -->
+            <button id="backToTranscriptButton" class="btn btn-ghost btn-sm btn-square hidden" type="button" aria-label="Back to the capture">
               <i class="bi bi-chevron-left" aria-hidden="true"></i>
             </button>
             <div id="transcriptHeaderContext" class="flex min-w-0 items-center gap-3">
               <div class="flex min-w-0 flex-1 flex-col">
-                <p class="text-[0.65rem] font-bold uppercase leading-tight tracking-[0.18em] text-primary">Registro ao vivo</p>
+                <p class="text-[0.65rem] font-bold uppercase leading-tight tracking-[0.18em] text-primary" data-i18n="header.liveRecord">Live record</p>
                 <label class="min-w-32" for="sessionTitle">
-                <span class="sr-only">Título da reunião</span>
-                <input id="sessionTitle" class="input input-ghost input-sm w-full max-w-[28rem] truncate px-0 font-semibold text-lg" type="text" maxlength="120" placeholder="Sem título" aria-label="Título da reunião" />
+                <span class="sr-only" data-i18n="session.title.label">Meeting title</span>
+                <input id="sessionTitle" class="input input-ghost input-sm w-full max-w-[28rem] truncate px-0 font-semibold text-lg" type="text" maxlength="120" placeholder="Untitled" data-i18n-attr="placeholder:session.title.placeholder;aria-label:session.title.label" aria-label="Meeting title" />
                 </label>
               </div>
-              <button id="renameSessionButton" class="btn btn-ghost btn-xs btn-square shrink-0" type="button" data-testid="rename-session" aria-label="Renomear sessão" title="Renomear sessão" disabled>
+              <button id="renameSessionButton" class="btn btn-ghost btn-xs btn-square shrink-0" type="button" data-testid="rename-session" data-i18n-attr="aria-label:session.rename.action;title:session.rename.action" aria-label="Rename session" title="Rename session" disabled>
                 <i class="bi bi-pencil" aria-hidden="true"></i>
               </button>
               <!--
@@ -88,18 +101,18 @@
                 line, which keeps it available to assistive tech at every
                 viewport instead of only above the old `xl:` breakpoint.
               -->
-              <span id="sessionMeta" class="sr-only">Inicie uma captura para gerar um código local.</span>
+              <span id="sessionMeta" class="sr-only" data-i18n="session.meta.empty">Start a capture to generate a local code.</span>
             </div>
-            <h1 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold">Configurações</h1>
+            <h1 id="settingsHeaderTitle" class="header-title mb-0 hidden text-lg font-semibold" data-i18n="settings.title">Settings</h1>
           </div>
           <div id="headerActions" class="header-actions flex shrink-0 items-center gap-2">
             <span id="captureIndicator" class="badge badge-sm badge-outline gap-1" data-testid="capture-indicator">
               <i class="bi bi-mic" aria-hidden="true"></i>
-              <span id="captureIndicatorLabel">Pronto</span>
+              <span id="captureIndicatorLabel" data-i18n="capture.state.idle">Ready</span>
             </span>
-            <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code" aria-label="Copiar código da sessão" title="Copiar código da sessão">
+            <button id="copyCodeButton" class="btn btn-ghost btn-sm" type="button" data-testid="copy-session-code" data-i18n-attr="aria-label:session.copyCode.action;title:session.copyCode.action" aria-label="Copy the session code" title="Copy the session code">
               <i class="bi bi-copy" aria-hidden="true"></i>
-              <span class="hidden sm:inline">Copiar código</span>
+              <span class="hidden sm:inline" data-i18n="session.copyCode.label">Copy code</span>
             </button>
           </div>
         </header>
@@ -110,22 +123,22 @@
               <div class="flex size-12 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                 <i class="bi bi-pencil text-2xl" aria-hidden="true"></i>
               </div>
-              <div class="flex-1"><h3 class="text-xl font-bold">Renomear sessão</h3></div>
+              <div class="flex-1"><h3 class="text-xl font-bold" data-i18n="session.rename.action">Rename session</h3></div>
             </div>
             <hr class="border-base-content/10" />
             <div class="p-6 py-5">
               <fieldset class="fieldset">
-                <legend class="fieldset-legend text-sm">Nome da sessão</legend>
-                <input id="renameSessionInput" class="input w-full" type="text" maxlength="120" autocomplete="off" placeholder="Digite o nome da sessão" data-testid="rename-session-input" />
+                <legend class="fieldset-legend text-sm" data-i18n="session.rename.fieldLabel">Session name</legend>
+                <input id="renameSessionInput" class="input w-full" type="text" maxlength="120" autocomplete="off" placeholder="Type the session name" data-i18n-attr="placeholder:session.rename.placeholder" data-testid="rename-session-input" />
               </fieldset>
             </div>
             <hr class="border-base-content/10" />
             <div class="flex justify-end gap-3 p-6 pt-4">
-              <button id="renameSessionCancel" class="btn btn-ghost" type="button">Cancelar</button>
-              <button id="renameSessionConfirm" class="btn btn-primary" type="button" data-testid="rename-session-confirm">Renomear</button>
+              <button id="renameSessionCancel" class="btn btn-ghost" type="button" data-i18n="common.cancel">Cancel</button>
+              <button id="renameSessionConfirm" class="btn btn-primary" type="button" data-testid="rename-session-confirm" data-i18n="common.rename">Rename</button>
             </div>
           </div>
-          <form method="dialog" class="modal-backdrop"><button aria-label="Fechar">fechar</button></form>
+          <form method="dialog" class="modal-backdrop"><button data-i18n="common.close" data-i18n-attr="aria-label:common.close" aria-label="Close">Close</button></form>
         </dialog>
 
         <dialog id="deleteSessionModal" class="modal">
@@ -134,19 +147,19 @@
               <div class="flex size-12 shrink-0 items-center justify-center rounded-full bg-error/10 text-error">
                 <i class="bi bi-trash text-2xl" aria-hidden="true"></i>
               </div>
-              <div class="flex-1"><h3 class="text-xl font-bold">Excluir sessão</h3></div>
+              <div class="flex-1"><h3 class="text-xl font-bold" data-i18n="session.delete.title">Delete session</h3></div>
             </div>
             <hr class="border-base-content/10" />
             <div class="p-6 py-5">
-              <p class="text-sm leading-6 text-base-content/80">A sessão desaparecerá do histórico, mas a transcrição e os vínculos já existentes permanecerão preservados.</p>
+              <p class="text-sm leading-6 text-base-content/80" data-i18n="session.delete.body">The session will disappear from the history, but the transcript and the links that already exist stay intact.</p>
             </div>
             <hr class="border-base-content/10" />
             <div class="flex justify-end gap-3 p-6 pt-4">
-              <button id="deleteSessionCancel" class="btn btn-ghost" type="button">Cancelar</button>
-              <button id="deleteSessionConfirm" class="btn btn-error" type="button" data-testid="delete-session-confirm">Excluir</button>
+              <button id="deleteSessionCancel" class="btn btn-ghost" type="button" data-i18n="common.cancel">Cancel</button>
+              <button id="deleteSessionConfirm" class="btn btn-error" type="button" data-testid="delete-session-confirm" data-i18n="common.delete">Delete</button>
             </div>
           </div>
-          <form method="dialog" class="modal-backdrop"><button aria-label="Fechar">fechar</button></form>
+          <form method="dialog" class="modal-backdrop"><button data-i18n="common.close" data-i18n-attr="aria-label:common.close" aria-label="Close">Close</button></form>
         </dialog>
 
         <section id="loginView" class="hero flex-1 px-4 py-12 sm:px-6 lg:px-8">
@@ -156,11 +169,11 @@
                 <div class="flex items-center gap-3">
                   <img src="/static/images/broccoli_icon.svg" alt="Broccoli" class="h-11 w-10 object-contain" />
                   <div>
-                    <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary">Captura local</p>
-                    <h1 class="text-2xl font-bold tracking-tight">Comece seu caderno</h1>
+                    <p class="text-xs font-bold uppercase tracking-[0.18em] text-primary" data-i18n="login.eyebrow">Local capture</p>
+                    <h1 class="text-2xl font-bold tracking-tight" data-i18n="login.title">Start your notebook</h1>
                   </div>
                 </div>
-                <p class="text-sm leading-6 text-base-content/70">Use seu token do Broccoli para conectar microfone, áudio do sistema e transcrição ao vivo.</p>
+                <p class="text-sm leading-6 text-base-content/70" data-i18n="login.subtitle">Use your Broccoli token to connect your microphone, the system audio and live transcription.</p>
                 <form id="loginForm" class="space-y-4">
                   <fieldset class="fieldset">
                     <!--
@@ -173,14 +186,15 @@
                       old (wrong-language) aria-label is removed. Pointing
                       aria-labelledby at the legend's own id, rather than adding a
                       second aria-label, keeps the accessible name and the visible
-                      text identical -- not just overlapping -- for WCAG 2.5.3.
+                      text identical -- not just overlapping -- for WCAG 2.5.3, and
+                      keeps it that way in every language: one key names both.
                     -->
-                    <legend id="tokenInputLegend" class="fieldset-legend text-sm">Token de acesso</legend>
+                    <legend id="tokenInputLegend" class="fieldset-legend text-sm" data-i18n="login.token.label">Access token</legend>
                     <input id="tokenInput" class="input w-full" type="password" autocomplete="off" aria-labelledby="tokenInputLegend" aria-describedby="tokenInputHelp" data-testid="token-input" required />
-                    <p id="tokenInputHelp" class="fieldset-label leading-snug">Guardado somente no Gerenciador de Credenciais do Windows.</p>
+                    <p id="tokenInputHelp" class="fieldset-label leading-snug" data-i18n="login.token.help">Kept only in the Windows Credential Manager.</p>
                   </fieldset>
                   <p id="loginError" class="hidden text-sm text-error" role="alert" data-testid="login-error"></p>
-                  <button class="btn btn-primary w-full" type="submit" data-testid="login-submit">Entrar</button>
+                  <button class="btn btn-primary w-full" type="submit" data-testid="login-submit" data-i18n="login.submit">Sign in</button>
                 </form>
                 <!--
                   /api/settings is deliberately unauthenticated because a
@@ -192,7 +206,7 @@
                 -->
                 <div class="flex justify-center border-t border-base-content/10 pt-4">
                   <button id="networkSettingsButton" class="btn btn-ghost btn-sm" type="button" data-testid="network-settings">
-                    <i class="bi bi-hdd-network" aria-hidden="true"></i>Configurações de rede
+                    <i class="bi bi-hdd-network" aria-hidden="true"></i><span data-i18n="login.networkSettings">Network settings</span>
                   </button>
                 </div>
               </div>
@@ -214,61 +228,61 @@
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div class="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <h2 class="card-title text-lg">Dispositivos de áudio</h2>
-                      <p class="mt-1 text-sm text-base-content/60">Defina as fontes usadas para a captura local.</p>
+                      <h2 class="card-title text-lg" data-i18n="settings.devices.title">Audio devices</h2>
+                      <p class="mt-1 text-sm text-base-content/60" data-i18n="settings.devices.hint">Choose the sources used for the local capture.</p>
                     </div>
                     <button id="settingsRefreshDevicesButton" class="btn btn-ghost btn-sm" type="button">
-                      <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>Atualizar dispositivos
+                      <i class="bi bi-arrow-clockwise" aria-hidden="true"></i><span data-i18n="settings.devices.refresh">Refresh devices</span>
                     </button>
                   </div>
                   <div class="grid gap-4 md:grid-cols-2">
                     <div class="audio-channel">
-                      <p id="settingsMicrophoneLabel" class="audio-channel__label">Dispositivo de entrada</p>
+                      <p id="settingsMicrophoneLabel" class="audio-channel__label" data-i18n="settings.devices.input.label">Input device</p>
                       <label class="select w-full">
                         <i class="bi bi-mic" aria-hidden="true"></i>
                         <select id="settingsMicrophoneSelect" aria-labelledby="settingsMicrophoneLabel" data-testid="settings-microphone"></select>
                       </label>
-                      <p class="audio-channel__hint">Fonte principal para sua voz.</p>
+                      <p class="audio-channel__hint" data-i18n="settings.devices.input.hint">Main source for your voice.</p>
                       <div class="audio-level-card audio-level-card--input">
                         <div class="audio-level-card__header">
                           <span class="audio-level-card__badge" aria-hidden="true"><i class="bi bi-mic"></i></span>
                           <div class="audio-level-card__titles">
-                            <p class="audio-level-card__title">Entrada</p>
-                            <p class="audio-level-card__subtitle">Fale no microfone para visualizar o nível.</p>
+                            <p class="audio-level-card__title" data-i18n="settings.devices.input.meterTitle">Input</p>
+                            <p class="audio-level-card__subtitle" data-i18n="settings.devices.input.meterHint">Speak into the microphone to see the level.</p>
                           </div>
-                          <output id="settingsMicrophoneLevel" class="audio-level-card__reading">Aguardando</output>
+                          <output id="settingsMicrophoneLevel" class="audio-level-card__reading" data-i18n="settings.devices.meter.waiting">Waiting</output>
                         </div>
-                        <div id="settingsMicrophoneMeter" class="audio-level-card__meter" role="meter" aria-label="Nível do microfone" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Aguardando teste"></div>
-                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i>Fale com tom de voz normal a uma distância de 15–30 cm do microfone.</p>
+                        <div id="settingsMicrophoneMeter" class="audio-level-card__meter" role="meter" data-i18n-attr="aria-label:settings.devices.input.meterLabel;aria-valuetext:settings.devices.meter.waitingTest" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Waiting for the test"></div>
+                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i><span data-i18n="settings.devices.input.tip">Speak at a normal volume, 15–30 cm from the microphone.</span></p>
                       </div>
                     </div>
                     <div class="audio-channel">
-                      <p id="settingsSystemDeviceLabel" class="audio-channel__label">Dispositivo de saída</p>
+                      <p id="settingsSystemDeviceLabel" class="audio-channel__label" data-i18n="settings.devices.output.label">Output device</p>
                       <label class="select w-full">
                         <i class="bi bi-volume-up" aria-hidden="true"></i>
                         <select id="settingsSystemDeviceSelect" aria-labelledby="settingsSystemDeviceLabel" data-testid="settings-system-audio"></select>
                       </label>
-                      <p class="audio-channel__hint">Som reproduzido pelo computador.</p>
+                      <p class="audio-channel__hint" data-i18n="settings.devices.output.hint">Sound played by the computer.</p>
                       <div class="audio-level-card audio-level-card--output">
                         <div class="audio-level-card__header">
                           <span class="audio-level-card__badge" aria-hidden="true"><i class="bi bi-volume-up"></i></span>
                           <div class="audio-level-card__titles">
-                            <p class="audio-level-card__title">Saída</p>
-                            <p class="audio-level-card__subtitle">O áudio de teste será reproduzido pelos alto-falantes.</p>
+                            <p class="audio-level-card__title" data-i18n="settings.devices.output.meterTitle">Output</p>
+                            <p class="audio-level-card__subtitle" data-i18n="settings.devices.output.meterHint">The test audio will play through the speakers.</p>
                           </div>
-                          <output id="settingsSystemLevel" class="audio-level-card__reading">Aguardando</output>
+                          <output id="settingsSystemLevel" class="audio-level-card__reading" data-i18n="settings.devices.meter.waiting">Waiting</output>
                         </div>
-                        <div id="settingsSystemMeter" class="audio-level-card__meter" role="meter" aria-label="Nível do áudio do sistema" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Aguardando teste"></div>
-                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i>Você ouvirá um som de teste em volume confortável.</p>
+                        <div id="settingsSystemMeter" class="audio-level-card__meter" role="meter" data-i18n-attr="aria-label:settings.devices.output.meterLabel;aria-valuetext:settings.devices.meter.waitingTest" aria-label="System audio level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Waiting for the test"></div>
+                        <p class="audio-level-card__tip"><i class="bi bi-info-circle" aria-hidden="true"></i><span data-i18n="settings.devices.output.tip">You will hear a test sound at a comfortable volume.</span></p>
                       </div>
                     </div>
                   </div>
                   <div class="audio-test-control">
                     <div>
-                      <p class="font-medium">Teste de áudio</p>
-                      <p id="settingsAudioTestStatus" class="mt-1 text-xs text-base-content/60" role="status">Escolha os dispositivos e inicie o teste. Nenhum áudio é salvo ou enviado.</p>
+                      <p class="font-medium" data-i18n="settings.audioTest.title">Audio test</p>
+                      <p id="settingsAudioTestStatus" class="mt-1 text-xs text-base-content/60" role="status" data-i18n="settings.audioTest.idle">Choose the devices and start the test. No audio is saved or sent.</p>
                     </div>
-                    <button id="settingsAudioTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-audio">Testar entrada e saída</button>
+                    <button id="settingsAudioTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-audio" data-i18n="settings.audioTest.start">Test input and output</button>
                   </div>
                 </div>
               </section>
@@ -276,45 +290,88 @@
               <section id="settingsAppearanceSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div>
-                    <h2 class="card-title text-lg">Aparência</h2>
-                    <p class="mt-1 text-sm text-base-content/60">Escolha como o desktop deve aparecer.</p>
+                    <h2 class="card-title text-lg" data-i18n="settings.appearance.title">Appearance</h2>
+                    <p class="mt-1 text-sm text-base-content/60" data-i18n="settings.appearance.hint">Choose how the desktop should look.</p>
                   </div>
                   <!-- `whitespace-normal`: see the note on #settingsConnectionSection. -->
-                  <fieldset class="grid min-w-0 gap-3" aria-label="Tema da aplicação">
+                  <fieldset class="grid min-w-0 gap-3" data-i18n-attr="aria-label:settings.appearance.groupLabel" aria-label="Application theme">
                     <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                       <input id="themeLightOption" class="radio radio-primary" type="radio" name="theme" value="light" />
-                      <span class="min-w-0"><span class="block font-medium">Claro</span><span class="block text-xs text-base-content/60">Superfícies claras e contraste suave.</span></span>
+                      <span class="min-w-0"><span class="block font-medium" data-i18n="settings.appearance.light.title">Light</span><span class="block text-xs text-base-content/60" data-i18n="settings.appearance.light.hint">Light surfaces and gentle contrast.</span></span>
                     </label>
                     <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                       <input id="themeDarkOption" class="radio radio-primary" type="radio" name="theme" value="dark" />
-                      <span class="min-w-0"><span class="block font-medium">Escuro</span><span class="block text-xs text-base-content/60">A experiência padrão do Broccoli.</span></span>
+                      <span class="min-w-0"><span class="block font-medium" data-i18n="settings.appearance.dark.title">Dark</span><span class="block text-xs text-base-content/60" data-i18n="settings.appearance.dark.hint">The default Broccoli experience.</span></span>
                     </label>
                   </fieldset>
                 </div>
               </section>
 
               <!--
-                renderView stretches this card across both grid columns before
-                login (`lg:col-span-2`): the other two sections are hidden
-                then, and a lone card parked in the left half of a two-column
-                grid is what the pre-login network screen used to look like.
+                Rendered before signing in as well, unlike the two sections
+                above: the language of the window is a preference of this
+                machine, not of an account, and the pre-login screens -- the
+                login card itself and the proxy panel -- are the first thing
+                anyone reads. renderView stretches it across both columns
+                there, beside the connection card.
+
+                The three language names are endonyms and are the same in
+                every catalog, so they carry no data-i18n: someone looking for
+                their own language looks for the word they call it by.
+
+                renderView widens it to both columns before signing in, where
+                the connection card is the only other thing on the screen and
+                already takes the full width.
+              -->
+              <section id="settingsLanguageSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
+                <div class="card-body gap-5 p-5 sm:p-6">
+                  <div>
+                    <h2 class="card-title text-lg" data-i18n="settings.language.title">Language</h2>
+                    <p class="mt-1 text-sm text-base-content/60" data-i18n="settings.language.hint">Applies to the window, the notification-area menu and the Windows dialogs.</p>
+                  </div>
+                  <div class="audio-channel">
+                    <p id="settingsLocaleLabel" class="audio-channel__label" data-i18n="settings.language.fieldLabel">Interface language</p>
+                    <label class="select w-full">
+                      <i class="bi bi-translate" aria-hidden="true"></i>
+                      <select id="settingsLocaleSelect" aria-labelledby="settingsLocaleLabel" data-testid="settings-language">
+                        <option value="" data-i18n="settings.language.followSystem">Follow Windows</option>
+                        <option value="en">English</option>
+                        <option value="pt-BR">Português (Brasil)</option>
+                        <option value="de">Deutsch</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <!--
+                Spans both grid columns, always. Before signing in the device
+                and appearance sections are hidden, and a lone card parked in
+                the left half of a two-column grid is what the pre-login
+                network screen used to look like; after signing in it sits on
+                its own row below the appearance and language pair, which is
+                the only arrangement of four cards that leaves none of them
+                stranded beside an empty cell.
 
                 `whitespace-normal` on every bordered option label in this
                 form, because DaisyUI's `.label` sets `white-space: nowrap`:
                 a description that cannot wrap defines the label's minimum
                 width, and through it the fieldset's (`min-inline-size:
                 min-content`) and the grid track's -- which is how the proxy
-                fields used to overflow the card's right edge.
+                fields used to overflow the card's right edge. A German
+                compound noun is a single word that cannot wrap at all, so the
+                German catalog says "Adresse des Konfigurationsskripts" rather
+                than gluing it into one token.
               -->
-              <section id="settingsConnectionSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl">
+              <section id="settingsConnectionSection" class="card border border-base-content/10 bg-base-100/75 shadow-xl backdrop-blur-xl lg:col-span-2">
                 <div class="card-body gap-5 p-5 sm:p-6">
                   <div>
-                    <h2 class="card-title text-lg">Conexão</h2>
-                    <p class="mt-1 text-sm text-base-content/60">Configure uma rota de proxy para a conexão com o Broccoli.</p>
+                    <h2 class="card-title text-lg" data-i18n="settings.connection.title">Connection</h2>
+                    <p class="mt-1 text-sm text-base-content/60" data-i18n="settings.connection.hint">Configure a proxy route for the connection to Broccoli.</p>
                   </div>
                   <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                     <input id="proxyEnabled" class="toggle toggle-primary" type="checkbox" data-testid="proxy-toggle" />
-                    <span class="min-w-0"><span class="block font-medium">Usar proxy</span><span class="block text-xs text-base-content/60">Rotear a conexão com o Broccoli através de um proxy.</span></span>
+                    <span class="min-w-0"><span class="block font-medium" data-i18n="settings.proxy.enabled.title">Use a proxy</span><span class="block text-xs text-base-content/60" data-i18n="settings.proxy.enabled.hint">Route the connection to Broccoli through a proxy.</span></span>
                   </label>
                   <!--
                     Every input below points aria-labelledby at its own legend's
@@ -322,11 +379,12 @@
                     names the <fieldset> it belongs to, not a sibling <input>,
                     so without this the accessible name falls through to
                     `placeholder` and these fields announce as
-                    "proxy.broccoli.local", "8080", "usuario-local" and "Deixe
-                    em branco para manter a senha salva" instead of their
-                    visible labels. Naming them from the legend keeps the
-                    accessible name identical to the visible text (WCAG 2.5.3)
-                    rather than merely overlapping it.
+                    "proxy.broccoli.local", "8080", "local-user" and "Leave
+                    blank to keep the saved password" instead of their visible
+                    labels. Naming them from the legend keeps the accessible
+                    name identical to the visible text (WCAG 2.5.3) rather than
+                    merely overlapping it -- and, since one key feeds both,
+                    keeps it identical in all three languages.
                   -->
                   <div id="proxyFields" class="hidden grid gap-3 border-t border-base-content/10 pt-4">
                     <!--
@@ -335,14 +393,14 @@
                       caveat above applies to a <legend> standing in for a
                       sibling <input>'s name, which is not the shape here.
                     -->
-                    <fieldset class="grid min-w-0 gap-3" aria-label="Forma de configuração do proxy">
+                    <fieldset class="grid min-w-0 gap-3" data-i18n-attr="aria-label:settings.proxy.mode.groupLabel" aria-label="How the proxy is configured">
                       <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                         <input id="proxyModeManual" class="radio radio-primary" type="radio" name="proxyMode" value="manual" data-testid="proxy-mode-manual" />
-                        <span class="min-w-0"><span class="block font-medium">Manual</span><span class="block text-xs text-base-content/60">Informe o endereço e a porta do proxy.</span></span>
+                        <span class="min-w-0"><span class="block font-medium" data-i18n="settings.proxy.mode.manual.title">Manual</span><span class="block text-xs text-base-content/60" data-i18n="settings.proxy.mode.manual.hint">Enter the address and the port of the proxy.</span></span>
                       </label>
                       <label class="label cursor-pointer justify-start gap-3 whitespace-normal rounded-box border border-base-content/10 bg-base-200/40 p-4">
                         <input id="proxyModeScript" class="radio radio-primary" type="radio" name="proxyMode" value="script" data-testid="proxy-mode-script" />
-                        <span class="min-w-0"><span class="block font-medium">Script automático</span><span class="block text-xs text-base-content/60">O Windows lê o script e escolhe o proxy para cada destino.</span></span>
+                        <span class="min-w-0"><span class="block font-medium" data-i18n="settings.proxy.mode.script.title">Automatic script</span><span class="block text-xs text-base-content/60" data-i18n="settings.proxy.mode.script.hint">Windows reads the script and picks the proxy for each destination.</span></span>
                       </label>
                     </fieldset>
                     <!--
@@ -353,32 +411,32 @@
                     -->
                     <div id="proxyManualFields" class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                       <fieldset class="fieldset min-w-0">
-                        <legend id="proxyHostLegend" class="fieldset-legend text-xs">Endereço</legend>
+                        <legend id="proxyHostLegend" class="fieldset-legend text-xs" data-i18n="settings.proxy.host.label">Address</legend>
                         <input id="proxyHost" class="input w-full" type="text" placeholder="proxy.broccoli.local" aria-labelledby="proxyHostLegend" />
                       </fieldset>
                       <fieldset class="fieldset min-w-0">
-                        <legend id="proxyPortLegend" class="fieldset-legend text-xs">Porta</legend>
+                        <legend id="proxyPortLegend" class="fieldset-legend text-xs" data-i18n="settings.proxy.port.label">Port</legend>
                         <input id="proxyPort" class="input w-full" type="text" inputmode="numeric" placeholder="8080" aria-labelledby="proxyPortLegend" />
                       </fieldset>
                     </div>
                     <div id="proxyScriptFields" class="hidden grid gap-3">
                       <fieldset class="fieldset min-w-0">
-                        <legend id="proxyScriptUrlLegend" class="fieldset-legend text-xs">Endereço do script</legend>
-                        <input id="proxyScriptUrl" class="input w-full" type="text" placeholder="http://exemplo.local/proxy.pac" autocomplete="off" data-testid="proxy-script-url" aria-labelledby="proxyScriptUrlLegend" aria-describedby="proxyScriptUrlHelp" />
-                        <p id="proxyScriptUrlHelp" class="fieldset-label leading-snug">O mesmo endereço que o Windows usa em Rede e Internet &gt; Proxy &gt; Usar script de instalação. O script decide o proxy por destino, então conexões internas podem sair direto.</p>
+                        <legend id="proxyScriptUrlLegend" class="fieldset-legend text-xs" data-i18n="settings.proxy.scriptUrl.label">Script address</legend>
+                        <input id="proxyScriptUrl" class="input w-full" type="text" placeholder="http://example.local/proxy.pac" autocomplete="off" data-testid="proxy-script-url" aria-labelledby="proxyScriptUrlLegend" aria-describedby="proxyScriptUrlHelp" />
+                        <p id="proxyScriptUrlHelp" class="fieldset-label leading-snug" data-i18n="settings.proxy.scriptUrl.help">The same address Windows uses under Network &amp; Internet &gt; Proxy &gt; Use setup script. The script decides the proxy per destination, so internal connections can go out directly.</p>
                       </fieldset>
                     </div>
                     <fieldset class="fieldset min-w-0">
-                      <legend id="proxyUsernameLegend" class="fieldset-legend text-xs">Usuário</legend>
-                      <input id="proxyUsername" class="input w-full" type="text" placeholder="usuario-local" autocomplete="off" aria-labelledby="proxyUsernameLegend" />
+                      <legend id="proxyUsernameLegend" class="fieldset-legend text-xs" data-i18n="settings.proxy.username.label">Username</legend>
+                      <input id="proxyUsername" class="input w-full" type="text" placeholder="local-user" data-i18n-attr="placeholder:settings.proxy.username.placeholder" autocomplete="off" aria-labelledby="proxyUsernameLegend" />
                     </fieldset>
                     <fieldset class="fieldset min-w-0">
-                      <legend id="proxyPasswordLegend" class="fieldset-legend text-xs">Senha</legend>
-                      <input id="proxyPassword" class="input w-full" type="password" placeholder="Deixe em branco para manter a senha salva" autocomplete="new-password" data-testid="proxy-password" aria-labelledby="proxyPasswordLegend" aria-describedby="proxyPasswordHelp" />
-                      <p id="proxyPasswordHelp" class="fieldset-label leading-snug">A senha é salva no Gerenciador de Credenciais do Windows e nunca é exibida aqui novamente. "Testar conexão" usa apenas o que estiver preenchido aqui, então digite a senha de novo para testar um proxy que a exija.</p>
+                      <legend id="proxyPasswordLegend" class="fieldset-legend text-xs" data-i18n="settings.proxy.password.label">Password</legend>
+                      <input id="proxyPassword" class="input w-full" type="password" placeholder="Leave blank to keep the saved password" data-i18n-attr="placeholder:settings.proxy.password.placeholder" autocomplete="new-password" data-testid="proxy-password" aria-labelledby="proxyPasswordLegend" aria-describedby="proxyPasswordHelp" />
+                      <p id="proxyPasswordHelp" class="fieldset-label leading-snug" data-i18n="settings.proxy.password.help">The password is saved in the Windows Credential Manager and is never shown here again. "Test connection" uses only what is filled in here, so type the password again to test a proxy that requires one.</p>
                     </fieldset>
                     <div class="flex flex-wrap items-center gap-3 border-t border-base-content/10 pt-4">
-                      <button id="proxyTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-proxy">Testar conexão</button>
+                      <button id="proxyTestButton" class="btn btn-outline btn-sm" type="button" data-testid="test-proxy" data-i18n="settings.proxy.test">Test connection</button>
                       <p id="proxyTestStatus" class="text-xs text-base-content/60" role="status"></p>
                     </div>
                   </div>
@@ -386,8 +444,8 @@
               </section>
 
               <div class="flex flex-wrap items-center justify-end gap-3 lg:col-span-2">
-                <button id="resetSettingsButton" class="btn btn-ghost" type="button">Restaurar padrões</button>
-                <button class="btn btn-primary" type="submit" data-testid="save-settings">Salvar configurações</button>
+                <button id="resetSettingsButton" class="btn btn-ghost" type="button" data-i18n="settings.reset">Restore defaults</button>
+                <button class="btn btn-primary" type="submit" data-testid="save-settings" data-i18n="settings.save">Save settings</button>
               </div>
             </form>
           </main>
@@ -405,11 +463,11 @@
               out of the document outline and send focus to the first button
               instead.
             -->
-            <h1 class="sr-only">Transcrição</h1>
+            <h1 class="sr-only" data-i18n="capture.title">Transcript</h1>
 
             <div class="relative flex min-h-0 flex-1 flex-col">
               <div id="transcriptTimeline" class="transcript-surface px-1 sm:px-5" aria-live="polite" role="log" data-testid="transcript-timeline">
-                <p id="emptyTimeline" class="transcript-preview__empty">A transcrição aparecerá aqui.</p>
+                <p id="emptyTimeline" class="transcript-preview__empty" data-i18n="transcript.empty">The transcript will appear here.</p>
                 <!--
                   In-progress ASR deltas render here instead of directly in the
                   `role="log"` above: aria-live="off" means a screen reader does not
@@ -420,18 +478,18 @@
                 -->
                 <div id="transcriptProvisional" class="transcript-provisional" aria-live="off" data-testid="transcript-provisional"></div>
               </div>
-              <button id="jumpToLatestButton" class="btn btn-sm btn-circle absolute bottom-3 left-1/2 hidden -translate-x-1/2 shadow-lg" type="button" data-testid="jump-to-latest" aria-label="Ir para o fim da transcrição" title="Ir para o fim">
+              <button id="jumpToLatestButton" class="btn btn-sm btn-circle absolute bottom-3 left-1/2 hidden -translate-x-1/2 shadow-lg" type="button" data-testid="jump-to-latest" data-i18n-attr="aria-label:transcript.jumpToLatest.label;title:transcript.jumpToLatest.title" aria-label="Jump to the end of the transcript" title="Jump to the end">
                 <i class="bi bi-arrow-down" aria-hidden="true"></i>
               </button>
             </div>
 
             <div id="deviceRequired" class="alert alert-error mt-4 hidden items-start" role="alert">
               <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>
-              <span>Configure um microfone e o áudio do sistema antes de iniciar a captura.</span>
-              <button id="refreshDevicesButton" class="btn btn-sm" type="button">Abrir configurações</button>
+              <span data-i18n="capture.deviceRequired.message">Configure a microphone and the system audio before starting the capture.</span>
+              <button id="refreshDevicesButton" class="btn btn-sm" type="button" data-i18n="capture.deviceRequired.action">Open settings</button>
             </div>
 
-            <footer id="captureDock" class="capture-dock p-2 sm:p-3" data-capture-state="idle" role="group" aria-label="Controles da captura">
+            <footer id="captureDock" class="capture-dock p-2 sm:p-3" data-capture-state="idle" role="group" data-i18n-attr="aria-label:capture.dock.label" aria-label="Capture controls">
               <div class="capture-dock__sources">
                 <!--
                   One card per channel, each carrying everything that decides
@@ -441,53 +499,59 @@
                   that names the channel, and pairing the two is what makes a
                   muted card read as muted at a glance. `data-muted` is what the
                   stylesheet reads to turn the card red and grey the histogram.
+
+                  The mute buttons carry no data-i18n-attr: renderMuteControls
+                  owns their label, which names the action the button would
+                  take next rather than the channel.
                 -->
                 <div id="microphoneChannel" class="capture-channel" data-muted="false">
                   <div class="capture-channel__head">
-                    <button id="microphoneMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Silenciar microfone" title="Silenciar microfone" data-testid="mute-microphone">
+                    <button id="microphoneMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the microphone" title="Mute the microphone" data-testid="mute-microphone">
                       <i class="bi bi-mic" aria-hidden="true"></i>
                     </button>
                     <div class="capture-channel__titles">
-                      <p class="capture-channel__name">Microfone</p>
-                      <span id="microphoneStatusBadge" class="capture-channel__badge">Ativo</span>
+                      <p class="capture-channel__name" data-i18n="capture.channel.microphone">Microphone</p>
+                      <span id="microphoneStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
                     </div>
                   </div>
-                  <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" aria-label="Histograma do microfone"></canvas>
+                  <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" data-i18n-attr="aria-label:capture.histogram.microphone" aria-label="Microphone histogram"></canvas>
                   <!--
                     A visible label rather than the sr-only one this started
-                    with: two selects side by side, both reading "Detectar
-                    automaticamente", are indistinguishable without it. Named
+                    with: two selects side by side, both reading "Detect
+                    automatically", are indistinguishable without it. Named
                     through aria-labelledby for the reason spelled out at
                     #tokenInput -- the DaisyUI `label.select` wrapper is the
                     control's own chrome, not its name.
                   -->
-                  <p id="microphoneLanguageLabel" class="capture-channel__language-label">Idioma do microfone</p>
+                  <p id="microphoneLanguageLabel" class="capture-channel__language-label" data-i18n="capture.language.microphone">Microphone language</p>
                   <label class="select select-sm capture-channel__language">
                     <select id="microphoneLanguageSelect" aria-labelledby="microphoneLanguageLabel" data-testid="microphone-language">
-                      <option value="">Detectar automaticamente</option>
-                      <option value="pt">Português</option>
-                      <option value="en">Inglês</option>
+                      <option value="" data-i18n="capture.language.auto">Detect automatically</option>
+                      <option value="pt" data-i18n="language.pt">Portuguese</option>
+                      <option value="en" data-i18n="language.en">English</option>
+                      <option value="de" data-i18n="language.de">German</option>
                     </select>
                   </label>
                 </div>
 
                 <div id="systemChannel" class="capture-channel" data-muted="false">
                   <div class="capture-channel__head">
-                    <button id="systemMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Silenciar áudio do sistema" title="Silenciar áudio do sistema" data-testid="mute-system">
+                    <button id="systemMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the system audio" title="Mute the system audio" data-testid="mute-system">
                       <i class="bi bi-volume-up" aria-hidden="true"></i>
                     </button>
                     <div class="capture-channel__titles">
-                      <p class="capture-channel__name">Áudio do sistema</p>
-                      <span id="systemStatusBadge" class="capture-channel__badge">Ativo</span>
+                      <p class="capture-channel__name" data-i18n="capture.channel.system">System audio</p>
+                      <span id="systemStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
                     </div>
                   </div>
-                  <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" aria-label="Histograma do áudio do sistema"></canvas>
-                  <p id="systemLanguageLabel" class="capture-channel__language-label">Idioma do sistema</p>
+                  <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" data-i18n-attr="aria-label:capture.histogram.system" aria-label="System audio histogram"></canvas>
+                  <p id="systemLanguageLabel" class="capture-channel__language-label" data-i18n="capture.language.system">System audio language</p>
                   <label class="select select-sm capture-channel__language">
                     <select id="systemLanguageSelect" aria-labelledby="systemLanguageLabel" data-testid="system-language">
-                      <option value="">Detectar automaticamente</option>
-                      <option value="pt">Português</option>
-                      <option value="en">Inglês</option>
+                      <option value="" data-i18n="capture.language.auto">Detect automatically</option>
+                      <option value="pt" data-i18n="language.pt">Portuguese</option>
+                      <option value="en" data-i18n="language.en">English</option>
+                      <option value="de" data-i18n="language.de">German</option>
                     </select>
                   </label>
                 </div>
@@ -501,10 +565,10 @@
                   responding is indistinguishable from a broken one for someone
                   who cannot see it greyed out.
                 -->
-                <p id="captureScopeCaption" class="capture-dock__caption" role="status">Transcrever as duas fontes</p>
-                <button id="captureToggleButton" class="capture-dock__toggle btn btn-primary" type="button" data-testid="capture-toggle" title="Iniciar transcrição">
+                <p id="captureScopeCaption" class="capture-dock__caption" role="status" data-i18n="capture.scope.both">Transcribe both sources</p>
+                <button id="captureToggleButton" class="capture-dock__toggle btn btn-primary" type="button" data-testid="capture-toggle" title="Start transcription">
                   <i id="captureToggleIcon" class="bi bi-play-fill text-xl" aria-hidden="true"></i>
-                  <span id="captureToggleLabel">Iniciar transcrição</span>
+                  <span id="captureToggleLabel" data-i18n="capture.toggle.start">Start transcription</span>
                 </button>
               </div>
             </footer>
@@ -520,7 +584,7 @@
         screens off the window's horizontal center.
       -->
       <div id="appSidebar" class="drawer-side z-20">
-        <label for="drawer-toggle" aria-label="Fechar barra lateral" class="drawer-overlay"></label>
+        <label for="drawer-toggle" data-i18n-attr="aria-label:app.sidebar.close" aria-label="Close sidebar" class="drawer-overlay"></label>
         <nav class="flex h-screen w-64 flex-col overflow-y-auto bg-base-200 p-3 text-base-content">
           <div class="p-2 pb-3">
             <div class="flex items-center">
@@ -528,14 +592,14 @@
             </div>
             <div class="mt-3">
               <button id="newSessionButton" class="btn btn-primary w-full justify-start" type="button" data-testid="new-session">
-                <i class="bi bi-plus-lg" aria-hidden="true"></i>Nova sessão
+                <i class="bi bi-plus-lg" aria-hidden="true"></i><span data-i18n="sessions.new">New session</span>
               </button>
             </div>
           </div>
 
           <details id="sessionHistorySection" class="collapse mt-1 hidden min-h-0 flex-1" data-sidebar-section="history" open>
             <summary class="collapse-title mb-0.5 flex min-h-0 items-center justify-between rounded-lg px-3 py-0.5 text-base-content/60 hover:bg-base-300/35">
-              <span class="text-xs font-medium uppercase text-base-content/70">Sessões</span>
+              <span class="text-xs font-medium uppercase text-base-content/70" data-i18n="sessions.heading">Sessions</span>
               <i class="bi bi-chevron-down sidebar-section-chevron shrink-0 text-xs transition-transform duration-200" aria-hidden="true"></i>
             </summary>
             <!--
@@ -555,10 +619,10 @@
               <div class="sticky top-0 z-10 bg-base-200 pb-2">
                 <label class="input input-sm flex w-full items-center gap-2">
                   <i class="bi bi-search text-base-content/50" aria-hidden="true"></i>
-                  <input id="sessionSearchInput" type="search" class="grow" placeholder="Buscar sessões" autocomplete="off" aria-label="Buscar sessões" data-testid="session-search" />
+                  <input id="sessionSearchInput" type="search" class="grow" placeholder="Search sessions" data-i18n-attr="placeholder:sessions.search;aria-label:sessions.search" autocomplete="off" aria-label="Search sessions" data-testid="session-search" />
                 </label>
               </div>
-              <ul id="sessionLibrary" class="menu w-full flex-nowrap rounded-lg p-0" aria-label="Biblioteca de sessões" data-testid="session-library"></ul>
+              <ul id="sessionLibrary" class="menu w-full flex-nowrap rounded-lg p-0" data-i18n-attr="aria-label:sessions.libraryLabel" aria-label="Session library" data-testid="session-library"></ul>
               <!--
                 Sibling of the list, not a child: renderSessions replaces the
                 whole `ul` on every render and would take an inner sentinel --
@@ -574,12 +638,12 @@
             <ul class="menu rounded-lg">
               <li>
                 <button id="settingsButton" class="text-base-content/80 hover:text-base-content" type="button" data-testid="settings-button" aria-controls="settingsView">
-                  <i class="bi bi-gear" aria-hidden="true"></i>Configurações
+                  <i class="bi bi-gear" aria-hidden="true"></i><span data-i18n="settings.title">Settings</span>
                 </button>
               </li>
               <li>
                 <button id="logoutButton" class="text-base-content/80 hover:text-base-content" type="button">
-                  <i class="bi bi-box-arrow-right" aria-hidden="true"></i>Sair
+                  <i class="bi bi-box-arrow-right" aria-hidden="true"></i><span data-i18n="app.signOut">Sign out</span>
                 </button>
               </li>
             </ul>
@@ -594,5 +658,75 @@
       the same markup as the platform's base.html.
     -->
     <div id="notification" class="pointer-events-none fixed left-1/2 top-6 z-[1050] flex min-w-[300px] max-w-[90%] -translate-x-1/2 flex-col items-stretch gap-2" data-testid="notification-stack"></div>
+
+    <!--
+      Translates the markup above before the first paint, for the same reason
+      the theme is applied by an inline script in the <head>: app.js is
+      deferred, so a swap made there is one frame too late, and that frame
+      would be painted in the wrong language. The catalogs are already in the
+      document by this point -- _render_shell in api.py put all three at the
+      i18n-bootstrap marker -- so this reaches for nothing over the network.
+
+      It is also the only definition of `t` and `apply`: app.js reads them off
+      window.__I18N__ rather than declaring its own, so a key resolves the same
+      way wherever it is asked for.
+    -->
+    <script>
+      (function () {
+        var bundle = window.__I18N__ || { locale: "en", stored: null, catalogs: {} };
+        var missing = (window.__I18N_MISSING__ = window.__I18N_MISSING__ || []);
+        // Nothing was injected: this file was opened directly rather than
+        // served. Leave the markup exactly as it is -- it is written in
+        // English and pinned to en.json by a test, which is a readable
+        // document, where rewriting every node from an empty catalog would
+        // replace all of it with its own keys.
+        var translatable = Object.keys(bundle.catalogs || {}).length > 0;
+
+        function lookup(locale, key) {
+          var catalog = bundle.catalogs[locale];
+          var message = catalog && catalog.ui ? catalog.ui[key] : null;
+          return message || null;
+        }
+
+        // A miss is recorded rather than blanked: the key itself is a worse
+        // label than a translation but a far better one than an empty button,
+        // and window.__I18N_MISSING__ is what the visual gate asserts on.
+        bundle.t = function (key, params) {
+          if (!key) return "";
+          var message = lookup(bundle.locale, key) || lookup("en", key);
+          if (!message) {
+            if (missing.indexOf(key) === -1) missing.push(key);
+            return key;
+          }
+          if (!params) return message;
+          return message.replace(/\{(\w+)\}/g, function (whole, name) {
+            return Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : whole;
+          });
+        };
+
+        bundle.apply = function (root) {
+          if (!translatable) return;
+          var scope = root || document;
+          scope.querySelectorAll("[data-i18n]").forEach(function (node) {
+            node.textContent = bundle.t(node.getAttribute("data-i18n"));
+          });
+          // "attribute:key" pairs, semicolon separated -- one node can name a
+          // placeholder and an aria-label at once.
+          scope.querySelectorAll("[data-i18n-attr]").forEach(function (node) {
+            node
+              .getAttribute("data-i18n-attr")
+              .split(";")
+              .forEach(function (pair) {
+                var parts = pair.split(":");
+                if (parts.length !== 2) return;
+                node.setAttribute(parts[0].trim(), bundle.t(parts[1].trim()));
+              });
+          });
+        };
+
+        window.__I18N__ = bundle;
+        bundle.apply(document);
+      })();
+    </script>
   </body>
 </html>
