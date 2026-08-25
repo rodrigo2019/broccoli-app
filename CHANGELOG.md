@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The notification area's "Abrir o Broccoli Desktop" now opens the window.
+  Every route back to a hidden window ended in a call to PyWebView's `focus`,
+  which is a constructor flag rather than a method, so the click raised
+  `TypeError` and left the window where it was.
 - Transcription quality: audio reaching the transcription model no longer
   carries resampling artifacts. Each 20 ms capture block was converted in
   isolation, restarting the resampler's filter 50 times a second and smearing
@@ -33,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- One running copy per environment. A second launch no longer opens a second
+  window, a second tray icon, and a second capture competing for the same audio
+  device: it brings the window that is already running forward -- back from the
+  notification area, at the size it was left -- and exits. Production, `--dev`
+  and `--local` hold separate locks, so a checkout still opens beside an
+  installed build. The installer reads the same lock, and asks for the
+  application to be closed rather than writing over files it has open.
 - Proxy configuration through an automatic configuration script (PAC), alongside
   the existing manual host and port. Windows evaluates the script and chooses a
   proxy per destination; the settings screen arrives with the corporate script

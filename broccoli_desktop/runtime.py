@@ -21,6 +21,7 @@ from broccoli_desktop.branding import APPLICATION_ICON, apply_taskbar_identity
 from broccoli_desktop.capture import PyAudioCaptureBackend
 from broccoli_desktop.config import RuntimeConfig
 from broccoli_desktop.credentials import CredentialStore
+from broccoli_desktop.instance import InstanceGuardProtocol, SingleInstanceGuard
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.remote import HttpListeningRemote
 from broccoli_desktop.settings import LocalDeviceSettings, LocalProxySettings
@@ -135,7 +136,22 @@ class PyWebViewWindow:
         self._window.restore()
 
     def focus(self) -> None:
-        self._window.focus()
+        """Bring the window to the front of whatever is covering it.
+
+        Not ``self._window.focus()``: on PyWebView's Window, ``focus`` is a
+        constructor flag holding a bool, not a method, so that call raised
+        ``TypeError: 'bool' object is not callable`` -- taking the tray's "Abrir
+        o Broccoli Desktop" item and every other route back to the window down
+        with it, since show_window ends here.
+
+        ``show()`` is the backend's activation: the WinForms window answers it
+        with ``Show()`` followed by ``Activate()``, marshalled onto the UI
+        thread. On a window that is merely covered rather than hidden, the
+        ``Show()`` half is a no-op and the ``Activate()`` half is the whole
+        point -- and repeating it after the window-state changes above is what
+        makes the window arrive in front rather than behind.
+        """
+        self._window.show()
 
     def destroy(self) -> None:
         self._window.destroy()
@@ -470,17 +486,55 @@ def start_runtime(
     tray_factory: Callable[[DesktopRuntime], TrayProtocol] | None = None,
     dialog: DialogProtocol | None = None,
     webview_start: Callable[[], None] | None = None,
+    guard_factory: Callable[[RuntimeConfig], InstanceGuardProtocol] | None = None,
+) -> DesktopRuntime | None:
+    """Hold this environment's lock, or hand the launch to the copy that has it."""
+    runtime_dialog = dialog or WindowsDialog()
+    # Before the loopback port, the window, and the tray, so a launch that finds
+    # the lock taken costs none of them: it asks the copy holding it to come
+    # forward and leaves. Saying so out loud is the fallback, for a launch that
+    # cannot reach that copy either.
+    guard = (guard_factory or _create_instance_guard)(config)
+    if not guard.acquire():
+        if not guard.signal_existing():
+            runtime_dialog.show_error("O Broccoli Desktop já está em execução.")
+        guard.release()
+        return None
+    try:
+        return _start_the_only_runtime(
+            config,
+            guard,
+            server_factory=server_factory,
+            window_factory=window_factory,
+            tray_factory=tray_factory,
+            dialog=runtime_dialog,
+            webview_start=webview_start,
+        )
+    finally:
+        # Every way out below: a local service that never came up, a window that
+        # never opened, and the normal exit through the closed window.
+        guard.release()
+
+
+def _start_the_only_runtime(
+    config: RuntimeConfig,
+    guard: InstanceGuardProtocol,
+    *,
+    server_factory: Callable[[RuntimeConfig], LoopbackServerProtocol] | None,
+    window_factory: Callable[[str, str], WindowProtocol] | None,
+    tray_factory: Callable[[DesktopRuntime], TrayProtocol] | None,
+    dialog: DialogProtocol,
+    webview_start: Callable[[], None] | None,
 ) -> DesktopRuntime | None:
     """Start the loopback service before creating the no-binding native window."""
-    runtime_dialog = dialog or WindowsDialog()
     try:
         server = (server_factory or _create_production_server)(config)
     except RuntimeError:
-        runtime_dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
+        dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
         return None
     if not server.start():
         server.shutdown()
-        runtime_dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
+        dialog.show_error("O Broccoli Desktop não conseguiu iniciar o serviço local.")
         return None
 
     runtime: DesktopRuntime | None = None
@@ -491,18 +545,21 @@ def start_runtime(
         create_window = window_factory or _create_pywebview_window
         window = create_window("Broccoli Desktop", server.window_url)
         create_tray = tray_factory or _create_system_tray
-        tray = create_tray_placeholder(create_tray, runtime_dialog, server, window)
-        runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=runtime_dialog)
+        tray = create_tray_placeholder(create_tray, dialog, server, window)
+        runtime = DesktopRuntime(server=server, window=window, tray=tray, dialog=dialog)
         if hasattr(tray, "set_runtime"):
             tray.set_runtime(runtime)
         server.bind_window_mode(lambda maximized: runtime.set_window_mode(maximized=maximized))
         runtime.start()
+        # The same path the tray's "Abrir o Broccoli Desktop" item takes, so a
+        # window waiting in the notification area comes back the size it left at.
+        guard.watch(runtime.show_window)
     except Exception:
         if runtime is None:
             server.shutdown()
         else:
             runtime.shutdown()
-        runtime_dialog.show_error("O Broccoli Desktop não conseguiu abrir a janela.")
+        dialog.show_error("O Broccoli Desktop não conseguiu abrir a janela.")
         return None
 
     previous_interrupt_handler = _install_interrupt_handler(runtime)
@@ -592,6 +649,15 @@ def start_browser_only(
         return server
     finally:
         _stop_browser_only_server(server)
+
+
+def _create_instance_guard(config: RuntimeConfig) -> InstanceGuardProtocol:
+    """Lock this environment only.
+
+    ``start_browser_only`` deliberately builds no guard at all: it is the QA
+    bench, launched by hand at an explicit port with no window to bring forward.
+    """
+    return SingleInstanceGuard(config.environment)
 
 
 def _create_browser_only_server(config: RuntimeConfig, port: int) -> UvicornLoopbackServer:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from broccoli_desktop.instance import PRODUCTION_INSTANCE_NAME
+
 REPOSITORY_ROOT = Path(__file__).parent.parent
 
 
@@ -63,3 +65,13 @@ def test_the_build_script_verifies_before_it_hands_over_an_archive() -> None:
     build = REPOSITORY_ROOT.joinpath("scripts", "build-app.ps1").read_text()
 
     assert build.index("verify-package.ps1") < build.index("Move-Item")
+
+
+def test_the_installer_reads_the_lock_the_running_application_holds() -> None:
+    """Installing over a running copy overwrites files it still has open, and
+    uninstalling one leaves its executable behind. Inno Setup asks the user to
+    close the application instead -- but only for a mutex it knows the name of,
+    and only while that name is still the one the application takes."""
+    installer = REPOSITORY_ROOT.joinpath("installer", "BroccoliDesktop.iss").read_text()
+
+    assert f"AppMutex={PRODUCTION_INSTANCE_NAME}" in installer

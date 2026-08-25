@@ -19,6 +19,11 @@ OutputDir={#SourcePath}\..\dist\installer
 OutputBaseFilename=BroccoliDesktop-{#MyAppVersion}-setup
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Must match broccoli_desktop.instance.PRODUCTION_INSTANCE_NAME: the running
+; application holds a mutex under that name, and reading it here is what makes
+; setup and uninstall ask the user to close the application instead of writing
+; over files it still has open.
+AppMutex=Broccoli.BroccoliDesktop.production
 ; setup.exe is the first thing a user sees of the application, and the only
 ; file they download; without this it carries Inno Setup's own icon. The
 ; Start Menu and desktop shortcuts need no equivalent -- they inherit the icon

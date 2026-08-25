@@ -19,6 +19,7 @@ from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.branding import APPLICATION_ICON
 from broccoli_desktop.browser_only import print_window_url
 from broccoli_desktop.config import RuntimeConfig
+from broccoli_desktop.instance import SingleInstanceGuard, instance_name
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
     COMPACT_WINDOW_SIZE,
@@ -26,6 +27,7 @@ from broccoli_desktop.runtime import (
     PyWebViewWindow,
     UvicornLoopbackServer,
     _available_loopback_port,
+    _create_instance_guard,
     _create_pywebview_window,
     start_browser_only,
     start_runtime,
@@ -144,22 +146,27 @@ class FakeWebViewEvents:
 
 @dataclass
 class FakeNativeWindow:
-    """PyWebView-like fake that only destroys when its closing event permits it."""
+    """PyWebView-like fake that only destroys when its closing event permits it.
+
+    ``focus`` is an attribute rather than a method because that is what PyWebView
+    offers: a constructor flag. A fake that answered it as a method was how a
+    ``TypeError`` on every route back to the window survived this suite.
+    """
 
     hidden: bool = False
     destroyed: bool = False
+    shown: int = 0
+    focus: bool = True
     events: FakeWebViewEvents = field(default_factory=FakeWebViewEvents)
 
     def hide(self) -> None:
         self.hidden = True
 
     def show(self) -> None:
-        pass
+        self.shown += 1
+        self.hidden = False
 
     def restore(self) -> None:
-        pass
-
-    def focus(self) -> None:
         pass
 
     def destroy(self) -> None:
@@ -306,6 +313,30 @@ class FakeTray:
 
 
 @dataclass
+class FakeGuard:
+    """The single-instance lock, without a Windows kernel object behind it."""
+
+    owner: bool = True
+    can_signal: bool = True
+    signals: int = 0
+    releases: int = 0
+    activate: Any = None
+
+    def acquire(self) -> bool:
+        return self.owner
+
+    def signal_existing(self) -> bool:
+        self.signals += 1
+        return self.can_signal
+
+    def watch(self, on_activate: Any) -> None:
+        self.activate = on_activate
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+@dataclass
 class FakeDialog:
     answer: bool = True
     confirmations: int = 0
@@ -342,6 +373,20 @@ def fake_tray() -> FakeTray:
 @fixture
 def fake_dialog() -> FakeDialog:
     return FakeDialog()
+
+
+@fixture(autouse=True)
+def fake_guard(monkeypatch: Any) -> FakeGuard:
+    """No test may take the real single-instance lock.
+
+    It is a named Windows object shared with anything else signed in as this
+    user, so a developer with the application open would otherwise change what
+    the suite does -- every start_runtime below would take the second-launch
+    path and open nothing.
+    """
+    guard = FakeGuard()
+    monkeypatch.setattr("broccoli_desktop.runtime._create_instance_guard", lambda _config: guard)
+    return guard
 
 
 @fixture
@@ -990,6 +1035,115 @@ def test_window_start_failure_stops_the_loopback_server() -> None:
     assert dialog.errors == ["O Broccoli Desktop não conseguiu abrir a janela."]
 
 
+def test_a_second_launch_opens_nothing_and_hands_the_window_over(
+    fake_guard: FakeGuard, fake_dialog: FakeDialog
+) -> None:
+    """The point of the lock. A launch that does not hold it must not reach a
+    loopback port, a window, or a second tray icon: it asks the running copy to
+    come forward and leaves without a word."""
+    fake_guard.owner = False
+    created: list[str] = []
+
+    result = start_runtime(
+        RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+        server_factory=lambda _config: created.append("server") or FakeServer(),
+        window_factory=lambda _title, _url: created.append("window") or FakeWindow(),
+        tray_factory=lambda _runtime: FakeTray(),
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+
+    assert result is None
+    assert created == []
+    assert fake_guard.signals == 1
+    assert fake_guard.releases == 1
+    assert fake_dialog.errors == []
+
+
+def test_a_second_launch_that_cannot_reach_the_first_says_so(
+    fake_guard: FakeGuard, fake_dialog: FakeDialog
+) -> None:
+    """Exiting in silence is right only when the running window actually comes
+    forward. With no way to ask it, a user who double-clicked the shortcut would
+    otherwise be left watching nothing happen."""
+    fake_guard.owner = False
+    fake_guard.can_signal = False
+
+    result = start_runtime(
+        RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+        server_factory=lambda _config: FakeServer(),
+        window_factory=lambda _title, _url: FakeWindow(),
+        tray_factory=lambda _runtime: FakeTray(),
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+
+    assert result is None
+    assert fake_dialog.errors == ["O Broccoli Desktop já está em execução."]
+
+
+def test_a_later_launch_brings_the_running_window_forward(
+    fake_guard: FakeGuard, fake_window: FakeWindow, fake_server: FakeServer, fake_dialog: FakeDialog
+) -> None:
+    """What the second launch buys: the window returns from the notification
+    area the way the tray's own menu item returns it."""
+    start_runtime(
+        RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+        server_factory=lambda _config: fake_server,
+        window_factory=lambda _title, _url: fake_window,
+        tray_factory=lambda _runtime: FakeTray(),
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+    )
+    fake_window.shown = False
+    fake_window.focused = False
+
+    assert fake_guard.activate is not None
+    fake_guard.activate()
+
+    assert fake_window.shown is True
+    assert fake_window.focused is True
+
+
+def test_the_lock_is_released_on_every_way_out(fake_guard: FakeGuard) -> None:
+    """A lock still held by a process on its way out is a lock nobody can take:
+    the next launch would find an owner that no longer exists. Both failures end
+    the launch before the window loop, and neither may skip the release."""
+    releases: list[int] = []
+
+    def failing_window(_title: str, _url: str) -> FakeWindow:
+        raise RuntimeError("The native window could not be created.")
+
+    for server, window_factory in (
+        (FakeServer(healthy=False), lambda _title, _url: FakeWindow()),
+        (FakeServer(), failing_window),
+        (FakeServer(), lambda _title, _url: FakeWindow()),
+    ):
+        fake_guard.releases = 0
+        start_runtime(
+            RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+            server_factory=lambda _config, server=server: server,
+            window_factory=window_factory,
+            tray_factory=lambda _runtime: FakeTray(),
+            dialog=FakeDialog(),
+            webview_start=lambda: None,
+        )
+        releases.append(fake_guard.releases)
+
+    assert releases == [1, 1, 1]
+
+
+def test_the_lock_is_named_for_the_environment_being_started() -> None:
+    """Production, --dev and --local take separate locks, so a checkout keeps
+    opening beside the installed build."""
+    guard = _create_instance_guard(
+        RuntimeConfig(environment="development", server_url="http://127.0.0.1:8000")
+    )
+
+    assert isinstance(guard, SingleInstanceGuard)
+    assert guard.name == instance_name("development")
+
+
 def test_loopback_port_probe_retries_once_then_starts_cleanly(monkeypatch: Any) -> None:
     """A racy first reservation must not sink startup: one retry is enough."""
     attempts = 0
@@ -1078,6 +1232,38 @@ def test_visual_server_exposes_only_the_deterministic_browser_fixture() -> None:
     assert bootstrap["authenticated"] is True
     assert [device["device_id"] for device in bootstrap["devices"]] == ["mic-1", "system-1"]
     assert VISUAL_TEST_TOKEN not in str(bootstrap)
+
+
+def test_focus_reaches_the_only_activation_the_backend_offers() -> None:
+    """PyWebView's Window carries `focus` as a constructor flag, so calling it
+    raised TypeError and every route back to the window died there: the tray's
+    "Abrir o Broccoli Desktop" item, and now a second launch handing over. The
+    backend activates inside show() -- Show() then Activate() -- which is why
+    that is what this asks for."""
+    native = FakeNativeWindow(hidden=True)
+    window = PyWebViewWindow(native)
+
+    window.focus()
+
+    assert native.shown == 1
+    assert native.hidden is False
+
+
+def test_showing_a_hidden_window_ends_with_it_in_front(fake_tray: FakeTray) -> None:
+    """The whole sequence a tray click and a second launch both run: the window
+    returns, takes the size it was left at, and arrives in front."""
+    native = FakeNativeWindow(hidden=True)
+    runtime = DesktopRuntime(
+        server=FakeServer(controller=FakeSession()),
+        window=PyWebViewWindow(native),
+        tray=fake_tray,
+        dialog=FakeDialog(),
+    )
+
+    runtime.show_window()
+
+    assert native.hidden is False
+    assert native.shown == 2
 
 
 def test_compact_leaves_the_maximized_state_before_resizing() -> None:
