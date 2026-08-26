@@ -326,6 +326,11 @@ class DesktopSessionController:
                     started = await anext(iterator)
                     if not isinstance(started, SessionStarted):
                         raise RemoteProtocolError("Terminal stream did not resume the session.")
+                    logger.info(
+                        "[session] Remote session %s resumed for finalization; max_duration_s=%s",
+                        started.uuid_code,
+                        started.max_duration_s,
+                    )
                     self._stream = stream
                     self._recovery_stream = None
                     self._reader_task = asyncio.create_task(self._listen(iterator))
@@ -561,6 +566,14 @@ class DesktopSessionController:
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
                 raise RemoteProtocolError("Remote resumed an unexpected session.")
+            # The one place the server's cap is on record: a meeting that dies
+            # at a suspicious minute gets checked against this line instead of
+            # against guesses.
+            logger.info(
+                "[session] Remote session %s started; max_duration_s=%s",
+                started.uuid_code,
+                started.max_duration_s,
+            )
             previous_offset_ms, resumed_segment_count = await self._resume_state(
                 previous_session, resume_code
             )
@@ -798,6 +811,11 @@ class DesktopSessionController:
                         raise RemoteProtocolError("Remote stream did not start a session.")
                     if started.uuid_code != self._session_uuid:
                         raise RemoteProtocolError("Remote resumed an unexpected session.")
+                    logger.info(
+                        "[session] Remote session %s resumed after reconnect; max_duration_s=%s",
+                        started.uuid_code,
+                        started.max_duration_s,
+                    )
                     self._stream = stream
                     self._recovery_stream = None
                     # Detach the buffer before replaying it. The state is still

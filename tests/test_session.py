@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import threading
 
 import pytest
@@ -907,6 +908,25 @@ async def test_a_replay_interrupted_partway_re_enqueues_only_the_unsent_remainde
     assert first_attempt == offsets[:sends_before_failure]
     assert second_attempt == offsets[sends_before_failure:]
     assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_session_start_logs_the_remote_duration_limit(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The backend declares max_duration_s at every handshake and nothing read
+    it; one line per handshake is what lets a meeting that dies at a
+    suspicious minute be matched against the limit the server actually
+    imposed."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    with caplog.at_level(logging.INFO, logger="broccoli_desktop.session"):
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    assert any("max_duration_s=14400" in record.getMessage() for record in caplog.records)
 
     await controller.stop()
 
