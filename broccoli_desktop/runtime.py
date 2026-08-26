@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import secrets
 import signal
 import socket
@@ -30,6 +31,7 @@ from broccoli_desktop.settings import (
     LocalProxySettings,
     LocalUiSettings,
     UiSettingsStore,
+    _local_app_data_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,48 @@ HEALTH_PATH = "/health"
 COMPACT_WINDOW_SIZE = (1100, 600)
 STARTUP_TIMEOUT_SECONDS = 10
 CONSOLE_SHUTDOWN_JOIN_TIMEOUT_SECONDS = 0.25
+
+#: Beside the settings files under %LOCALAPPDATA%\Broccoli Desktop. Bounded by
+#: rotation to ~1 MB total, which is what makes an always-on sink safe.
+DIAGNOSTICS_LOG_FILENAME = "diagnostics.log"
+DIAGNOSTICS_LOG_MAX_BYTES = 512_000
+DIAGNOSTICS_LOG_BACKUPS = 1
+
+
+def _install_file_diagnostics() -> None:
+    """Attach a small rotating file handler to the package logger.
+
+    The packaged build is windowed: console.py points stdio at the null
+    device, uvicorn's dictConfig only configures its own loggers, and nothing
+    else installs a handler -- so every diagnostic in broccoli_desktop.*,
+    including the session counters and loop-stall warnings that exist to
+    explain a bad meeting after the fact, was invisible everywhere. Only
+    this package's hierarchy is attached; uvicorn's loggers do not propagate
+    here, so request lines and the capability token cannot reach the file.
+
+    Idempotent, bounded by rotation, and never allowed to fail startup: a
+    profile with no %LOCALAPPDATA% or an unwritable directory costs the log,
+    not the launch.
+    """
+    try:
+        target = logging.getLogger(__package__)
+        if any(
+            isinstance(handler, logging.handlers.RotatingFileHandler) for handler in target.handlers
+        ):
+            return
+        path = _local_app_data_path(DIAGNOSTICS_LOG_FILENAME)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path,
+            maxBytes=DIAGNOSTICS_LOG_MAX_BYTES,
+            backupCount=DIAGNOSTICS_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        target.addHandler(handler)
+        target.setLevel(logging.INFO)
+    except Exception:
+        pass
 
 
 class WindowProtocol(Protocol):
@@ -504,11 +548,14 @@ def start_runtime(
     ui_settings: UiSettingsStore | None = None,
 ) -> DesktopRuntime | None:
     """Hold this environment's lock, or hand the launch to the copy that has it."""
-    # First of everything, because the very next thing that can happen is an
-    # error dialog: the "already running" message below is shown before there
-    # is a loopback service, so the chosen language has to be readable without
-    # one. The same store instance then reaches Services, so a language saved
-    # through the API is the one this translator reads next.
+    # Before everything, so whatever goes wrong from here on has somewhere to
+    # be recorded -- the windowed build has no other sink at all.
+    _install_file_diagnostics()
+    # First of the user-facing pieces, because the very next thing that can
+    # happen is an error dialog: the "already running" message below is shown
+    # before there is a loopback service, so the chosen language has to be
+    # readable without one. The same store instance then reaches Services, so
+    # a language saved through the API is the one this translator reads next.
     locale_settings = ui_settings or LocalUiSettings()
     translator = Translator(locale_settings)
     runtime_dialog = dialog or WindowsDialog(translator)

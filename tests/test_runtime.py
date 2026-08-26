@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import logging.handlers
+import pathlib
 import signal
 import socket
 import sys
@@ -15,6 +18,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 from pytest import fixture, raises
 
+import broccoli_desktop.runtime as runtime_module
 from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.branding import APPLICATION_ICON
 from broccoli_desktop.browser_only import print_window_url
@@ -24,12 +28,14 @@ from broccoli_desktop.instance import SingleInstanceGuard, instance_name
 from broccoli_desktop.models import ConnectionState
 from broccoli_desktop.runtime import (
     COMPACT_WINDOW_SIZE,
+    DIAGNOSTICS_LOG_FILENAME,
     DesktopRuntime,
     PyWebViewWindow,
     UvicornLoopbackServer,
     _available_loopback_port,
     _create_instance_guard,
     _create_pywebview_window,
+    _install_file_diagnostics,
     start_browser_only,
     start_runtime,
 )
@@ -40,6 +46,15 @@ from tests.fakes import (
     visual_test_remote_factory,
 )
 from tests.visual_server import VISUAL_CAPABILITY_TOKEN, create_visual_app
+
+
+@fixture(autouse=True)
+def keep_diagnostics_off_the_real_profile(monkeypatch: Any) -> None:
+    """Every start_runtime below would otherwise attach a real rotating-file
+    handler under %LOCALAPPDATA% and leave it on the package logger for the
+    rest of the process. The sink has its own test, against a temporary
+    path."""
+    monkeypatch.setattr(runtime_module, "_install_file_diagnostics", lambda: None)
 
 
 @dataclass
@@ -1410,3 +1425,47 @@ def test_showing_a_window_ignores_the_restore_it_performs_itself() -> None:
     runtime.show_window()
 
     assert window.calls == ["restore", "expand", "focus"]
+
+
+def test_file_diagnostics_logging_is_bounded_idempotent_and_failure_tolerant(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """The packaged build routes stdio to the null device, so without a file
+    sink every diagnostic in broccoli_desktop.* is invisible. The sink must
+    cap its own growth, attach once, and never take startup down."""
+    target = logging.getLogger("broccoli_desktop")
+    before = list(target.handlers)
+    previous_level = target.level
+    monkeypatch.setattr(
+        runtime_module, "_local_app_data_path", lambda filename: tmp_path / filename
+    )
+    try:
+        # The module-level import binds the real function before the autouse
+        # fixture replaces the module attribute for every other test here.
+        _install_file_diagnostics()
+        _install_file_diagnostics()
+
+        added = [handler for handler in target.handlers if handler not in before]
+        assert len(added) == 1
+        handler = added[0]
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        assert handler.maxBytes == 512_000
+        assert handler.backupCount == 1
+        log_path = tmp_path / DIAGNOSTICS_LOG_FILENAME
+        assert pathlib.Path(handler.baseFilename) == log_path
+
+        logging.getLogger("broccoli_desktop.session").info("probe line")
+        handler.flush()
+        assert "probe line" in log_path.read_text(encoding="utf-8")
+    finally:
+        for handler in [entry for entry in target.handlers if entry not in before]:
+            target.removeHandler(handler)
+            handler.close()
+        target.setLevel(previous_level)
+
+    def unavailable(_filename: str) -> pathlib.Path:
+        raise RuntimeError("Local application data is unavailable.")
+
+    monkeypatch.setattr(runtime_module, "_local_app_data_path", unavailable)
+    _install_file_diagnostics()
+    assert [handler for handler in target.handlers if handler not in before] == []
