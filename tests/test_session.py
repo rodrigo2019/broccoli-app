@@ -911,6 +911,65 @@ async def test_a_replay_interrupted_partway_re_enqueues_only_the_unsent_remainde
     await controller.stop()
 
 
+@pytest.mark.asyncio
+async def test_stop_during_reconnect_retires_the_previous_reader(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """stop()'s terminal handover used to overwrite _reader_task while the
+    reader-driven recovery it belonged to was still parked in the backoff
+    sleep; _cancel_tasks then saw only the new handle, and the old task ran
+    on, orphaned and held only weakly, for the life of the process."""
+    clock = BlockingClock()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await fake_remote.emit_failure()
+    await clock.entered.wait()
+    old_reader = controller._reader_task
+    assert old_reader is not None and not old_reader.done()
+
+    await controller.stop()
+
+    assert old_reader.done()
+
+
+@pytest.mark.asyncio
+async def test_recovery_starts_the_next_reader_only_after_the_previous_one_exits(
+    fake_clock: FakeClock, fake_capture: FakeCaptureBackend
+) -> None:
+    """A sender-driven recovery replaces a reader that is still parked on the
+    dead stream's iterator; the replacement must wait for that reader to
+    unwind so two readers never run against one controller."""
+    fake_remote = FakeSessionRemote(fail_send_stream_indexes={0})
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    transitions: list[str] = []
+    original_listen = controller._listen
+
+    async def recording_listen(iterator: object) -> None:
+        transitions.append("enter")
+        try:
+            await original_listen(iterator)  # type: ignore[arg-type]
+        finally:
+            transitions.append("exit")
+
+    controller._listen = recording_listen  # type: ignore[method-assign]
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await capture_frames(controller, 1)
+    for _ in range(2_000):
+        if controller.state is ConnectionState.STREAMING and len(fake_remote.streams) == 2:
+            break
+        await asyncio.sleep(0)
+    assert controller.state is ConnectionState.STREAMING
+
+    depth = 0
+    for transition in transitions:
+        depth += 1 if transition == "enter" else -1
+        assert depth <= 1, f"two readers were alive at once: {transitions}"
+
+    await controller.stop()
+
+
 # Two hops in flight: _handle_device_loss's capture teardown and settle's own.
 @pytest.mark.parametrize("default_executor_workers", [4])
 @pytest.mark.asyncio

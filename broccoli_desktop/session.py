@@ -73,6 +73,13 @@ AUDIO_QUEUE_MAX_FRAMES = MAX_BUFFERED_FRAMES
 STOP_FINALIZE_TIMEOUT_SECONDS = 20.0
 STOP_DRAIN_TIMEOUT_SECONDS = 0.5
 
+#: How long a superseded transcript reader gets to acknowledge cancellation
+#: before its replacement stops waiting for it. Short: the reader parks on a
+#: dead socket's iterator or a backoff sleep, both of which take a cancel
+#: immediately; the bound only keeps a reader that somehow ignores one from
+#: hanging recovery or stop().
+READER_RETIRE_TIMEOUT_SECONDS = 2.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -306,6 +313,12 @@ class DesktopSessionController:
                     await asyncio.gather(sender, return_exceptions=True)
 
             if self.state is ConnectionState.RECONNECTING:
+                # The reader that drove this run into RECONNECTING is still
+                # parked in its backoff sleep or on the dead socket; retire it
+                # before the terminal reader takes the handle, or it runs on
+                # orphaned where _cancel_tasks can no longer see it.
+                await self._retire_reader(self._reader_task)
+                self._reader_task = None
                 await self._close_stream(stream)
                 stream = await self._connect_terminal_stream()
                 if stream is not None:
@@ -859,13 +872,11 @@ class DesktopSessionController:
                             self.enqueue_audio_frames(pending)
                     await self._send_pending_flushes(stream)
                     self._set_state(ConnectionState.STREAMING, session=self._session)
-                    # Cancel before overwriting: a reader left over from the
+                    # Retire before overwriting: a reader left over from the
                     # connection that just failed would otherwise keep running
                     # unreferenced against a closed stream, and _cancel_tasks
                     # only ever sees the handle stored here.
-                    previous_reader = self._reader_task
-                    if previous_reader is not None and not previous_reader.done():
-                        previous_reader.cancel()
+                    await self._retire_reader(self._reader_task)
                     self._reader_task = asyncio.create_task(self._listen(iterator))
                     return
                 except RemoteUnauthorizedError:
@@ -1109,6 +1120,32 @@ class DesktopSessionController:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    async def _retire_reader(self, reader: asyncio.Task[None] | None) -> None:
+        """Cancel a superseded transcript reader and briefly wait for it to end.
+
+        Overwriting ``_reader_task`` while the old task still runs orphans it:
+        ``_cancel_tasks`` only ever sees the handle stored there, so the old
+        reader kept running -- parked on a dead socket or a backoff sleep --
+        held only by the loop's weak reference, one per reconnect.
+
+        Skips the current task: reader-driven recovery runs inside the very
+        task being replaced, and that task exits on its own right after this
+        returns -- the same rule ``_cancel_tasks`` follows. Bounded, so a
+        reader that ignores cancellation cannot hang recovery or stop(); it is
+        then handed a callback that retrieves its eventual outcome so nothing
+        is reported as never retrieved.
+        """
+        if reader is None or reader.done() or reader is asyncio.current_task():
+            return
+        reader.cancel()
+        done, still_pending = await asyncio.wait({reader}, timeout=READER_RETIRE_TIMEOUT_SECONDS)
+        for task in done:
+            if not task.cancelled():
+                task.exception()
+        if still_pending:
+            logger.warning("[session] A superseded transcript reader ignored cancellation")
+            reader.add_done_callback(lambda task: task.cancelled() or task.exception())
 
     async def _cancel_tasks(self) -> None:
         """Cancel everything this controller started and wait for it to finish.
