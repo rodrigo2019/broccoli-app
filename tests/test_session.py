@@ -617,6 +617,84 @@ async def test_a_new_run_reports_its_own_reconnect_trim(
 
 
 @pytest.mark.asyncio
+async def test_a_monotonic_frame_enqueue_appends_without_resorting_the_buffer(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """The RECONNECTING path hands frames over one at a time, so a full
+    re-sort per frame is quadratic over the buffer -- enough sustained work
+    on the event loop to stall the keepalive and the UI socket during a long
+    meeting's reconnect. In-order arrivals must append without sorting."""
+
+    class SortCountingList(list):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sorts = 0
+
+        def sort(self, *args: object, **kwargs: object) -> None:
+            self.sorts += 1
+            super().sort(*args, **kwargs)  # type: ignore[arg-type]
+
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    counting = SortCountingList()
+    controller._buffered_frames = counting
+
+    for index in range(1_000):
+        controller.enqueue_audio_frames([frame_at(index)])
+
+    offsets = [frame.offset_ms for frame in controller._buffered_frames]
+    assert offsets == sorted(offsets)
+    assert counting.sorts == 0
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_out_of_order_frame_lands_in_offset_order_and_ties_keep_arrival_order(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    first_at_300 = AudioFrame("mic", 300, b"\x00\x01")
+    second_at_300 = AudioFrame("system", 300, b"\x00\x03")
+
+    controller.enqueue_audio_frames([first_at_300])
+    controller.enqueue_audio_frames([AudioFrame("system", 100, b"\x00\x02")])
+    controller.enqueue_audio_frames([second_at_300])
+
+    assert [frame.offset_ms for frame in controller._buffered_frames] == [100, 300, 300]
+    assert controller._buffered_frames[1] is first_at_300
+    assert controller._buffered_frames[2] is second_at_300
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_trimming_after_a_bulk_requeue_still_drops_the_oldest_offsets(
+    fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """A failed replay's ``finally`` re-enqueues an older remainder after newer
+    frames have already buffered; the positional trim must still drop the
+    lowest offsets, not whichever frames happen to sit at the front."""
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    for index in range(10):
+        controller.enqueue_audio_frames(
+            [AudioFrame("mic", (MAX_BUFFERED_FRAMES + index) * FRAME_DURATION_MS, b"\x00\x00")]
+        )
+
+    controller.enqueue_audio_frames(make_frames(milliseconds=MAX_BUFFERED_AUDIO_MS))
+
+    offsets = [frame.offset_ms for frame in controller._buffered_frames]
+    assert len(offsets) == MAX_BUFFERED_FRAMES
+    assert offsets == sorted(offsets)
+    assert offsets[0] == 10 * FRAME_DURATION_MS
+    assert offsets[-1] == (MAX_BUFFERED_FRAMES + 9) * FRAME_DURATION_MS
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_reopens_with_the_current_session_and_replays_buffered_frames_in_order(
     fake_clock: FakeClock, fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

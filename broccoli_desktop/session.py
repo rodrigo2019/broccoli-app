@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from bisect import insort
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
@@ -441,16 +442,30 @@ class DesktopSessionController:
     def enqueue_audio_frames(self, frames: Iterable[AudioFrame]) -> None:
         """Keep a bounded, offset-ordered reconnect buffer of encoded frames.
 
+        Ordered by insertion, never by re-sorting: the RECONNECTING path hands
+        frames over one at a time, ~40 a second, and a full sort per frame over
+        a buffer this deep is minutes of accumulated event-loop stalls -- long
+        enough to miss keepalive pongs and turn one reconnect into a storm of
+        them. In-order arrivals (the overwhelming case) append in O(1); a
+        genuinely out-of-order frame is insorted after its equals, which is
+        the position the old stable sort gave it. Every consumer -- the
+        recovery replay, its ``finally`` re-enqueue, and stop()'s terminal
+        replay -- relies on the order this method maintains.
+
         A trim is audio the transcript will never get back, so the first one
         of each run is announced. Once per run, like the in-flight drop
         warning: the situation persisting is not news, and the counter keeps
         the full extent for diagnostics.
         """
-        self._buffered_frames.extend(frames)
-        self._buffered_frames.sort(key=lambda frame: frame.offset_ms)
-        excess = len(self._buffered_frames) - MAX_BUFFERED_FRAMES
+        buffered = self._buffered_frames
+        for frame in frames:
+            if not buffered or buffered[-1].offset_ms <= frame.offset_ms:
+                buffered.append(frame)
+            else:
+                insort(buffered, frame, key=lambda queued: queued.offset_ms)
+        excess = len(buffered) - MAX_BUFFERED_FRAMES
         if excess > 0:
-            del self._buffered_frames[:excess]
+            del buffered[:excess]
             self._trimmed_frames += excess
             if not self._reported_trimming:
                 self._reported_trimming = True
