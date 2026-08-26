@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from bisect import insort
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
@@ -79,6 +80,15 @@ STOP_DRAIN_TIMEOUT_SECONDS = 0.5
 #: immediately; the bound only keeps a reader that somehow ignores one from
 #: hanging recovery or stop().
 READER_RETIRE_TIMEOUT_SECONDS = 2.0
+
+#: The per-run health task's cadence: one wakeup per tick, one counters line
+#: per interval, a warning when a tick oversleeps by the threshold -- which is
+#: the signature of the event loop being held by compute or a blocking call.
+#: Cheap enough to always run while a capture is active. Module-level and read
+#: on every iteration, so a test can shrink them.
+DIAGNOSTICS_LOG_INTERVAL_SECONDS = 60.0
+LOOP_STALL_TICK_SECONDS = 1.0
+LOOP_STALL_THRESHOLD_SECONDS = 3.0
 
 logger = logging.getLogger(__name__)
 
@@ -688,7 +698,39 @@ class DesktopSessionController:
         # stream nobody owns any more.
         self._sender_task = self._track(asyncio.create_task(self._send_audio_forever()))
         self._reader_task = asyncio.create_task(self._listen(iterator))
+        # Tracked, so _cancel_tasks retires it with the run on stop and on the
+        # next open alike.
+        self._track(asyncio.create_task(self._watch_run_health()))
         return summary
+
+    async def _watch_run_health(self) -> None:
+        """Per-run flight recorder: counter lines on a timer, stall warnings.
+
+        The stop-time diagnostics line explains nothing about a session that
+        never reaches stop -- a frozen app least of all. One wakeup per tick
+        measures how late the loop ran it, which is the signature of the loop
+        being held; one INFO line per interval records the same counters stop
+        would have, while they still matter.
+
+        ``asyncio.sleep`` directly, never ``self._sleep``: the injected clock
+        belongs to the reconnect backoff, and its tests assert the exact
+        delays it records.
+        """
+        next_report = time.monotonic()
+        while True:
+            before = time.monotonic()
+            await asyncio.sleep(LOOP_STALL_TICK_SECONDS)
+            now = time.monotonic()
+            stall = now - before - LOOP_STALL_TICK_SECONDS
+            if stall >= LOOP_STALL_THRESHOLD_SECONDS:
+                logger.warning("[session] The event loop stalled for %.1f s", stall)
+            if now >= next_report:
+                next_report = now + DIAGNOSTICS_LOG_INTERVAL_SECONDS
+                logger.info(
+                    "[session] Audio diagnostics (state=%s): %s",
+                    self.state.value,
+                    self.audio_diagnostics,
+                )
 
     async def _listen(self, iterator: AsyncIterator[RemoteEvent]) -> None:
         try:

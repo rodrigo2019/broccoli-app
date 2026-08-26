@@ -913,6 +913,31 @@ async def test_a_replay_interrupted_partway_re_enqueues_only_the_unsent_remainde
 
 
 @pytest.mark.asyncio
+async def test_the_health_watchdog_logs_audio_diagnostics_periodically(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stop-time summary explains nothing about a session that never
+    reaches stop -- a frozen app least of all. The per-run health task is the
+    flight recorder: one counters line per interval while the capture lives,
+    and gone once the run ends."""
+    monkeypatch.setattr(broccoli_desktop.session, "DIAGNOSTICS_LOG_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(broccoli_desktop.session, "LOOP_STALL_TICK_SECONDS", 0.0)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    with caplog.at_level(logging.INFO, logger="broccoli_desktop.session"):
+        await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+        for _ in range(10):
+            await settle()
+
+    assert any("Audio diagnostics (state=" in record.getMessage() for record in caplog.records)
+
+    await controller.stop()
+    assert controller._tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_the_session_start_logs_the_remote_duration_limit(
     fake_remote: FakeSessionRemote,
     fake_capture: FakeCaptureBackend,
