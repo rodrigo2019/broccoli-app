@@ -236,7 +236,15 @@
   /* Same bubble the platform draws for the live transcript panel
      (chat/css/chat.css). The two surfaces show the same utterances, so they
      read the same; what the desktop adds on top is the speaker avatar and the
-     offset timestamp, which the side panel has no room for. */
+     offset timestamp, which the side panel has no room for.
+
+     content-visibility keeps off-screen rows out of layout and paint, so a
+     frame's cost tracks the viewport instead of the meeting's length -- the
+     document scroller grows for the whole session and every row stayed in
+     every frame without it. The intrinsic-size fallback approximates a
+     one-line row so the scrollbar stays honest; `auto` lets the engine
+     replace it with the real height once a row has been laid out, which is
+     what keeps scrolling back through history from jumping. */
   .transcript-preview__entry {
     display: flex;
     align-items: flex-start;
@@ -246,6 +254,8 @@
     border-radius: 0.8rem;
     background: var(--color-base-100);
     box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
+    content-visibility: auto;
+    contain-intrinsic-size: auto 4.5rem;
   }
 
   .transcript-preview__entry--provisional {
