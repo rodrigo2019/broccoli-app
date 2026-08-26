@@ -1897,6 +1897,76 @@ async def test_dropping_audio_tells_the_user_once_per_stall(
 
 
 @pytest.mark.asyncio
+async def test_a_full_audio_queue_drops_the_oldest_frames_and_keeps_the_live_edge(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping the newest kept a stalled queue's stale tail: when the socket
+    recovered, the transcript resumed minutes behind real time and stayed
+    there for the rest of the meeting. Evicting from the front keeps the live
+    edge, which is what this queue's docstring promised all along."""
+    monkeypatch.setattr(broccoli_desktop.session, "AUDIO_QUEUE_MAX_FRAMES", 8)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    stream.block_sends()
+
+    await capture_frames(controller, 30)
+
+    assert controller._dropped_frames == 22
+    warnings = [event for event in controller.events.snapshot() if event.type == "warning"]
+    assert [event.message for event in warnings] == ["notify.audio.dropping"]
+
+    assert stream.blocked is not None
+    stream.blocked.set()
+    await drain(stream, expected=8)
+    delivered = [decode_audio_frame(frame).offset_ms for frame in stream.frames]
+    assert delivered == [frame_at(index).offset_ms for index in range(22, 30)]
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_flush_marker_is_diverted_instead_of_lost(
+    fake_remote: FakeSessionRemote,
+    fake_capture: FakeCaptureBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mute boundary at the front of a stalled queue must survive eviction:
+    its channel sits in _pending_flush_channels until the marker is forwarded,
+    and _enqueue_flush refuses duplicates while it does, so a marker simply
+    thrown away suppresses that channel's flushes for the rest of the run."""
+    monkeypatch.setattr(broccoli_desktop.session, "AUDIO_QUEUE_MAX_FRAMES", 8)
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    stream = fake_remote.streams[-1]
+    stream.block_sends()
+    # Park the sender on a blocked send first, so the marker enqueued next
+    # stays at the head of the queue instead of being forwarded immediately.
+    controller._schedule_forward(frame_at(0))
+    await settle()
+    controller._enqueue_flush("mic", controller._run_generation)
+
+    await capture_frames(controller, 9)
+
+    assert "mic" in controller._pending_flush_channels
+    assert "mic" in controller._reconnect_flush_channels
+    assert controller._dropped_frames == 1
+
+    stale = broccoli_desktop.session._ChannelFlush(
+        channel="system", generation=controller._run_generation - 1
+    )
+    controller._pending_flush_channels.add("system")
+    controller._reconnect_flush_channels.add("system")
+    controller._divert_evicted_flush(stale)
+    assert "system" not in controller._pending_flush_channels
+    assert "system" not in controller._reconnect_flush_channels
+
+    await controller.stop()
+
+
+@pytest.mark.asyncio
 async def test_frames_reach_the_remote_in_offset_order(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:

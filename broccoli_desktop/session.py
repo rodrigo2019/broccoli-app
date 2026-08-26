@@ -1053,26 +1053,58 @@ class DesktopSessionController:
         """
         if generation != self._run_generation or self._muted[frame.channel]:
             return
-        if self._audio_queue.qsize() >= AUDIO_QUEUE_MAX_FRAMES:
-            self._record_dropped_frame()
-            return
-        while True:
+        # Evict from the front until the frame budget has room, then append.
+        # Head-first is what "dropping the oldest" means, and it is the drop
+        # that keeps the transcript live: shedding the newest instead kept a
+        # stalled queue's stale tail, so a recovered socket resumed minutes
+        # behind real time and stayed there for the rest of the meeting. The
+        # budget is checked against qsize rather than the queue's maxsize so
+        # the two slots reserved for the flush markers stay reserved. This
+        # runs as a loop callback, so nothing interleaves between the size
+        # check and the get -- the QueueEmpty guard is for a future caller
+        # that breaks that assumption, not for a case that exists today.
+        while self._audio_queue.qsize() >= AUDIO_QUEUE_MAX_FRAMES:
             try:
-                self._audio_queue.put_nowait(frame)
-                return
-            except asyncio.QueueFull:
-                try:
-                    self._audio_queue.get_nowait()
-                    self._audio_queue.task_done()
-                except asyncio.QueueEmpty:
-                    return
-                self._record_dropped_frame()
+                evicted = self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._audio_queue.task_done()
+            if isinstance(evicted, _ChannelFlush):
+                self._divert_evicted_flush(evicted)
+                continue
+            self._record_dropped_frame()
+        try:
+            self._audio_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            # Unreachable while the eviction above holds qsize below the
+            # marker reserve; kept so a maxsize change loses one frame loudly
+            # in the counter instead of raising into the loop's callback.
+            self._record_dropped_frame()
 
     def _record_dropped_frame(self) -> None:
         self._dropped_frames += 1
         if not self._reported_dropping:
             self._reported_dropping = True
             self.events.publish(UiEvent(type="warning", message="notify.audio.dropping"))
+
+    def _divert_evicted_flush(self, marker: _ChannelFlush) -> None:
+        """Reroute a mute boundary evicted by the frame budget; never drop it.
+
+        The marker's channel sits in _pending_flush_channels until the marker
+        is forwarded, and _enqueue_flush refuses duplicates while it does, so
+        a marker simply thrown away would suppress that channel's flushes for
+        the rest of the run. Diverting to the reconnect set is the same
+        degraded delivery _enqueue_flush already uses when the reserve slots
+        are gone: the flush reaches the backend at the next handover instead
+        of in line -- late, on a stream that is already dropping audio, but
+        never lost. A marker from a finished run gets the same send-off
+        _forward_flush gives one: both sets cleared, nothing delivered.
+        """
+        if marker.generation != self._run_generation:
+            self._pending_flush_channels.discard(marker.channel)
+            self._reconnect_flush_channels.discard(marker.channel)
+            return
+        self._reconnect_flush_channels.add(marker.channel)
 
     def _enqueue_flush(self, channel: Literal["mic", "system"], generation: int) -> None:
         if generation != self._run_generation or channel in self._pending_flush_channels:
