@@ -328,7 +328,7 @@ class Services:
 
         ``AudioLevelMonitor.stop`` also clears the capture flag, so a stream that
         closes after the capture took over the meter must leave it alone: doing
-        otherwise blanks the footer histogram of a live meeting.
+        otherwise blanks the footer signal meter of a live meeting.
         """
         if self.audio_levels.capture_active:
             return

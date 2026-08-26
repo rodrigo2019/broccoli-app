@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The capture footer is one compact line per source: name, state and language
+  sit beside the channel icon, and a phone-style signal meter inside the icon
+  replaces the scrolling histogram. The dock takes roughly half its former
+  height, returning the space to the transcript.
 - Capture devices open at their own shared-mode mix format instead of a forced
   48 kHz mono. Endpoints at other rates (44.1 kHz interfaces, Bluetooth
   headsets) previously failed to open or passed through an extra OS

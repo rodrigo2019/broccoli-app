@@ -42,8 +42,6 @@
     "capture.deviceRequired.action": "Einstellungen öffnen",
     "capture.deviceRequired.message": "Richten Sie Mikrofon und Systemton ein, bevor die Aufnahme startet.",
     "capture.dock.label": "Steuerung der Aufnahme",
-    "capture.histogram.microphone": "Histogramm des Mikrofons",
-    "capture.histogram.system": "Histogramm des Systemtons",
     "capture.language.auto": "Automatisch erkennen",
     "capture.language.locked": "Aufnahme beenden, um die Sprache zu wechseln",
     "capture.language.microphone": "Sprache des Mikrofons",

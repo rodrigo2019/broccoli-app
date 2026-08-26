@@ -42,11 +42,29 @@ function Assert-NoAccessibilityViolations {
     }
 }
 
-function Get-PaintedHistogramPixels {
+function Get-ChannelLayoutViolation {
+    # Worst horizontal violation, in px, across both channel cards: a row
+    # member (mute square, titles, language column, or the select itself)
+    # spilling past its card's edges, or two row members drawn over each
+    # other. Zero-ish when the row is clean -- this is what catches a
+    # squeezed dock rendering the language select on top of the channel name.
     return [int](Invoke-Browser -BrowserArguments @(
         "eval",
-        "(() => { const canvas = document.getElementById('microphoneHistogram'); const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let painted = 0; for (let index = 3; index < pixels.length; index += 4) { if (pixels[index] > 0) painted += 1; } return painted; })()"
+        "(() => { let worst = 0; for (const id of ['microphoneChannel', 'systemChannel']) { const card = document.getElementById(id); const cardBox = card.getBoundingClientRect(); const members = ['.capture-channel__mute', '.capture-channel__titles', '.capture-channel__language-group'].map((cls) => card.querySelector(cls).getBoundingClientRect()); const edges = members.concat([card.querySelector('.capture-channel__language').getBoundingClientRect()]); for (const box of edges) { worst = Math.max(worst, Math.round(cardBox.left - box.left), Math.round(box.right - cardBox.right)); } for (let i = 0; i + 1 < members.length; i += 1) { worst = Math.max(worst, Math.round(members[i].right - members[i + 1].left)); } } return worst; })()"
     ) | ConvertFrom-Json)
+}
+
+function Get-SignalBarState {
+    param([Parameter(Mandatory = $true)][string]$ChannelId)
+
+    # Computed opacity, not the data-level attribute: a lit bar is one the
+    # stylesheet actually painted as lit, so a broken lit rule fails here even
+    # while the JS keeps writing the right level.
+    $state = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const bars = Array.from(document.querySelectorAll('#$ChannelId .capture-signal__bar')); const lit = bars.filter((bar) => Number(getComputedStyle(bar).opacity) > 0.85).length; return [bars.length, lit]; })()"
+    ) | ConvertFrom-Json
+    return @($state)
 }
 
 function Get-SessionRowCount {
@@ -327,6 +345,36 @@ try {
     ) | ConvertFrom-Json
     if ($removed -contains $true) {
         throw "A control that should have been removed is still in the shell: $($removed -join ',')"
+    }
+
+    # The dock is one line now: inside each channel the mute square and the
+    # language column share a row -- the stacked layout is what made the dock
+    # tower over the transcript. Centers, not tops: the pieces have different
+    # heights.
+    $dockRows = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "['microphoneChannel', 'systemChannel'].map((id) => { const channel = document.getElementById(id); const mute = channel.querySelector('.capture-channel__mute').getBoundingClientRect(); const language = channel.querySelector('.capture-channel__language-group').getBoundingClientRect(); return Math.round(Math.abs((mute.top + mute.height / 2) - (language.top + language.height / 2))); })"
+    ) | ConvertFrom-Json
+    $dockRows = @($dockRows)
+    if ([int]$dockRows[0] -gt 4 -or [int]$dockRows[1] -gt 4) {
+        throw "A capture channel stacks instead of laying out on one row (mute/language center offsets: $($dockRows[0])px, $($dockRows[1])px)."
+    }
+
+    $layoutViolation = Get-ChannelLayoutViolation
+    if ($layoutViolation -gt 1) {
+        throw "Channel card contents overlap or spill by ${layoutViolation}px at 1440px wide."
+    }
+
+    # Idle: each channel shows its five signal bars, none lit -- the meter
+    # only answers to a running capture.
+    foreach ($channelId in @("microphoneChannel", "systemChannel")) {
+        $signal = Get-SignalBarState -ChannelId $channelId
+        if ([int]$signal[0] -ne 5) {
+            throw "Expected five signal bars in $channelId, found $($signal[0])."
+        }
+        if ([int]$signal[1] -ne 0) {
+            throw "$($signal[1]) signal bar(s) lit in $channelId while no capture is running."
+        }
     }
 
     # Pinned first, then newest. The seeded history mixes timestamps with and
@@ -648,19 +696,20 @@ try {
         throw "The jump control appeared with no new transcript content behind it."
     }
 
-    # The histogram is a canvas now, so "did it render" is a question about
-    # pixels: a zero here means the size, the context or the theme colour the
-    # renderer reads back from the stylesheet went missing.
-    if ((Get-PaintedHistogramPixels) -le 0) {
-        throw "The capture histogram drew nothing while streaming."
-    }
+    # The signal meter replaced the histogram canvas: streaming has to light
+    # bars through the live monitor -> SSE -> meter path. The fake backend
+    # pumps a quiet microphone (0.04) next to a loud system source (0.5) --
+    # see tests/visual_server.py -- so the bands below also pin each channel
+    # to its own source: a swapped mapping reads loud where quiet belongs.
+    # Nothing lighting up means the meter is not wired to the level stream,
+    # the capture-state gate is stuck, or the lit style left the stylesheet.
+    $streamingLitBars = "(() => { const lit = (id) => Array.from(document.querySelectorAll('#' + id + ' .capture-signal__bar')).filter((bar) => Number(getComputedStyle(bar).opacity) > 0.85).length; const mic = lit('microphoneChannel'); const sys = lit('systemChannel'); return mic >= 1 && mic <= 3 && sys >= 4; })()"
+    Invoke-Browser -BrowserArguments @("wait", "--fn", $streamingLitBars)
 
-    # Reduced motion must not mean a dead histogram -- it means no frame loop.
+    # Reduced motion must not mean a dead meter -- it means no transitions.
     Invoke-Browser -BrowserArguments @("set", "media", "dark", "reduced-motion")
     Invoke-Browser -BrowserArguments @("snapshot", "-i")
-    if ((Get-PaintedHistogramPixels) -le 0) {
-        throw "The capture histogram went blank under reduced motion."
-    }
+    Invoke-Browser -BrowserArguments @("wait", "--fn", $streamingLitBars)
     Invoke-Browser -BrowserArguments @("set", "media", "dark")
 
     Assert-TranscriptClearsTheDock
@@ -680,6 +729,27 @@ try {
         throw "The session title collapsed to ${titleWidth}px at 375px wide."
     }
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-narrow.png"))
+
+    # The mid band -- a window narrower than the desktop run but wider than a
+    # phone -- is where the one-line cards first run out of room, and where a
+    # squeezed language column was once drawn over the channel name. The cards
+    # must reflow (auto-fit) rather than overdraw.
+    Invoke-Browser -BrowserArguments @("set", "viewport", "820", "900")
+    Assert-TranscriptClearsTheDock
+    $midViolation = Get-ChannelLayoutViolation
+    if ($midViolation -gt 1) {
+        throw "Channel card contents overlap or spill by ${midViolation}px at 820px wide."
+    }
+    # Side by side, not stacked: with the caption sr-only the transport is
+    # just the toggle, and this width has room for both channels on one row.
+    $midStack = [int](Invoke-Browser -BrowserArguments @(
+        "eval",
+        "(() => { const a = document.getElementById('microphoneChannel').getBoundingClientRect(); const b = document.getElementById('systemChannel').getBoundingClientRect(); return Math.round(Math.abs(a.top - b.top)); })()"
+    ) | ConvertFrom-Json)
+    if ($midStack -gt 2) {
+        throw "The channel cards stack at 820px wide (top offset ${midStack}px) instead of sitting side by side."
+    }
+    Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-mid.png"))
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
 
     Invoke-Browser -BrowserArguments @("find", "role", "button", "click", "--name", "Parar transcri$([char]0x00E7)$([char]0x00E3)o")

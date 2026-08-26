@@ -74,7 +74,13 @@ def create_visual_app(*, port: int, locale: str = "pt-BR"):
         devices=[
             DeviceDescriptor("mic-1", "Microphone One", "mic"),
             DeviceDescriptor("system-1", "Speakers", "system"),
-        ]
+        ],
+        # Steady levels, so the dock's signal meter has real excitation to
+        # show while the visual capture streams. Deliberately far apart:
+        # scripts/visual-check.ps1 asserts a quiet microphone next to a loud
+        # system source, which is what makes a swapped channel mapping
+        # observable rather than a coincidence both channels would hide.
+        pump_amplitude={"mic-1": 0.04, "system-1": 0.5},
     )
     return create_app(
         Services(

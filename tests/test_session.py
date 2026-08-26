@@ -360,7 +360,7 @@ async def test_unmuting_resumes_where_the_meeting_is_rather_than_where_it_stoppe
 
 
 @pytest.mark.asyncio
-async def test_a_muted_channel_meters_as_silence_so_the_histogram_shows_the_mute(
+async def test_a_muted_channel_meters_as_silence_so_the_signal_meter_shows_the_mute(
     fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
 ) -> None:
     levels: list[tuple[str, bytes]] = []

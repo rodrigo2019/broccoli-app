@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+import time
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from threading import Thread
 
 from keyring.errors import PasswordDeleteError
 
@@ -729,6 +731,13 @@ class FakeCaptureBackend:
     closed_sources: set[str] = field(default_factory=set)
     handles: dict[str, FakeCaptureHandle] = field(default_factory=dict)
     list_devices_calls: int = 0
+    #: Opt-in, visual server only: RMS amplitude (0..1) fed to every opened
+    #: source from a thread, the way real hardware delivers PCM. A mapping
+    #: gives each device id its own amplitude (devices it omits get no pump),
+    #: so a gate can tell the two channels apart by their levels. Unit tests
+    #: leave this None and script delivery with ``emit`` instead.
+    pump_amplitude: float | Mapping[str, float] | None = None
+    pump_interval_s: float = 0.05
 
     def list_devices(self) -> list[DeviceDescriptor]:
         self.list_devices_calls += 1
@@ -763,7 +772,36 @@ class FakeCaptureBackend:
             except Exception:
                 handle.close()
                 raise
+        if self.pump_amplitude is not None:
+            self._start_pump(handle)
         return handle
+
+    def _start_pump(self, handle: FakeCaptureHandle) -> None:
+        """Feed the handle one constant-valued 20 ms block per interval until closed.
+
+        The block's constant sample value is the RMS ``_pcm_level`` computes,
+        so the configured amplitude is exactly the level the monitor
+        publishes. Delivery is one 20 ms block every ``pump_interval_s`` --
+        slower than real time, which the per-block level path does not mind --
+        and the capture pipeline downstream absorbs the blocks like any real
+        PCM.
+        """
+        amplitude = (
+            self.pump_amplitude.get(handle.device_id)
+            if isinstance(self.pump_amplitude, Mapping)
+            else self.pump_amplitude
+        )
+        if not amplitude:
+            return
+        sample = int(max(0.0, min(1.0, amplitude)) * 32_767)
+        block = sample.to_bytes(2, "little") * 960
+
+        def run() -> None:
+            while not handle.closed:
+                handle.emit(block)
+                time.sleep(self.pump_interval_s)
+
+        Thread(target=run, daemon=True, name=f"fake-pcm-pump-{handle.device_id}").start()
 
 
 @dataclass

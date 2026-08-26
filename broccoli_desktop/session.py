@@ -1019,8 +1019,8 @@ class DesktopSessionController:
 
         A muted channel reports a silent block of the same length rather
         than nothing at all: reporting nothing would leave the meter holding
-        its last reading until it decayed, and a mute the histogram does not
-        show is a mute the user cannot trust.
+        its last reading until it decayed, and a mute the signal meter does
+        not show is a mute the user cannot trust.
         """
         report = self._on_audio_level
         if report is None:

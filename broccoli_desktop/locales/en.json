@@ -42,8 +42,6 @@
     "capture.deviceRequired.action": "Open settings",
     "capture.deviceRequired.message": "Configure a microphone and the system audio before starting the capture.",
     "capture.dock.label": "Capture controls",
-    "capture.histogram.microphone": "Microphone histogram",
-    "capture.histogram.system": "System audio histogram",
     "capture.language.auto": "Detect automatically",
     "capture.language.locked": "Stop the capture to change the language",
     "capture.language.microphone": "Microphone language",

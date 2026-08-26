@@ -492,83 +492,112 @@
             <footer id="captureDock" class="capture-dock p-2 sm:p-3" data-capture-state="idle" role="group" data-i18n-attr="aria-label:capture.dock.label" aria-label="Capture controls">
               <div class="capture-dock__sources">
                 <!--
-                  One card per channel, each carrying everything that decides
-                  what that channel contributes: whether it is being sent, what
-                  it sounds like, and which language it is transcribed in. The
-                  channel icon *is* the mute control -- it was already the thing
-                  that names the channel, and pairing the two is what makes a
-                  muted card read as muted at a glance. `data-muted` is what the
-                  stylesheet reads to turn the card red and grey the histogram.
+                  One card per channel, on a single line, carrying everything
+                  that decides what that channel contributes: whether it is
+                  being sent, whether signal is arriving, and which language it
+                  is transcribed in. The channel icon *is* the mute control --
+                  it was already the thing that names the channel, and pairing
+                  the two is what makes a muted card read as muted at a glance.
+                  `data-muted` is what the stylesheet reads to turn the card
+                  red.
+
+                  The bars under the icon are the level meter, phone-signal
+                  style: SignalMeter writes `data-level` and the stylesheet
+                  lights that many. Decoration to a screen reader -- the badge
+                  and the mute button's pressed state already tell the
+                  channel's story.
 
                   The mute buttons carry no data-i18n-attr: renderMuteControls
                   owns their label, which names the action the button would
                   take next rather than the channel.
                 -->
                 <div id="microphoneChannel" class="capture-channel" data-muted="false">
-                  <div class="capture-channel__head">
-                    <button id="microphoneMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the microphone" title="Mute the microphone" data-testid="mute-microphone">
-                      <i class="bi bi-mic" aria-hidden="true"></i>
-                    </button>
-                    <div class="capture-channel__titles">
-                      <p class="capture-channel__name" data-i18n="capture.channel.microphone">Microphone</p>
-                      <span id="microphoneStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
-                    </div>
+                  <button id="microphoneMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the microphone" title="Mute the microphone" data-testid="mute-microphone">
+                    <i class="bi bi-mic" aria-hidden="true"></i>
+                    <span id="microphoneSignal" class="capture-signal" data-level="0" aria-hidden="true">
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                    </span>
+                  </button>
+                  <div class="capture-channel__titles">
+                    <p class="capture-channel__name" data-i18n="capture.channel.microphone">Microphone</p>
+                    <span id="microphoneStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
                   </div>
-                  <canvas id="microphoneHistogram" class="capture-dock__histogram" role="img" data-i18n-attr="aria-label:capture.histogram.microphone" aria-label="Microphone histogram"></canvas>
                   <!--
-                    A visible label rather than the sr-only one this started
-                    with: two selects side by side, both reading "Detect
-                    automatically", are indistinguishable without it. Named
-                    through aria-labelledby for the reason spelled out at
-                    #tokenInput -- the DaisyUI `label.select` wrapper is the
-                    control's own chrome, not its name.
+                    The label is sr-only: on the one-line card each select sits
+                    right beside its channel's icon and name, which is what
+                    tells the two apart visually, and the visible caption was
+                    crowding the row. Assistive tech still needs the explicit
+                    name, so the label stays in the DOM and the select keeps
+                    naming itself through aria-labelledby -- the DaisyUI
+                    `label.select` wrapper is the control's own chrome, not
+                    its name (see #tokenInput).
                   -->
-                  <p id="microphoneLanguageLabel" class="capture-channel__language-label" data-i18n="capture.language.microphone">Microphone language</p>
-                  <label class="select select-sm capture-channel__language">
-                    <select id="microphoneLanguageSelect" aria-labelledby="microphoneLanguageLabel" data-testid="microphone-language">
-                      <option value="" data-i18n="capture.language.auto">Detect automatically</option>
-                      <option value="pt" data-i18n="language.pt">Portuguese</option>
-                      <option value="en" data-i18n="language.en">English</option>
-                      <option value="de" data-i18n="language.de">German</option>
-                    </select>
-                  </label>
+                  <div class="capture-channel__language-group">
+                    <p id="microphoneLanguageLabel" class="sr-only" data-i18n="capture.language.microphone">Microphone language</p>
+                    <label class="select select-sm capture-channel__language">
+                      <select id="microphoneLanguageSelect" aria-labelledby="microphoneLanguageLabel" data-testid="microphone-language">
+                        <option value="" data-i18n="capture.language.auto">Detect automatically</option>
+                        <option value="pt" data-i18n="language.pt">Portuguese</option>
+                        <option value="en" data-i18n="language.en">English</option>
+                        <option value="de" data-i18n="language.de">German</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
 
                 <div id="systemChannel" class="capture-channel" data-muted="false">
-                  <div class="capture-channel__head">
-                    <button id="systemMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the system audio" title="Mute the system audio" data-testid="mute-system">
-                      <i class="bi bi-volume-up" aria-hidden="true"></i>
-                    </button>
-                    <div class="capture-channel__titles">
-                      <p class="capture-channel__name" data-i18n="capture.channel.system">System audio</p>
-                      <span id="systemStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
-                    </div>
+                  <button id="systemMuteButton" class="capture-channel__mute" type="button" aria-pressed="false" aria-label="Mute the system audio" title="Mute the system audio" data-testid="mute-system">
+                    <i class="bi bi-volume-up" aria-hidden="true"></i>
+                    <span id="systemSignal" class="capture-signal" data-level="0" aria-hidden="true">
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                      <span class="capture-signal__bar"></span>
+                    </span>
+                  </button>
+                  <div class="capture-channel__titles">
+                    <p class="capture-channel__name" data-i18n="capture.channel.system">System audio</p>
+                    <span id="systemStatusBadge" class="capture-channel__badge" data-i18n="capture.channel.active">Active</span>
                   </div>
-                  <canvas id="systemHistogram" class="capture-dock__histogram capture-dock__histogram--system" role="img" data-i18n-attr="aria-label:capture.histogram.system" aria-label="System audio histogram"></canvas>
-                  <p id="systemLanguageLabel" class="capture-channel__language-label" data-i18n="capture.language.system">System audio language</p>
-                  <label class="select select-sm capture-channel__language">
-                    <select id="systemLanguageSelect" aria-labelledby="systemLanguageLabel" data-testid="system-language">
-                      <option value="" data-i18n="capture.language.auto">Detect automatically</option>
-                      <option value="pt" data-i18n="language.pt">Portuguese</option>
-                      <option value="en" data-i18n="language.en">English</option>
-                      <option value="de" data-i18n="language.de">German</option>
-                    </select>
-                  </label>
+                  <div class="capture-channel__language-group">
+                    <p id="systemLanguageLabel" class="sr-only" data-i18n="capture.language.system">System audio language</p>
+                    <label class="select select-sm capture-channel__language">
+                      <select id="systemLanguageSelect" aria-labelledby="systemLanguageLabel" data-testid="system-language">
+                        <option value="" data-i18n="capture.language.auto">Detect automatically</option>
+                        <option value="pt" data-i18n="language.pt">Portuguese</option>
+                        <option value="en" data-i18n="language.en">English</option>
+                        <option value="de" data-i18n="language.de">German</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
               </div>
 
               <div class="capture-dock__actions">
                 <!--
-                  role="status", because this line is also the explanation for a
+                  role="status", because this line is the explanation for a
                   disabled start button: with both channels muted there is
                   nothing to transcribe, and a button that simply stops
                   responding is indistinguishable from a broken one for someone
-                  who cannot see it greyed out.
+                  who cannot see it greyed out. sr-only: on screen the badges
+                  and the greyed button already tell that story, and the text
+                  was what kept the two channels from fitting side by side --
+                  the announcement is for assistive tech.
                 -->
-                <p id="captureScopeCaption" class="capture-dock__caption" role="status" data-i18n="capture.scope.both">Transcribe both sources</p>
+                <p id="captureScopeCaption" class="sr-only" role="status" data-i18n="capture.scope.both">Transcribe both sources</p>
+                <!--
+                  Icon-only on screen; the label span is sr-only so the button
+                  keeps its accessible name (and the visual gate keeps a text
+                  to read) while the caption beside it explains the scope.
+                -->
                 <button id="captureToggleButton" class="capture-dock__toggle btn btn-primary" type="button" data-testid="capture-toggle" title="Start transcription">
                   <i id="captureToggleIcon" class="bi bi-play-fill text-xl" aria-hidden="true"></i>
-                  <span id="captureToggleLabel" data-i18n="capture.toggle.start">Start transcription</span>
+                  <span id="captureToggleLabel" class="sr-only" data-i18n="capture.toggle.start">Start transcription</span>
                 </button>
               </div>
             </footer>

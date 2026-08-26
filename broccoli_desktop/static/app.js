@@ -153,8 +153,8 @@
     captureToggleIcon: document.querySelector("#captureToggleIcon"),
     captureToggleLabel: document.querySelector("#captureToggleLabel"),
     jumpToLatestButton: document.querySelector("#jumpToLatestButton"),
-    microphoneHistogram: document.querySelector("#microphoneHistogram"),
-    systemHistogram: document.querySelector("#systemHistogram"),
+    microphoneSignal: document.querySelector("#microphoneSignal"),
+    systemSignal: document.querySelector("#systemSignal"),
     transcriptTimeline: document.querySelector("#transcriptTimeline"),
     transcriptProvisional: document.querySelector("#transcriptProvisional"),
     drawerToggle: document.querySelector("#drawer-toggle"),
@@ -249,9 +249,6 @@
     document.documentElement.setAttribute("data-theme", resolved);
     if (elements.themeLightOption) elements.themeLightOption.checked = resolved === "light";
     if (elements.themeDarkOption) elements.themeDarkOption.checked = resolved === "dark";
-    // The histograms paint with colours resolved from CSS, so a theme change has
-    // to invalidate what they cached.
-    captureMotion?.refreshTheme();
   }
 
   function setTheme(theme) {
@@ -388,221 +385,72 @@
     elements.notification?.querySelectorAll(".alert").forEach(dismissNotification);
   }
 
-  // ------------------------------------------------------------------- capture motion
+  // ------------------------------------------------------------------- signal meter
 
-  const HISTOGRAM_CHANNELS = ["microphone", "system"];
-  const HISTOGRAM_BARS = 34;
-  // How much history one bar covers. Thirty-four bars at this rate is about a
-  // second and a half of sound on screen.
-  const HISTOGRAM_PUSH_MS = 45;
-  // Share of the remaining distance a bar closes each frame. Low enough to round
-  // off the twenty-hertz steps the level stream delivers, high enough that a
-  // sudden loud sound still reads as sudden.
-  const HISTOGRAM_EASE = 0.3;
-  const HISTOGRAM_ACTIVE_STATES = ["starting", "streaming", "reconnecting"];
-
-  function drawBar(context, x, y, width, height, radius) {
-    if (typeof context.roundRect === "function") {
-      context.beginPath();
-      context.roundRect(x, y, width, height, radius);
-      context.fill();
-      return;
-    }
-    context.fillRect(x, y, width, height);
-  }
+  const SIGNAL_CHANNELS = ["microphone", "system"];
+  const SIGNAL_BARS = 5;
+  // Share of the remaining distance the level closes per delivered snapshot.
+  // Low enough to round off the twenty-hertz steps the stream delivers, high
+  // enough that a sudden loud sound still reads as sudden.
+  const SIGNAL_EASE = 0.6;
+  const SIGNAL_ACTIVE_STATES = ["starting", "streaming", "reconnecting"];
 
   /**
-   * Paints the two channel histograms in the capture panel.
+   * Drives the two phone-style signal meters in the capture dock.
    *
-   * On a canvas rather than sixty DOM nodes: the level stream ticks about twenty
-   * times a second, and answering each tick by writing sixty CSS custom
-   * properties and restarting sixty transitions is a lot of style recalculation
-   * for a decoration. Here a frame is a couple of dozen fills.
+   * Five DOM bars per channel instead of the old scrolling canvas: the only
+   * question the dock answers is whether audio is being detected, so a
+   * signal-strength readout is the whole job. The level eases toward each
+   * delivered snapshot so the bars rise and fall instead of stepping, and the
+   * DOM is only touched when the lit count actually changes -- the stylesheet
+   * owns everything visual, including the fade between lit and unlit.
    *
-   * What makes the motion read as sound rather than as a bar chart being redrawn
-   * is that a bar eases toward the newest sample instead of stepping to it, and
-   * that the history scrolls on a clock of its own instead of on packet arrival.
-   *
-   * The loop only runs while there is something to show. Idle, stopped, hidden
-   * window, or a user who asked for less motion: no frames at all.
+   * No frame loop: the twenty-hertz level stream is the clock, and a channel
+   * with nothing to show simply stays at level zero.
    */
-  class CaptureMotion {
-    constructor({ microphoneHistogram, systemHistogram }) {
-      this.canvases = { microphone: microphoneHistogram, system: systemHistogram };
-      this.contexts = { microphone: null, system: null };
-      this.sizes = { microphone: { width: 0, height: 0 }, system: { width: 0, height: 0 } };
-      this.samples = { microphone: [], system: [] };
+  class SignalMeter {
+    constructor({ microphoneSignal, systemSignal }) {
+      this.meters = { microphone: microphoneSignal, system: systemSignal };
       this.levels = { microphone: 0, system: 0 };
-      this.targets = { microphone: 0, system: 0 };
-      this.colors = { microphone: "", system: "" };
       this.captureState = "idle";
       this.signalActive = false;
-      this.phase = 0;
-      this.frame = null;
-      this.lastFrameAt = 0;
-      this.sincePush = 0;
-      this.resizeObserver = null;
-      this.reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)") || null;
-    }
-
-    mount() {
-      for (const channel of HISTOGRAM_CHANNELS) {
-        const canvas = this.canvases[channel];
-        if (!canvas) continue;
-        this.contexts[channel] = canvas.getContext("2d");
-        this.samples[channel] = Array(HISTOGRAM_BARS).fill(0);
-      }
-      // Measured by an observer instead of read every frame: asking a canvas for
-      // its client size mid-frame forces a layout that the rest of the frame
-      // then waits on.
-      if ("ResizeObserver" in window) {
-        this.resizeObserver = new ResizeObserver(() => this.measure());
-        for (const canvas of Object.values(this.canvases)) {
-          if (canvas) this.resizeObserver.observe(canvas);
-        }
-      }
-      this.measure();
-      this.refreshTheme();
-      this.reducedMotion?.addEventListener?.("change", () => this.sync());
-      document.addEventListener("visibilitychange", () => this.sync());
-      this.paint();
-    }
-
-    measure() {
-      const ratio = window.devicePixelRatio || 1;
-      for (const channel of HISTOGRAM_CHANNELS) {
-        const canvas = this.canvases[channel];
-        if (!canvas) continue;
-        const width = Math.max(1, Math.floor(canvas.clientWidth));
-        const height = Math.max(1, Math.floor(canvas.clientHeight));
-        this.sizes[channel] = { width, height };
-        const deviceWidth = Math.floor(width * ratio);
-        const deviceHeight = Math.floor(height * ratio);
-        if (canvas.width !== deviceWidth || canvas.height !== deviceHeight) {
-          canvas.width = deviceWidth;
-          canvas.height = deviceHeight;
-        }
-        this.contexts[channel]?.setTransform(ratio, 0, 0, ratio, 0, 0);
-      }
-      this.paint();
-    }
-
-    /** Re-read the colour each channel inherits from the stylesheet. */
-    refreshTheme() {
-      for (const channel of HISTOGRAM_CHANNELS) {
-        const canvas = this.canvases[channel];
-        if (canvas) this.colors[channel] = window.getComputedStyle(canvas).color;
-      }
-      this.paint();
     }
 
     setState(connectionState) {
       this.captureState = connectionState;
-      this.sync();
+      this.render();
     }
 
     isActive() {
-      return HISTOGRAM_ACTIVE_STATES.includes(this.captureState);
+      return SIGNAL_ACTIVE_STATES.includes(this.captureState);
     }
 
     setLevels(snapshot = {}) {
       this.signalActive = Boolean(snapshot.active);
-      for (const channel of HISTOGRAM_CHANNELS) {
+      for (const channel of SIGNAL_CHANNELS) {
         const measurement = channel === "microphone" ? snapshot.microphone : snapshot.system;
-        this.targets[channel] = Math.max(0, Math.min(1, Number(measurement?.level) || 0));
+        const target = Math.max(0, Math.min(1, Number(measurement?.level) || 0));
+        this.levels[channel] += (target - this.levels[channel]) * SIGNAL_EASE;
       }
-      this.sync();
-      // With the animation off, the history still has to advance -- just once per
-      // delivered snapshot rather than once per frame.
-      if (this.frame === null) this.step(HISTOGRAM_PUSH_MS, { instant: true });
+      this.render();
     }
 
-    /** Start or stop the frame loop to match what there is to show. */
-    sync() {
-      const running = this.signalActive && this.isActive();
-      const animate = running && !document.hidden && !this.reducedMotion?.matches;
-      if (animate && this.frame === null) {
-        this.lastFrameAt = performance.now();
-        this.frame = window.requestAnimationFrame((now) => this.tick(now));
-        return;
-      }
-      if (!animate && this.frame !== null) {
-        window.cancelAnimationFrame(this.frame);
-        this.frame = null;
-        if (!running) this.settle();
-      }
-    }
-
-    tick(now) {
-      this.frame = null;
-      // Capped so a window that was hidden for a minute does not replay a minute
-      // of history in a single frame.
-      const elapsed = Math.min(now - this.lastFrameAt, 100);
-      this.lastFrameAt = now;
-      this.step(elapsed);
-      this.sync();
-    }
-
-    step(elapsed, { instant = false } = {}) {
+    render() {
       const active = this.signalActive && this.isActive();
-      for (const channel of HISTOGRAM_CHANNELS) {
-        const target = active ? this.targets[channel] : 0;
-        this.levels[channel] = instant
-          ? target
-          : this.levels[channel] + (target - this.levels[channel]) * HISTOGRAM_EASE;
-      }
-      this.phase += elapsed * 0.004;
-      this.sincePush += elapsed;
-      while (this.sincePush >= HISTOGRAM_PUSH_MS) {
-        this.sincePush -= HISTOGRAM_PUSH_MS;
-        for (const channel of HISTOGRAM_CHANNELS) {
-          const samples = this.samples[channel];
-          samples.push(this.levels[channel]);
-          if (samples.length > HISTOGRAM_BARS) samples.shift();
-        }
-      }
-      this.paint();
-    }
-
-    /** Drain the history so a stopped capture flattens instead of freezing. */
-    settle() {
-      for (const channel of HISTOGRAM_CHANNELS) {
-        this.levels[channel] = 0;
-        this.targets[channel] = 0;
-        this.samples[channel] = Array(HISTOGRAM_BARS).fill(0);
-      }
-      this.paint();
-    }
-
-    paint() {
-      for (const channel of HISTOGRAM_CHANNELS) {
-        const context = this.contexts[channel];
-        const { width, height } = this.sizes[channel];
-        if (!context || !width || !height) continue;
-        context.clearRect(0, 0, width, height);
-        context.fillStyle = this.colors[channel] || "currentColor";
-
-        const samples = this.samples[channel];
-        const slot = width / samples.length;
-        const barWidth = Math.max(1, slot * 0.62);
-        const radius = barWidth / 2;
-        const floor = Math.min(2, height);
-        samples.forEach((value, index) => {
-          const envelope = Math.min(1, Math.sqrt(Math.max(0, value)) * 1.6);
-          // A travelling wobble rather than a fixed comb: at a steady level the
-          // shape still moves, which is what keeps it from looking frozen.
-          const profile = 0.82 + 0.18 * Math.sin(index * 0.9 + this.phase);
-          const barHeight = Math.max(floor, envelope * height * profile);
-          context.globalAlpha = 0.4 + 0.6 * envelope;
-          drawBar(context, index * slot, height - barHeight, barWidth, barHeight, radius);
-        });
-        context.globalAlpha = 1;
+      for (const channel of SIGNAL_CHANNELS) {
+        const meter = this.meters[channel];
+        if (!meter) continue;
+        if (!active) this.levels[channel] = 0;
+        // The same square-root envelope the old histogram used, so a quiet
+        // voice still registers instead of hugging the bottom bar.
+        const envelope = Math.min(1, Math.sqrt(this.levels[channel]) * 1.6);
+        const lit = String(Math.round(envelope * SIGNAL_BARS));
+        if (meter.dataset.level !== lit) meter.dataset.level = lit;
       }
     }
   }
 
-  const captureMotion = new CaptureMotion(elements);
-  captureMotion.mount();
+  const signalMeter = new SignalMeter(elements);
   applyTheme(state.theme);
 
   // ---------------------------------------------------------------- audio levels
@@ -707,7 +555,7 @@
 
   function handleAudioLevelSnapshot(levels) {
     if (!levels || typeof levels !== "object") return;
-    captureMotion.setLevels(levels);
+    signalMeter.setLevels(levels);
     if (!state.audioTestActive) return;
     if (!levels.active) {
       finishAudioTest("settings.audioTest.interrupted");
@@ -2053,7 +1901,7 @@
   const BADGE_TONES = ["badge-success", "badge-warning", "badge-error"];
 
   function isCaptureActive() {
-    return ["starting", "streaming", "reconnecting"].includes(state.connectionState);
+    return SIGNAL_ACTIVE_STATES.includes(state.connectionState);
   }
 
   const MUTE_CONTROLS = {
@@ -2061,6 +1909,7 @@
       channel: "microphoneChannel",
       button: "microphoneMuteButton",
       badge: "microphoneStatusBadge",
+      signal: "microphoneSignal",
       liveIcon: "mic",
       mutedIcon: "mic-mute-fill",
       mute: "capture.mute.microphone",
@@ -2070,6 +1919,7 @@
       channel: "systemChannel",
       button: "systemMuteButton",
       badge: "systemStatusBadge",
+      signal: "systemSignal",
       liveIcon: "volume-up",
       mutedIcon: "volume-mute-fill",
       mute: "capture.mute.system",
@@ -2086,16 +1936,17 @@
       button.setAttribute("aria-pressed", muted ? "true" : "false");
       button.setAttribute("aria-label", label);
       button.title = label;
-      button.replaceChildren(icon(muted ? control.mutedIcon : control.liveIcon));
+      // The signal meter lives inside the button, so it goes back in after
+      // the icon swap -- replaceChildren with the icon alone would tear the
+      // meter out of the DOM on the first mute render.
+      button.replaceChildren(
+        icon(muted ? control.mutedIcon : control.liveIcon),
+        elements[control.signal],
+      );
       elements[control.badge].textContent = t(
         muted ? "capture.channel.muted" : "capture.channel.active",
       );
     }
-    // The histogram's colour comes from the stylesheet, read back once and
-    // cached (see CaptureMotion.refreshTheme). Muting changes which rule
-    // applies, so the cache has to be invalidated or a muted channel would
-    // keep drawing in its live tint.
-    captureMotion?.refreshTheme();
   }
 
   // The language reaches the service in the handshake that opens the remote
@@ -2155,7 +2006,7 @@
     elements.captureToggleLabel.textContent = label;
     setIconName(elements.captureToggleIcon, active ? "stop-fill" : "play-fill");
     elements.captureScopeCaption.textContent = captureScopeText(active);
-    captureMotion.setState(state.connectionState);
+    signalMeter.setState(state.connectionState);
   }
 
   // What renderConnectionState last fired a toast for. A render happens far
