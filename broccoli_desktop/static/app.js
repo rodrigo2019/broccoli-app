@@ -2226,6 +2226,12 @@
    * pending frame is cancelled and re-scheduled rather than skipped, so the
    * write always targets the height as of the latest append.
    *
+   * The callback is deliberately read-free: the target is a huge offset the
+   * engine clamps to the real extent (CSSOM View), where reading
+   * `scrollHeight` here forced a synchronous layout of the whole document --
+   * a document that grows for the entire meeting -- once per animation frame
+   * while anyone was speaking.
+   *
    * `behavior: "auto"` is deliberate and comes from the platform, which notes
    * that "smooth" cannot keep up while a response streams.
    */
@@ -2234,7 +2240,7 @@
     if (transcriptScrollFrame !== null) window.cancelAnimationFrame(transcriptScrollFrame);
     transcriptScrollFrame = window.requestAnimationFrame(() => {
       transcriptScrollFrame = null;
-      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
+      window.scrollTo({ top: 2147483647, behavior: "auto" });
       if (force) setFollowTranscript(true);
     });
   }
