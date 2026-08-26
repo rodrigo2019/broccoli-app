@@ -792,13 +792,13 @@ class DesktopSessionController:
                     # task -- still running, because this recovery can be
                     # driven by the reader -- can dequeue a frame, take
                     # _forward_frame's RECONNECTING branch and call
-                    # enqueue_audio_frames, which extends, re-*sorts* and trims
-                    # the list. Mutating and re-sorting under a `for` cursor
-                    # skips and repeats elements, and the clear() that used to
-                    # follow discarded whatever had been appended during the
-                    # loop: frames left out of order and some never left at
-                    # all, with no counter and no warning -- the opposite of
-                    # the ordering-by-construction this buffer exists for.
+                    # enqueue_audio_frames, which inserts into and trims the
+                    # list. Mutating under a `for` cursor skips and repeats
+                    # elements, and the clear() that used to follow discarded
+                    # whatever had been appended during the loop: frames left
+                    # out of order and some never left at all, with no counter
+                    # and no warning -- the opposite of the
+                    # ordering-by-construction this buffer exists for.
                     #
                     # Draining until nothing new has arrived is what closes the
                     # handover without a gap. It terminates because each pass
@@ -819,12 +819,17 @@ class DesktopSessionController:
                     # cleared.
                     generation = self._buffer_generation
                     pending, self._buffered_frames = self._buffered_frames, []
+                    position = 0
                     try:
-                        while pending:
-                            # Dropped only once the send has returned: a frame
-                            # removed first and then failed to send is a frame
-                            # nobody replays.
-                            frame = pending[0]
+                        while position < len(pending):
+                            # Advanced only once the send has returned: a frame
+                            # counted first and then failed to send is a frame
+                            # nobody replays. A cursor rather than pop(0): the
+                            # front-pop shifted every remaining element on
+                            # every frame, and a full buffer paid that quadratic
+                            # bill -- millions of moves -- on the event loop,
+                            # mid-reconnect, when the loop is least affordable.
+                            frame = pending[position]
                             await stream.send_bytes(
                                 encode_audio_frame(
                                     channel=frame.channel,
@@ -832,20 +837,24 @@ class DesktopSessionController:
                                     pcm=frame.pcm,
                                 )
                             )
-                            pending.pop(0)
-                            if not pending:
+                            position += 1
+                            if position == len(pending):
                                 pending, self._buffered_frames = self._buffered_frames, []
+                                position = 0
                     finally:
                         # A replay that did not finish -- a send that failed
                         # partway through, a cancel -- puts what is left back
                         # so the next retry replays it, which is the behaviour
                         # the detached list would otherwise have thrown away.
-                        # enqueue_audio_frames re-sorts and re-trims, so this
-                        # merges correctly with anything that arrived while the
-                        # replay was running. Empty on the success path, and
-                        # skipped entirely once the buffer has been cleared out
-                        # from under this replay -- that clear is a decision,
-                        # not a gap to fill in.
+                        # The sent prefix is dropped in one slice first, so
+                        # only the frames the socket never took go back.
+                        # enqueue_audio_frames keeps the buffer ordered and
+                        # re-trims, so this merges correctly with anything that
+                        # arrived while the replay was running. Empty on the
+                        # success path, and skipped entirely once the buffer
+                        # has been cleared out from under this replay -- that
+                        # clear is a decision, not a gap to fill in.
+                        del pending[:position]
                         if pending and self._buffer_generation == generation:
                             self.enqueue_audio_frames(pending)
                     await self._send_pending_flushes(stream)

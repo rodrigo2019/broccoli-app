@@ -856,6 +856,61 @@ async def test_frames_arriving_mid_replay_neither_skip_nor_drop_buffered_audio(
     await controller.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_replay_interrupted_partway_re_enqueues_only_the_unsent_remainder(
+    fake_clock: FakeClock, fake_capture: FakeCaptureBackend
+) -> None:
+    """A send that fails mid-replay must hand the retry exactly the frames the
+    broken socket never took -- the in-flight one included -- with nothing
+    duplicated and nothing skipped."""
+    sends_before_failure = 3
+
+    class FailingStream:
+        def __init__(self, inner: FakeLiveRemoteStream) -> None:
+            self._inner = inner
+            self._sent = 0
+
+        async def send_bytes(self, frame: bytes) -> None:
+            if self._sent == sends_before_failure:
+                raise RemoteFailure("the socket broke mid-replay")
+            self._sent += 1
+            await self._inner.send_bytes(frame)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    class FailingRemote(FakeSessionRemote):
+        async def connect_stream(self, **kwargs: object) -> object:
+            stream = await super().connect_stream(**kwargs)  # type: ignore[arg-type]
+            # Only the first reconnect's stream fails; the live run before it
+            # and the retry after it behave.
+            return FailingStream(stream) if len(self.streams) == 2 else stream
+
+    fake_remote = FailingRemote()
+    controller = DesktopSessionController(fake_remote, fake_capture, clock=fake_clock)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    buffered = make_frames(milliseconds=1_000)
+    controller.enqueue_audio_frames(buffered)
+    offsets = [frame.offset_ms for frame in buffered]
+
+    await fake_remote.emit_failure()
+    for _ in range(2_000):
+        if (
+            len(fake_remote.streams) == 3
+            and len(fake_remote.streams[2].frames) == len(offsets) - sends_before_failure
+        ):
+            break
+        await asyncio.sleep(0)
+
+    first_attempt = [decode_audio_frame(f).offset_ms for f in fake_remote.streams[1].frames]
+    second_attempt = [decode_audio_frame(f).offset_ms for f in fake_remote.streams[2].frames]
+    assert first_attempt == offsets[:sends_before_failure]
+    assert second_attempt == offsets[sends_before_failure:]
+    assert controller.state is ConnectionState.STREAMING
+
+    await controller.stop()
+
+
 # Two hops in flight: _handle_device_loss's capture teardown and settle's own.
 @pytest.mark.parametrize("default_executor_workers", [4])
 @pytest.mark.asyncio
