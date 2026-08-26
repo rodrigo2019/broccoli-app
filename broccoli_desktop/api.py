@@ -30,6 +30,7 @@ from broccoli_desktop.capture import (
     DeviceUnavailableError,
 )
 from broccoli_desktop.credentials import CredentialStorageError
+from broccoli_desktop.events import UiEventOutbox
 from broccoli_desktop.i18n import (
     SUPPORTED_UI_LOCALES,
     all_catalogs,
@@ -1182,15 +1183,19 @@ def create_app(services: Services) -> FastAPI:
             await websocket.send_json(bootstrap)
             return
 
-        event_queue: asyncio.Queue[UiEvent] = asyncio.Queue()
+        # Bounded and coalescing where a plain queue grew without limit: a
+        # renderer that stops reading -- hidden window, busy main thread --
+        # otherwise retained every delta of the meeting here and got them all
+        # back as one burst when it recovered.
+        event_outbox = UiEventOutbox()
         loop = asyncio.get_running_loop()
 
         def subscriber(event: UiEvent) -> None:
-            loop.call_soon_threadsafe(event_queue.put_nowait, event)
+            loop.call_soon_threadsafe(event_outbox.put, event)
 
         controller.events.subscribe(subscriber)
         try:
-            await _send_events(websocket, event_queue, bootstrap=bootstrap)
+            await _send_events(websocket, event_outbox, bootstrap=bootstrap)
         except WebSocketDisconnect:
             pass
         finally:
@@ -1235,7 +1240,7 @@ def _render_shell(locale: str, stored: str | None) -> str:
 
 
 async def _send_events(
-    websocket: WebSocket, event_queue: asyncio.Queue[UiEvent], *, bootstrap: dict[str, object]
+    websocket: WebSocket, event_queue: UiEventOutbox, *, bootstrap: dict[str, object]
 ) -> None:
     """Forward queued UI events until the browser goes away.
 

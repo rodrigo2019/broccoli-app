@@ -34,12 +34,14 @@ from broccoli_desktop.api import (
 from broccoli_desktop.autoproxy import AutoProxyError, ResolvedProxy
 from broccoli_desktop.console import ensure_standard_streams
 from broccoli_desktop.credentials import CredentialStorageError, CredentialStore
+from broccoli_desktop.events import UiEventOutbox
 from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES, load_catalog
 from broccoli_desktop.models import (
     ConnectionState,
     SegmentPage,
     SessionPage,
     SessionSummary,
+    TranscriptDelta,
     TranscriptDiscard,
     TranscriptSegment,
     UiEvent,
@@ -3199,3 +3201,128 @@ def test_the_connection_test_probes_directly_when_the_script_says_direct(
 
     assert response.json() == {"ok": True, "script_error": False}
     assert prober.calls == [("https://backend.example", None)]
+
+
+def _delta_event(utterance_id: str, text: str) -> UiEvent:
+    return UiEvent(
+        type="delta",
+        delta=TranscriptDelta(
+            channel="mic", utterance_id=utterance_id, text=text, started_offset_ms=0
+        ),
+    )
+
+
+def _segment_event(utterance_id: str) -> UiEvent:
+    return UiEvent(
+        type="segment",
+        segment=TranscriptSegment(
+            utterance_id=utterance_id,
+            channel="mic",
+            text="done",
+            started_offset_ms=0,
+            ended_offset_ms=900,
+        ),
+    )
+
+
+async def _drain_outbox(outbox: UiEventOutbox, count: int) -> list[UiEvent]:
+    return [await outbox.get() for _ in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_coalesces_queued_deltas_per_utterance() -> None:
+    """A backlogged socket needs only the newest delta per utterance: each
+    delta wholly replaces the provisional row the previous one drew, so
+    superseded ones are dead weight that would arrive as a burst."""
+    outbox = UiEventOutbox()
+    outbox.put(_delta_event("mic:1", "first"))
+    outbox.put(_delta_event("mic:2", "other"))
+    outbox.put(_delta_event("mic:1", "second"))
+    outbox.put(_delta_event("mic:1", "third"))
+
+    drained = await _drain_outbox(outbox, 2)
+
+    assert [event.delta.text for event in drained if event.delta is not None] == [
+        "third",
+        "other",
+    ]
+    assert outbox.pending == 0
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_sends_a_delta_before_its_own_segment() -> None:
+    """The window clears a provisional row when its segment lands; a delta
+    arriving after its own segment would redraw one that never clears."""
+    outbox = UiEventOutbox()
+    outbox.put(_delta_event("mic:1", "almost"))
+    outbox.put(_segment_event("mic:1"))
+
+    drained = await _drain_outbox(outbox, 2)
+
+    assert [event.type for event in drained] == ["delta", "segment"]
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_drops_the_oldest_delta_first_when_over_its_bound() -> None:
+    outbox = UiEventOutbox(max_pending=3)
+    outbox.put(_delta_event("mic:1", "oldest"))
+    outbox.put(_delta_event("mic:2", "kept"))
+    outbox.put(_segment_event("mic:1"))
+    outbox.put(_segment_event("mic:2"))
+
+    drained = await _drain_outbox(outbox, 3)
+
+    assert [event.type for event in drained] == ["delta", "segment", "segment"]
+    assert drained[0].delta is not None and drained[0].delta.utterance_id == "mic:2"
+    assert outbox.dropped_deltas == 1
+    assert outbox.dropped_events == 0
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_never_drops_a_final_event_while_a_delta_remains() -> None:
+    outbox = UiEventOutbox(max_pending=2)
+    outbox.put(_delta_event("mic:1", "sacrificial"))
+    outbox.put(_segment_event("mic:1"))
+    outbox.put(_segment_event("mic:2"))
+
+    drained = await _drain_outbox(outbox, 2)
+
+    assert [event.segment.utterance_id for event in drained if event.segment is not None] == [
+        "mic:1",
+        "mic:2",
+    ]
+    assert outbox.dropped_deltas == 1
+    assert outbox.dropped_events == 0
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_warns_once_when_forced_to_drop_a_final_event() -> None:
+    """With no delta left to shed, the oldest event goes and the user is told
+    the transcript view may have gaps -- once, not once per drop, and the
+    warning itself can never rotate out of an overflowing queue."""
+    outbox = UiEventOutbox(max_pending=2)
+    for index in range(6):
+        outbox.put(_segment_event(f"mic:{index}"))
+
+    drained = await _drain_outbox(outbox, outbox.pending)
+
+    warnings = [event for event in drained if event.type == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0].message == "notify.transcript.mayBeIncomplete"
+    assert outbox.dropped_events == 4
+    assert [event.segment.utterance_id for event in drained if event.segment is not None] == [
+        "mic:4",
+        "mic:5",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_event_outbox_get_waits_until_an_event_arrives() -> None:
+    outbox = UiEventOutbox()
+    getter = asyncio.create_task(outbox.get())
+    await settle()
+    assert not getter.done()
+
+    outbox.put(_delta_event("mic:1", "finally"))
+
+    assert (await getter).type == "delta"
