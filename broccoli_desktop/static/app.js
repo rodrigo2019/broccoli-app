@@ -2261,6 +2261,28 @@
     elements.jumpToLatestButton.classList.remove("hidden");
   }
 
+  /** The (offset, channel, utterance) ordering key of a transcript row. */
+  function entrySortKey(row) {
+    return [
+      Number(row.dataset.startedOffsetMs || 0),
+      row.dataset.channel || "",
+      row.dataset.utteranceId || "",
+    ];
+  }
+
+  function entryKeyIsGreater(candidateKey, rowKey) {
+    if (candidateKey[0] !== rowKey[0]) return candidateKey[0] > rowKey[0];
+    if (candidateKey[1] !== rowKey[1]) return candidateKey[1].localeCompare(rowKey[1]) > 0;
+    return candidateKey[2].localeCompare(rowKey[2]) > 0;
+  }
+
+  function isFinalizedEntry(node) {
+    return (
+      node.classList.contains("transcript-preview__entry") &&
+      !node.classList.contains("transcript-preview__entry--provisional")
+    );
+  }
+
   /**
    * Append a finalized row directly into the `role="log"` region.
    *
@@ -2269,32 +2291,35 @@
    * pinned below every finalized row instead of finalized text landing under
    * it. `insertBefore` with a `null` reference falls back to appending, so
    * this is still safe if the provisional container is ever absent.
+   *
+   * The insertion point comes from walking *backwards* from the provisional
+   * container instead of scanning the whole timeline forwards: segments
+   * almost always arrive in ascending (offset, channel, utterance) order, so
+   * the walk inspects exactly one finalized row before stopping, where the
+   * forward scan visited every row on every append -- quadratic over a
+   * meeting, and the reason hour-long captures ground to a halt. The row
+   * lands after every row whose key is less than or equal to its own, which
+   * is the position the forward first-greater scan produced, ties included;
+   * the two walks agree because the timeline is offset-ordered by
+   * construction (this function and the page loader both insert in order).
+   * Non-entry children -- the load-more button, the loading block -- never
+   * become the insertion point, so they keep their places too.
    */
   function appendTimelineRow(row) {
     elements.transcriptTimeline.querySelector("#emptyTimeline")?.remove();
-    const rowKey = [
-      Number(row.dataset.startedOffsetMs || 0),
-      row.dataset.channel || "",
-      row.dataset.utteranceId || "",
-    ];
-    const nextRow = Array.from(
-      elements.transcriptTimeline.querySelectorAll(
-        ":scope > .transcript-preview__entry:not(.transcript-preview__entry--provisional)",
-      ),
-    ).find((candidate) => {
-      const candidateKey = [
-        Number(candidate.dataset.startedOffsetMs || 0),
-        candidate.dataset.channel || "",
-        candidate.dataset.utteranceId || "",
-      ];
-      if (candidateKey[0] !== rowKey[0]) return candidateKey[0] > rowKey[0];
-      if (candidateKey[1] !== rowKey[1]) return candidateKey[1].localeCompare(rowKey[1]) > 0;
-      return candidateKey[2].localeCompare(rowKey[2]) > 0;
-    });
-    elements.transcriptTimeline.insertBefore(
-      row,
-      nextRow || elements.transcriptProvisional || null,
-    );
+    const rowKey = entrySortKey(row);
+    let insertionPoint = elements.transcriptProvisional || null;
+    let candidate = insertionPoint
+      ? insertionPoint.previousElementSibling
+      : elements.transcriptTimeline.lastElementChild;
+    while (candidate) {
+      if (isFinalizedEntry(candidate)) {
+        if (!entryKeyIsGreater(entrySortKey(candidate), rowKey)) break;
+        insertionPoint = candidate;
+      }
+      candidate = candidate.previousElementSibling;
+    }
+    elements.transcriptTimeline.insertBefore(row, insertionPoint);
     noteTranscriptActivity();
     scrollTranscriptToLatest();
   }
