@@ -2461,7 +2461,14 @@
   }
 
   function openDeleteSession(session) {
-    if (session.is_live || !elements.deleteSessionModal) return;
+    // A live capture is a state the user can act on, so say so. Refusing in
+    // silence here is indistinguishable from a dead button -- which is exactly
+    // how it read while stopped sessions were still being reported as live.
+    if (session.is_live) {
+      showNotification(t("session.delete.blocked"), "warning");
+      return;
+    }
+    if (!elements.deleteSessionModal) return;
     state.deleteSession = session;
     elements.deleteSessionModal.showModal();
   }

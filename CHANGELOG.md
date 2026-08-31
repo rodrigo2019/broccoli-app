@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A startup splash screen. Opening the packaged application used to show
+  nothing at all until the window painted: the frozen build loads ~80 MB of
+  dependencies, PortAudio initializes, the loopback service is polled until it
+  answers, and WebView2 spawns its browser process, all of it before the window
+  is able to render a single pixel. The logo now appears immediately, floating,
+  over a counted status line -- `3/6 - Preparando o áudio...` -- that names each
+  step in the stored interface language and disappears the moment the window
+  has something to show.
+
 ### Fixed
 
 - The notification area's "Abrir o Broccoli Desktop" now opens the window.
@@ -24,6 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconnects longer than ten seconds no longer silently discard most of the
   audio captured while offline: the reconnect buffer now holds minutes, and
   when it does trim, the user is told.
+- A session that has stopped can be deleted again. The summary the controller
+  holds was created with `is_live` set and never rewritten, so every terminal
+  transition -- a client stop, a remote end, a failure, a lost device --
+  published its state with no session attached and left the history row
+  claiming to still be live. `is_live` is the only condition behind the delete
+  action, so the menu entry stayed disabled and the click did nothing at all,
+  for the rest of the window's life. Renaming or pinning the row put the stale
+  summary back even after a reload.
+- A session the backend refuses to continue now says so, instead of reporting
+  itself as an outage. The refusal arrives as a distinct answer and a message
+  naming what happened and what to do, so it can no longer be mistaken for the
+  service being down -- which is what sent users pressing play, over and over,
+  on a session that could never have resumed.
 
 ### Changed
 

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from pytest import fixture, raises
 
 import broccoli_desktop.runtime as runtime_module
+from broccoli_desktop import splash
 from broccoli_desktop.api import Services, create_app
 from broccoli_desktop.branding import APPLICATION_ICON
 from broccoli_desktop.browser_only import print_window_url
@@ -157,6 +158,7 @@ class FakeWindowEvent:
 class FakeWebViewEvents:
     closing: FakeClosingEvent = field(default_factory=FakeClosingEvent)
     shown: FakeWindowEvent = field(default_factory=FakeWindowEvent)
+    loaded: FakeWindowEvent = field(default_factory=FakeWindowEvent)
     maximized: FakeWindowEvent = field(default_factory=FakeWindowEvent)
     restored: FakeWindowEvent = field(default_factory=FakeWindowEvent)
 
@@ -1102,6 +1104,60 @@ def test_a_second_launch_that_cannot_reach_the_first_says_so(
     assert fake_dialog.errors == [translate("pt-BR", "native.error.alreadyRunning")]
 
 
+def test_a_launch_that_ends_early_takes_the_splash_down_before_it_says_so(
+    fake_guard: FakeGuard, fake_dialog: FakeDialog, monkeypatch: Any
+) -> None:
+    """Every early return in startup ends at a Windows dialog, and a splash
+    still counting up beside an error message is the shape of an application
+    that has hung rather than one that has stopped.
+
+    Recorded in order rather than merely counted: closing after the dialog is
+    the same bug as never closing at all, because MessageBoxW blocks until the
+    user clicks it.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(splash, "close", lambda: order.append("splash"))
+    monkeypatch.setattr(fake_dialog, "show_error", lambda message: order.append("dialog"))
+    fake_guard.owner = False
+    fake_guard.can_signal = False
+
+    start_runtime(
+        RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+        server_factory=lambda _config: FakeServer(),
+        window_factory=lambda _title, _url: FakeWindow(),
+        tray_factory=lambda _runtime: FakeTray(),
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+        ui_settings=InMemoryUiSettings("pt-BR"),
+    )
+
+    assert order == ["splash", "dialog"]
+
+
+def test_a_local_service_that_never_answers_takes_the_splash_down_too(
+    fake_guard: FakeGuard, fake_dialog: FakeDialog, monkeypatch: Any
+) -> None:
+    """The other shape of the same failure, on the path where the loopback
+    server was built but never became healthy."""
+    order: list[str] = []
+    monkeypatch.setattr(splash, "close", lambda: order.append("splash"))
+    monkeypatch.setattr(fake_dialog, "show_error", lambda message: order.append("dialog"))
+    unhealthy = FakeServer()
+    unhealthy.healthy = False
+
+    start_runtime(
+        RuntimeConfig(environment="local", server_url="http://127.0.0.1:8000"),
+        server_factory=lambda _config: unhealthy,
+        window_factory=lambda _title, _url: FakeWindow(),
+        tray_factory=lambda _runtime: FakeTray(),
+        dialog=fake_dialog,
+        webview_start=lambda: None,
+        ui_settings=InMemoryUiSettings("pt-BR"),
+    )
+
+    assert order == ["splash", "dialog"]
+
+
 def test_a_later_launch_brings_the_running_window_forward(
     fake_guard: FakeGuard, fake_window: FakeWindow, fake_server: FakeServer, fake_dialog: FakeDialog
 ) -> None:
@@ -1319,6 +1375,29 @@ def test_the_native_window_is_created_fixed_at_the_compact_size(monkeypatch: Any
 
     assert (received["width"], received["height"]) == COMPACT_WINDOW_SIZE
     assert received["resizable"] is False
+
+
+def test_the_loaded_page_is_what_takes_the_splash_screen_down(monkeypatch: Any) -> None:
+    """The splash is the only thing on screen for the whole of startup, so the
+    moment it stops covering the window is the moment the window has something
+    to show -- `loaded`, when the shell's DOM is ready.
+
+    Not `shown`: the form is shown while WebView2 is still painting the blank
+    white rectangle it puts up before its first document, and closing there
+    would replace the logo with that rectangle for the rest of the wait.
+    """
+    closes: list[bool] = []
+    monkeypatch.setattr(splash, "close", lambda: closes.append(True))
+    native = FakeSizedNativeWindow()
+    webview = types.ModuleType("webview")
+    webview.create_window = lambda title, url, **keywords: native
+    monkeypatch.setitem(sys.modules, "webview", webview)
+
+    _create_pywebview_window("Broccoli Desktop", "http://127.0.0.1:8765/?k=token")
+
+    assert closes == []
+    native.events.loaded.fire()
+    assert closes == [True]
 
 
 def test_setting_the_window_mode_expands_and_compacts_the_window() -> None:

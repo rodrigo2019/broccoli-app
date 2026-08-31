@@ -17,6 +17,7 @@ from broccoli_desktop.protocol import decode_audio_frame
 from broccoli_desktop.remote import (
     CreditWarning,
     RemoteFailure,
+    RemoteNotResumableError,
     RemoteProtocolError,
     RemoteRequestError,
     SessionEnded,
@@ -1183,7 +1184,150 @@ async def test_stop_closes_capture_before_ending_the_remote_session(
 
     assert fake_capture.closed_sources == {"mic-1", "system-1"}
     assert fake_remote.streams[-1].controls == [{"type": "session.end"}]
-    assert controller.events.snapshot()[-1] == UiEvent(type="status", state=ConnectionState.STOPPED)
+    last = controller.events.snapshot()[-1]
+    assert last.type == "status"
+    assert last.state is ConnectionState.STOPPED
+
+
+# The history row the window holds is only ever written from these events, so a
+# run that ends without republishing its summary leaves the row claiming to be
+# live for the rest of the window's life -- and the delete action, whose only
+# predicate is is_live, stays disabled on a session that has long since stopped.
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_session_publishes_it_as_no_longer_live(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await controller.stop()
+
+    last = controller.events.snapshot()[-1]
+    assert last.state is ConnectionState.STOPPED
+    assert last.session is not None
+    assert last.session.is_live is False
+    assert last.session.status == "ended"
+    # Identity is retained on purpose -- it is what makes resume-after-stop work.
+    assert controller.session is not None
+    assert controller.session.uuid_code == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_a_remote_session_end_publishes_the_row_as_no_longer_live(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await fake_remote.emit_ended()
+    await settle()
+
+    last = controller.events.snapshot()[-1]
+    assert last.state is ConnectionState.STOPPED
+    assert last.session is not None
+    assert last.session.is_live is False
+
+
+@pytest.mark.asyncio
+async def test_a_remote_failure_publishes_the_row_as_no_longer_live(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    await fake_remote.emit_credit_denied()
+    await settle()
+
+    last = controller.events.snapshot()[-1]
+    assert last.state is ConnectionState.FAILED
+    assert last.session is not None
+    assert last.session.is_live is False
+    assert last.session.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_losing_a_device_publishes_the_row_as_no_longer_live(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+
+    fake_capture.handles["system-1"].lose_device()
+    await settle()
+
+    last = controller.events.snapshot()[-1]
+    assert last.state is ConnectionState.DEVICE_SELECTION_REQUIRED
+    assert last.session is not None
+    assert last.session.is_live is False
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_is_still_resumable_in_place(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """Publishing the row as not-live must not cost the controller the identity
+    the resume path reads back out of it."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await controller.stop()
+
+    resumed = await controller.resume("session-1", CaptureChoices("mic-1", "system-1"))
+
+    assert resumed.uuid_code == "session-1"
+    assert resumed.is_live is True
+    assert fake_remote.stream_requests == [(None, "Speakers"), ("session-1", "Speakers")]
+
+
+@pytest.mark.asyncio
+async def test_a_remote_that_resumes_a_different_session_is_reported_as_not_resumable(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """An older backend answers a refused resume by opening a different session
+    rather than saying no. Raised as a plain protocol error, that reached the
+    user as "the service is unavailable" -- so a meeting the backend would never
+    continue was indistinguishable from an outage, on every single play."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await controller.stop()
+    fake_remote.resume_uuid_override = "a-different-session"
+
+    with pytest.raises(RemoteNotResumableError):
+        await controller.resume("session-1", CaptureChoices("mic-1", "system-1"))
+
+    assert controller.state is ConnectionState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_metadata_from_the_remote_does_not_republish_a_stopped_row_as_live(
+    fake_remote: FakeSessionRemote, fake_capture: FakeCaptureBackend
+) -> None:
+    """apply_session_metadata answers a rename from the local summary while the
+    controller still owns the session. Once the run has ended, that summary is
+    no longer authoritative and returning it re-poisons the row with is_live."""
+    controller = DesktopSessionController(fake_remote, fake_capture)
+    started = await controller.start_new(CaptureChoices("mic-1", "system-1"), title="Daily")
+    await controller.stop()
+
+    renamed = controller.apply_session_metadata(
+        SessionSummary(
+            uuid_code=started.uuid_code,
+            title="Renamed",
+            status="ended",
+            started_at=started.started_at,
+            ended_at=None,
+            last_activity_at=started.last_activity_at,
+            device_label=started.device_label,
+            segment_count=started.segment_count,
+            is_live=False,
+        )
+    )
+
+    assert renamed.is_live is False
+    assert controller.events.snapshot()[-1].session is None or (
+        controller.events.snapshot()[-1].session.is_live is False
+    )
 
 
 # Three thread hops have to be in flight at once here: the parked capture

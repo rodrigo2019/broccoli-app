@@ -482,11 +482,13 @@
      each can hold a full one-line row, and reflow to one per row the moment
      they cannot -- which tracks the space actually left next to the sidebar
      and the transport instead of the window width alone. The floor is the
-     narrowest a card stays legible with the language column at its own
-     floor and the longest channel name hyphenating (see __name). */
+     card's fixed parts (mute square, gaps, padding) plus the widest locale's
+     name at its natural width ("Áudio do sistema", 98px measured) plus the
+     language column's floor -- so a side-by-side card never has to squeeze
+     the name (__titles refuses to shrink) or crush the select. */
   .capture-dock__sources {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(17.5rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(19.5rem, 1fr));
     gap: 0.6rem;
     min-width: 0;
   }
@@ -547,9 +549,12 @@
     background: color-mix(in oklch, var(--color-error) 24%, transparent);
   }
 
+  /* Grows into slack but never shrinks: squeezing came out of the name as a
+     mid-word wrap. The sources grid's column floor is sized so this always
+     fits (see __sources); a pathological future name would overflow the card
+     instead, which the visual gate's overlap check catches. */
   .capture-channel__titles {
-    flex: 1 1 auto;
-    min-width: 0;
+    flex: 1 0 auto;
   }
 
   /* Deliberately small, so every locale's name holds one line beside the

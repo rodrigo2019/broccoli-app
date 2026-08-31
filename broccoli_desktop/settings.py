@@ -7,10 +7,12 @@ import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from broccoli_desktop.i18n import SUPPORTED_UI_LOCALES
-from broccoli_desktop.session import CaptureChoices
+
+if TYPE_CHECKING:
+    from broccoli_desktop.session import CaptureChoices
 
 _SETTINGS_DIRECTORY = "Broccoli Desktop"
 _SETTINGS_FILENAME = "device-selections.json"
@@ -147,6 +149,14 @@ class LocalDeviceSettings:
         ):
             self.clear()
             return None
+        # Imported here rather than at the top of the module. Reaching
+        # CaptureChoices pulls in session, and through it audio and capture --
+        # numpy, soxr and PortAudio, about a second and a half of import before
+        # anything is on screen. The splash reads the stored interface language
+        # out of this module before that cost has been paid, precisely so it
+        # can narrate it, and every other caller is already past it.
+        from broccoli_desktop.session import CaptureChoices
+
         return CaptureChoices(microphone_id=microphone_id, system_device_id=system_device_id)
 
     def save(self, selection: CaptureChoices) -> None:

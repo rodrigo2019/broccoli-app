@@ -749,6 +749,17 @@ try {
     if ($midStack -gt 2) {
         throw "The channel cards stack at 820px wide (top offset ${midStack}px) instead of sitting side by side."
     }
+    # One line each, even for the widest locale name ("Áudio do sistema"):
+    # the grid's column floor and the no-shrink titles are sized so a
+    # side-by-side card never wraps a channel name.
+    $nameHeights = Invoke-Browser -BrowserArguments @(
+        "eval",
+        "['microphoneChannel', 'systemChannel'].map((id) => Math.round(document.querySelector('#' + id + ' .capture-channel__name').getBoundingClientRect().height))"
+    ) | ConvertFrom-Json
+    $nameHeights = @($nameHeights)
+    if ([int]$nameHeights[0] -gt 20 -or [int]$nameHeights[1] -gt 20) {
+        throw "A channel name wraps at 820px wide (name heights: $($nameHeights -join 'px, ')px)."
+    }
     Invoke-Browser -BrowserArguments @("screenshot", "--full", (Join-Path $artifactDirectory "capture-mid.png"))
     Invoke-Browser -BrowserArguments @("set", "viewport", "1440", "900")
 

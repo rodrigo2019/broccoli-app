@@ -56,6 +56,7 @@ from broccoli_desktop.remote import (
     RemoteDurationError,
     RemoteError,
     RemoteNotFoundError,
+    RemoteNotResumableError,
     RemoteProtocolError,
     RemoteRequestError,
     RemoteUnauthorizedError,
@@ -816,6 +817,20 @@ def create_app(services: Services) -> FastAPI:
     async def remote_request_handler(_request: Request, _error: RemoteRequestError) -> JSONResponse:
         return _remote_unavailable()
 
+    # Registered alongside the protocol handler it derives from. Starlette
+    # resolves handlers most-derived-first, so this wins for the narrower type
+    # regardless of registration order -- and the distinction is the point: a
+    # session the backend will not continue is not an outage, and telling the
+    # user it was one left them pressing play on a session that could never work.
+    @app.exception_handler(RemoteNotResumableError)
+    async def remote_not_resumable_handler(
+        _request: Request, _error: RemoteNotResumableError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=410,
+            content={"detail": "This session can no longer be continued."},
+        )
+
     @app.exception_handler(RemoteProtocolError)
     async def remote_protocol_handler(
         _request: Request, _error: RemoteProtocolError
@@ -1115,6 +1130,15 @@ def create_app(services: Services) -> FastAPI:
             session = await controller.resume(
                 uuid_code, choices, title=existing.title, languages=languages
             )
+        except RemoteNotFoundError:
+            # Narrowed on this route only. Elsewhere a missing session is a plain
+            # 404; here it means the meeting the user is trying to continue is
+            # gone for good, which is a different thing to tell them than "not
+            # found" -- and the resume is the one place they can act on it.
+            logging.getLogger(__name__).warning(
+                "[api] Session %s is no longer available to resume", uuid_code
+            )
+            raise ApiError(410, "This session can no longer be continued.") from None
         except RuntimeError:
             raise ApiError(409, "The current session cannot be changed.") from None
         except DeviceUnavailableError:

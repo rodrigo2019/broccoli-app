@@ -46,7 +46,7 @@ from broccoli_desktop.models import (
     TranscriptSegment,
     UiEvent,
 )
-from broccoli_desktop.remote import RemoteProtocolError
+from broccoli_desktop.remote import RemoteProtocolError, RemoteRequestError
 from broccoli_desktop.session import CaptureChoices, DesktopSessionController
 from broccoli_desktop.settings import DEFAULT_SCRIPT_URL
 from tests.fakes import (
@@ -527,6 +527,120 @@ def test_session_actions_proxy_metadata_updates_and_delete(
     assert pinned.json()["pinned_at"] is not None
     assert deleted.status_code == 204
     assert "session-1" not in fake_remote_factory.remote.sessions
+
+
+def test_a_stopped_session_is_no_longer_live_in_the_bootstrap(client: TestClient) -> None:
+    """A reconnecting window rebuilds its history row from this payload, and the
+    delete action's only predicate is is_live. While the bootstrap kept serving
+    the summary the run was opened with, a stopped session stayed undeletable
+    for the rest of the window's life."""
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+
+    session = bootstrap_payload(client)["session"]
+
+    assert session is not None
+    assert session["is_live"] is False
+    # Identity is retained on purpose -- the resume route reads it back.
+    assert session["uuid_code"] == "session-1"
+
+
+def test_a_stopped_session_can_be_deleted(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+
+    deleted = client.delete("/api/sessions/session-1")
+
+    assert deleted.status_code == 204
+    assert "session-1" not in fake_remote_factory.remote.sessions
+
+
+def test_renaming_a_stopped_session_does_not_restore_it_as_live(client: TestClient) -> None:
+    """apply_session_metadata answers a rename from the controller's own retained
+    summary. Once the run has ended that summary is stale, and writing it back
+    put is_live on the row again -- undoing the stop for every later reader."""
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+
+    renamed = client.patch("/api/sessions/session-1", json={"title": "Renamed"})
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Renamed"
+    # The response body is the remote's own answer and is asserted elsewhere.
+    # What this pins is that the rename left no live summary behind on the
+    # controller for the next reader -- the bootstrap is where that showed up.
+    assert bootstrap_payload(client)["session"]["is_live"] is False
+
+
+def test_a_backend_that_resumes_a_different_session_is_not_reported_as_an_outage(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    """A refused resume used to arrive as a brand-new uuid, which the controller
+    could only report as a protocol error -- and that collapsed into the same 503
+    the client shows when the service is down. The user was told to wait for a
+    backend that was already healthy, on a session that could never be resumed."""
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+    fake_remote_factory.remote.resume_uuid_override = "a-different-session"
+
+    refused = client.post(
+        "/api/sessions/session-1/resume",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert refused.status_code == 410
+    assert refused.status_code != 503
+    assert refused.json()["detail"] == "This session can no longer be continued."
+
+
+def test_resuming_a_session_the_backend_no_longer_has_is_not_reported_as_an_outage(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+) -> None:
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+    fake_remote_factory.remote.missing_sessions.add("session-1")
+
+    refused = client.post(
+        "/api/sessions/session-1/resume",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert refused.status_code == 410
+    assert refused.json()["detail"] == "This session can no longer be continued."
+
+
+def test_a_transient_outage_still_answers_a_resume_as_unavailable(
+    client: TestClient,
+    fake_remote_factory: FakeRemoteFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the distinction: a backend that is genuinely down must
+    keep saying so, or the fix above would simply move the confusion."""
+    login(client)
+    start_capture(client)
+    assert client.post("/api/sessions/stop").status_code == 204
+
+    async def unreachable(_uuid_code: str) -> SessionSummary:
+        raise RemoteRequestError
+
+    monkeypatch.setattr(fake_remote_factory.remote, "get_session", unreachable)
+
+    unavailable = client.post(
+        "/api/sessions/session-1/resume",
+        json={"microphone_id": "mic-1", "system_device_id": "system-1"},
+    )
+
+    assert unavailable.status_code == 503
 
 
 def test_resume_route_reuses_the_current_session_after_a_client_stop(

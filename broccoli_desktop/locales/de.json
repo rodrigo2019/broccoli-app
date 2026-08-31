@@ -27,7 +27,8 @@
     "The selected transcription language is unsupported.": "Die gewählte Sprache steht für die Mitschrift nicht zur Verfügung.",
     "The session changes are invalid.": "Die Änderungen an der Besprechung sind ungültig.",
     "The session reached its maximum duration.": "Die Besprechung hat die zulässige Höchstdauer erreicht.",
-    "The session title is invalid.": "Der Titel der Besprechung ist ungültig."
+    "The session title is invalid.": "Der Titel der Besprechung ist ungültig.",
+    "This session can no longer be continued.": "Diese Besprechung kann nicht mehr fortgesetzt werden. Starten Sie eine neue Besprechung, um weiter aufzuzeichnen."
   },
   "ui": {
     "api.fallback": "Die Aktion konnte nicht abgeschlossen werden. Bitte erneut versuchen.",
@@ -94,6 +95,12 @@
     "native.error.serviceUnavailable": "Broccoli Desktop konnte den lokalen Dienst nicht starten.",
     "native.error.windowUnavailable": "Broccoli Desktop konnte das Fenster nicht öffnen.",
     "native.quit.confirm": "Es läuft eine Aufnahme. Möchten Sie sie beenden und Broccoli Desktop schließen?",
+    "native.splash.almost": "Fast geschafft…",
+    "native.splash.audio": "Audio wird vorbereitet…",
+    "native.splash.instance": "Es wird geprüft, ob bereits geöffnet…",
+    "native.splash.loading": "Komponenten werden geladen…",
+    "native.splash.service": "Lokaler Dienst wird gestartet…",
+    "native.splash.window": "Fenster wird geöffnet…",
     "notify.audio.dropping": "Ton wird verworfen: die Verbindung kommt nicht mit.",
     "notify.credits.low": "Das Guthaben dieser Sitzung geht zur Neige.",
     "notify.reconnect.attemptFailed": "Der Verbindungsversuch ist fehlgeschlagen.",

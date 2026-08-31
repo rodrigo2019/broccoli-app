@@ -4,6 +4,7 @@ import sys
 from collections.abc import Sequence
 from importlib import import_module
 
+from broccoli_desktop import splash
 from broccoli_desktop.config import parse_runtime_config
 from broccoli_desktop.console import ensure_standard_streams
 
@@ -16,6 +17,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     # setup -- reached below, through the runtime -- calls isatty() on one of
     # them while the window is still opening.
     ensure_standard_streams()
+    # The first thing on screen, and the reason it is here rather than inside
+    # the runtime: the import below is the single longest step in a cold start
+    # -- pythonnet, PortAudio, numpy, PIL and uvicorn, all of it before any
+    # window exists -- so the splash has to be told what is happening while it
+    # is still the only thing the user can see. broccoli_desktop.splash reaches
+    # the stored language through i18n and settings alone, neither of which is
+    # on that heavy path.
+    splash.step(splash.LOADING)
     config = parse_runtime_config(sys.argv[1:] if argv is None else argv)
     try:
         runtime = import_module("broccoli_desktop.runtime")

@@ -34,17 +34,28 @@ Run validation:
 .\scripts\check.ps1
 ```
 
-## Application icon
+## Application icon and startup splash
 
-The window, the notification area, the executable, and the installer all read
-`broccoli_desktop\static\images\broccoli_icon.ico`, which is committed. It is
-generated from `broccoli_icon.svg` by a script that rasterizes the logo with an
-installed Chrome or Edge; rerun it after changing the logo and commit the
-result:
+Two images are generated from `broccoli_icon.svg` and committed, because
+nothing at build or run time can produce them: the executable, the installer,
+the window and the notification area all need a real `.ico`, and PyInstaller
+reads the splash `.png` before the interpreter exists. Both are rasterized by
+a script that renders the logo with an installed Chrome or Edge. Rerun both
+after changing the logo, and commit the results:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_icon.py
+.\.venv\Scripts\python.exe scripts\build_splash.py
 ```
+
+The splash is what the user sees while the packaged build loads: the logo,
+floating on a transparent background, with a counted status line that walks
+from `1/6` to `6/6` in the stored interface language and disappears the moment
+the window has something to show. It covers a wait nothing else can -- the
+frozen imports, PortAudio, the loopback service, and WebView2 bootstrapping its
+browser process all happen before the window is able to render anything at all.
+`broccoli_desktop\splash.py` drives it, and is a silent no-op outside a
+packaged build, so running from source shows nothing.
 
 ## Building a copy to hand to someone
 

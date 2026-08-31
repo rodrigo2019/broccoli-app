@@ -27,7 +27,8 @@
     "The selected transcription language is unsupported.": "O idioma selecionado não está disponível para transcrição.",
     "The session changes are invalid.": "As alterações da reunião não são válidas.",
     "The session reached its maximum duration.": "A reunião atingiu a duração máxima permitida.",
-    "The session title is invalid.": "O título da reunião não é válido."
+    "The session title is invalid.": "O título da reunião não é válido.",
+    "This session can no longer be continued.": "Não é mais possível continuar esta reunião. Crie uma nova reunião para seguir gravando."
   },
   "ui": {
     "api.fallback": "Não foi possível concluir a ação. Tente novamente.",
@@ -94,6 +95,12 @@
     "native.error.serviceUnavailable": "O Broccoli Desktop não conseguiu iniciar o serviço local.",
     "native.error.windowUnavailable": "O Broccoli Desktop não conseguiu abrir a janela.",
     "native.quit.confirm": "Há uma captura em andamento. Deseja pará-la e sair do Broccoli Desktop?",
+    "native.splash.almost": "Quase lá…",
+    "native.splash.audio": "Preparando o áudio…",
+    "native.splash.instance": "Verificando se já está aberto…",
+    "native.splash.loading": "Carregando os componentes…",
+    "native.splash.service": "Iniciando o serviço local…",
+    "native.splash.window": "Abrindo a janela…",
     "notify.audio.dropping": "Áudio está sendo descartado: a conexão não está acompanhando.",
     "notify.credits.low": "Os créditos desta sessão estão acabando.",
     "notify.reconnect.attemptFailed": "A tentativa de reconexão falhou.",

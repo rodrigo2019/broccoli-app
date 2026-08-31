@@ -37,6 +37,7 @@ from broccoli_desktop.remote import (
     RemoteDurationError,
     RemoteEvent,
     RemoteFailure,
+    RemoteNotResumableError,
     RemoteProtocolError,
     RemoteStream,
     RemoteUnauthorizedError,
@@ -377,7 +378,7 @@ class DesktopSessionController:
             logger.info("[session] Audio diagnostics at stop: %s", self.audio_diagnostics)
             self._reset_audio_queue()
             self._stopping = False
-            self._set_state(ConnectionState.STOPPED)
+            self._set_state(ConnectionState.STOPPED, session=self._finish_session())
 
     def stop_local_capture(self) -> None:
         """Stop capture synchronously while controller finalization remains pending.
@@ -455,7 +456,15 @@ class DesktopSessionController:
 
     def apply_session_metadata(self, session: SessionSummary) -> SessionSummary:
         """Synchronize metadata returned by the remote API without replacing live state."""
-        if self._session is None or self._session_uuid != session.uuid_code:
+        # The local summary is authoritative only while this controller owns a
+        # live run. Once the run has finished, the remote's copy is the current
+        # one, and answering from here would put is_live back on a row the user
+        # has already stopped -- which is the one field the delete action reads.
+        if (
+            self._session is None
+            or self._session_uuid != session.uuid_code
+            or not self._session.is_live
+        ):
             return session
         summary = replace(
             self._session,
@@ -465,6 +474,30 @@ class DesktopSessionController:
         )
         self._session = summary
         self.events.publish(UiEvent(type="session", session=summary))
+        return summary
+
+    def _finish_session(self, status: str = "ended") -> SessionSummary | None:
+        """Retire the retained summary so the history row stops claiming to be live.
+
+        Every terminal transition used to publish its state with no session
+        attached, and the window only rewrites a row from an event that carries
+        one. The row therefore kept the ``is_live=True`` it was opened with --
+        and ``is_live`` is the sole predicate behind the delete action, so a
+        stopped session could never be deleted without restarting the app.
+
+        Identity is deliberately retained: ``_open`` reads ``_session`` and
+        ``_session_uuid`` back to recognise a resume of the same meeting, so
+        clearing them here would trade this bug for a broken resume.
+
+        Idempotent, because the transitions overlap -- ``stop()`` on an
+        already-failed controller must not relabel it as a clean end.
+        """
+        summary = self._session
+        if summary is None or not summary.is_live:
+            return summary
+        summary = replace(summary, status=status, is_live=False)
+        self._session = summary
+        logger.info("[session] Session %s finished as %s", summary.uuid_code, status)
         return summary
 
     def enqueue_audio_frames(self, frames: Iterable[AudioFrame]) -> None:
@@ -575,7 +608,18 @@ class DesktopSessionController:
                 raise RemoteProtocolError("Remote stream did not start a session.")
             remote_period_started = True
             if resume_code is not None and started.uuid_code != resume_code:
-                raise RemoteProtocolError("Remote resumed an unexpected session.")
+                # An older backend answers a refused resume by opening a
+                # different session instead of saying no. Reported as a plain
+                # protocol error, that reached the user as "the service is
+                # unavailable" -- so a meeting the backend would never continue
+                # was indistinguishable from an outage, every single play.
+                logger.warning(
+                    "[session] Remote resumed %s but %s was requested; "
+                    "the session cannot be continued",
+                    started.uuid_code,
+                    resume_code,
+                )
+                raise RemoteNotResumableError("Remote resumed an unexpected session.")
             # The one place the server's cap is on record: a meeting that dies
             # at a suspicious minute gets checked against this line instead of
             # against guesses.
@@ -655,19 +699,29 @@ class DesktopSessionController:
             await self._close_open_stream(stream, remote_period_started)
             await self._stop_capture_off_loop()
             self._clear_buffered_frames()
-            self._set_state(ConnectionState.DEVICE_SELECTION_REQUIRED)
+            self._set_state(
+                ConnectionState.DEVICE_SELECTION_REQUIRED, session=self._finish_session()
+            )
             raise
         except RemoteUnauthorizedError:
             await self._close_open_stream(stream, remote_period_started)
             await self._stop_capture_off_loop()
             self._clear_buffered_frames()
-            self._set_state(ConnectionState.FAILED, message="Authentication failed.")
+            self._set_state(
+                ConnectionState.FAILED,
+                message="Authentication failed.",
+                session=self._finish_session("failed"),
+            )
             raise
         except Exception:
             await self._close_open_stream(stream, remote_period_started)
             await self._stop_capture_off_loop()
             self._clear_buffered_frames()
-            self._set_state(ConnectionState.FAILED, message="Unable to start the session.")
+            self._set_state(
+                ConnectionState.FAILED,
+                message="Unable to start the session.",
+                session=self._finish_session("failed"),
+            )
             raise
         if self._capture is not capture:
             # The second of two concurrent-stop checks in this method -- see
@@ -944,7 +998,11 @@ class DesktopSessionController:
                     await self._stop_capture_off_loop()
                     self._clear_buffered_frames()
                     self._notify_authentication_failure()
-                    self._set_state(ConnectionState.FAILED, message="Authentication failed.")
+                    self._set_state(
+                        ConnectionState.FAILED,
+                        message="Authentication failed.",
+                        session=self._finish_session("failed"),
+                    )
                     return
                 except RemoteCreditError:
                     await self._discard_recovery_stream(stream or self._recovery_stream)
@@ -965,7 +1023,11 @@ class DesktopSessionController:
             await self._discard_recovery_stream(self._recovery_stream)
             await self._stop_capture_off_loop()
             self._clear_buffered_frames()
-            self._set_state(ConnectionState.FAILED, message="Connection could not be restored.")
+            self._set_state(
+                ConnectionState.FAILED,
+                message="Connection could not be restored.",
+                session=self._finish_session("failed"),
+            )
         finally:
             self._recovery_active = False
 
@@ -986,7 +1048,7 @@ class DesktopSessionController:
         self._clear_buffered_frames()
         if stream is not None:
             await self._close_stream(stream)
-        self._set_state(ConnectionState.STOPPED)
+        self._set_state(ConnectionState.STOPPED, session=self._finish_session())
 
     async def _fail_from_remote(
         self, message: str = "The remote session could not continue."
@@ -1001,7 +1063,9 @@ class DesktopSessionController:
         self._clear_buffered_frames()
         if stream is not None:
             await self._close_stream(stream)
-        self._set_state(ConnectionState.FAILED, message=message)
+        self._set_state(
+            ConnectionState.FAILED, message=message, session=self._finish_session("failed")
+        )
 
     def _on_pcm(self, channel: Literal["mic", "system"], pcm: bytes) -> None:
         pipeline = self._pipeline
@@ -1309,6 +1373,7 @@ class DesktopSessionController:
         self._set_state(
             ConnectionState.DEVICE_SELECTION_REQUIRED,
             message="Select a replacement capture device.",
+            session=self._finish_session(),
         )
         reader = self._reader_task
         if reader is not None and reader is not asyncio.current_task():

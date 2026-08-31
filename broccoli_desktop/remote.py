@@ -87,6 +87,22 @@ class RemoteProtocolError(RemoteError):
     """The remote contract returned an unsupported or invalid event."""
 
 
+class RemoteNotResumableError(RemoteProtocolError):
+    """The remote will not continue the session this run asked to resume.
+
+    Its own type, rather than a bare protocol error, because the two mean
+    opposite things to the person holding the app: a protocol error is "the
+    backend is unreachable, try again", while this is "this meeting is over,
+    start a new one". Both used to surface as the former, so a session the
+    backend would never resume looked exactly like a broken deployment -- and
+    kept looking like one no matter how many times the user pressed play.
+
+    Subclasses RemoteProtocolError so existing handlers -- notably the logout
+    path, which must never fail over a session that cannot be resumed -- keep
+    catching it.
+    """
+
+
 @dataclass(frozen=True)
 class SessionStarted:
     uuid_code: str
@@ -623,6 +639,8 @@ def _raise_safe_remote_error(error: Exception) -> None:
         raise RemoteCreditError from None
     if code == 4403:
         raise RemoteDurationError from None
+    if code == 4406:
+        raise RemoteNotResumableError("The remote refused to continue this session.") from None
     raise RemoteRequestError from None
 
 

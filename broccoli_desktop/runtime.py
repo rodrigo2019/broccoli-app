@@ -17,6 +17,7 @@ from urllib.request import urlopen
 import pyaudiowpatch
 import uvicorn
 
+from broccoli_desktop import splash
 from broccoli_desktop.api import LOOPBACK_HOST, Services, create_app, create_uvicorn_config
 from broccoli_desktop.branding import APPLICATION_ICON, apply_taskbar_identity
 from broccoli_desktop.capture import PyAudioCaptureBackend
@@ -559,12 +560,20 @@ def start_runtime(
     locale_settings = ui_settings or LocalUiSettings()
     translator = Translator(locale_settings)
     runtime_dialog = dialog or WindowsDialog(translator)
+    splash.step(splash.INSTANCE)
     # Before the loopback port, the window, and the tray, so a launch that finds
     # the lock taken costs none of them: it asks the copy holding it to come
     # forward and leaves. Saying so out loud is the fallback, for a launch that
     # cannot reach that copy either.
     guard = (guard_factory or _create_instance_guard)(config)
     if not guard.acquire():
+        # Before the dialog, not after: this launch is over, and a splash still
+        # counting up next to an "already running" message is the shape of an
+        # application that has hung -- and MessageBoxW blocks until it is
+        # clicked, so closing afterwards is the same as never closing at all.
+        # Every early return below does the same, and close() is idempotent so
+        # none of them has to know whether another already got there.
+        splash.close()
         if not guard.signal_existing():
             runtime_dialog.show_error(translator.t("native.error.alreadyRunning"))
         guard.release()
@@ -603,18 +612,26 @@ def _start_the_only_runtime(
     create_server = server_factory or (
         lambda runtime_config: _create_production_server(runtime_config, ui_settings=ui_settings)
     )
+    # PyAudio initializes PortAudio synchronously inside the factory, which
+    # enumerates every WASAPI endpoint on the machine before it returns.
+    splash.step(splash.AUDIO)
     try:
         server = create_server(config)
     except RuntimeError:
+        splash.close()
         dialog.show_error(translator.t("native.error.serviceUnavailable"))
         return None
+    # start() blocks in _wait_until_healthy for up to STARTUP_TIMEOUT_SECONDS.
+    splash.step(splash.SERVICE)
     if not server.start():
         server.shutdown()
+        splash.close()
         dialog.show_error(translator.t("native.error.serviceUnavailable"))
         return None
 
     runtime: DesktopRuntime | None = None
     try:
+        splash.step(splash.WINDOW)
         # Before the window, never after: the taskbar button inherits the
         # process identity that exists at the moment the shell creates it.
         apply_taskbar_identity()
@@ -637,11 +654,17 @@ def _start_the_only_runtime(
             server.shutdown()
         else:
             runtime.shutdown()
+        splash.close()
         dialog.show_error(translator.t("native.error.windowUnavailable"))
         return None
 
     previous_interrupt_handler = _install_interrupt_handler(runtime)
     try:
+        # The last step, and usually the longest: WebView2 spawns its browser
+        # process here. The splash is taken down from the window's own `loaded`
+        # event -- see _create_pywebview_window -- because that is the first
+        # moment there is something behind it worth showing.
+        splash.step(splash.ALMOST)
         if webview_start is None:
             _start_pywebview(runtime)
         else:
@@ -651,6 +674,10 @@ def _start_the_only_runtime(
         # the foreground process cannot remain trapped in the native event loop.
         pass
     finally:
+        # The window has closed, so whatever happened to the `loaded` event --
+        # an injected webview_start that never fires it, a page that failed to
+        # load -- the splash has no reason left to exist.
+        splash.close()
         _restore_interrupt_handler(previous_interrupt_handler)
         try:
             runtime.shutdown()
@@ -852,6 +879,11 @@ def _create_pywebview_window(title: str, url: str) -> PyWebViewWindow:
     )
     # Only once the form exists; the instance registry is empty until then.
     native.events.shown += lambda: _enable_native_maximize(native)
+    # `loaded`, not `shown`: the form is shown while WebView2 is still painting
+    # the blank white rectangle it puts up before its first document, and that
+    # rectangle is exactly what the splash is there to cover. `loaded` fires
+    # once the shell's DOM is ready, which is the first frame worth revealing.
+    native.events.loaded += lambda: splash.close()
     return PyWebViewWindow(native)
 
 

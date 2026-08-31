@@ -22,6 +22,7 @@ from broccoli_desktop.remote import (
     SEGMENT_PAGE_SIZE,
     RemoteEvent,
     RemoteFailure,
+    RemoteNotFoundError,
     RemoteProtocolError,
     RemoteUnauthorizedError,
     SessionEnded,
@@ -202,6 +203,13 @@ class FakeSessionRemote:
     fail_close_stream_indexes: set[int] = field(default_factory=set)
     unauthorized: bool = False
     verify_failure: Exception | None = None
+    #: Answer the next handshake with this uuid instead of the resume code --
+    #: the shape of a backend that refused the resume and opened a different
+    #: session rather than saying so. Without this the fake always echoes the
+    #: code back, so the client's identity check was never exercised at all.
+    resume_uuid_override: str | None = None
+    #: Sessions this credential cannot see, as the real API 404s for them.
+    missing_sessions: set[str] = field(default_factory=set)
 
     async def verify_token(self) -> None:
         # Injected separately from `unauthorized` on purpose: an unreachable
@@ -260,6 +268,8 @@ class FakeSessionRemote:
 
     async def get_session(self, uuid_code: str) -> SessionSummary:
         self._assert_authorized()
+        if uuid_code in self.missing_sessions or uuid_code not in self.sessions:
+            raise RemoteNotFoundError
         return self.sessions[uuid_code]
 
     async def list_segments(self, uuid_code: str, cursor: str | None) -> SegmentPage:
@@ -352,7 +362,7 @@ class FakeSessionRemote:
         title: str | None = None,
     ) -> FakeLiveRemoteStream:
         self._assert_authorized()
-        uuid_code = resume_code or "session-1"
+        uuid_code = self.resume_uuid_override or resume_code or "session-1"
         if uuid_code not in self.sessions:
             self.sessions[uuid_code] = SessionSummary(
                 uuid_code=uuid_code,
